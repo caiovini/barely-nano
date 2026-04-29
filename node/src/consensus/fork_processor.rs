@@ -1,0 +1,97 @@
+use alloc::sync::Arc;
+use spin::{ Mutex, RwLock};
+
+use tracing::debug;
+
+use rsnano_core::{Amount, Block, BlockHash, QualifiedRoot};
+use rsnano_ledger::{BlockError, RepWeightCache};
+use rsnano_stats::Stats;
+
+use super::{ActiveElectionsContainer, ForkCache, VoteCache};
+use crate::{
+    block_processing::{LedgerEvent, ProcessedResult},
+    ledger_event_processor::LedgerEventProcessorPlugin,
+};
+
+pub(crate) struct ForkProcessor {
+    pub(crate) rep_weights: Arc<RepWeightCache>,
+    pub(crate) fork_cache: Arc<RwLock<ForkCache>>,
+    pub(crate) active_elections: Arc<RwLock<ActiveElectionsContainer>>,
+    pub(crate) vote_cache: Arc<Mutex<VoteCache>>,
+}
+
+impl ForkProcessor {
+    #[allow(dead_code)]
+    pub fn new_test_instance() -> Self {
+        Self {
+            rep_weights: Arc::new(RepWeightCache::new()),
+            fork_cache: Arc::new(RwLock::new(ForkCache::new())),
+            active_elections: Arc::new(RwLock::new(ActiveElectionsContainer::default())),
+            vote_cache: Arc::new(Mutex::new(VoteCache::new(
+                Default::default(),
+                Arc::new(Stats::default()),
+            ))),
+        }
+    }
+
+    pub fn handle_forks(&self, batch: &[ProcessedResult]) {
+        for result in batch {
+            if result.status == Err(BlockError::Fork) {
+                self.handle_fork(&result.block);
+            }
+        }
+    }
+
+    pub fn try_add_cached_forks(&self, root: &QualifiedRoot) {
+        let fork_cache = self.fork_cache.read().unwrap();
+        for fork in fork_cache.get_forks(&root) {
+            self.handle_fork(fork);
+        }
+    }
+
+    fn handle_fork(&self, fork: &Block) {
+        let fork_tally = self.get_cached_tally(&fork.hash());
+
+        let added = self
+            .active_elections
+            .write()
+            .unwrap()
+            .try_add_fork(fork, fork_tally);
+
+        if added {
+            debug!("Block was added to an existing election: {}", fork.hash());
+        }
+    }
+
+    fn get_cached_tally(&self, hash: &BlockHash) -> Amount {
+        let votes = self.vote_cache.lock().unwrap().find(hash);
+        let mut tally = Amount::zero();
+        let weights = self.rep_weights.read();
+        for vote in votes {
+            tally += weights.weight(&vote.voter);
+        }
+        tally
+    }
+}
+
+pub(crate) struct ForkProcessorPlugin {
+    fork_processor: Arc<ForkProcessor>,
+}
+
+impl ForkProcessorPlugin {
+    pub fn new(fork_processor: Arc<ForkProcessor>) -> Self {
+        Self { fork_processor }
+    }
+}
+
+impl LedgerEventProcessorPlugin for ForkProcessorPlugin {
+    fn process(&mut self, event: &LedgerEvent) {
+        match event {
+            LedgerEvent::BlocksProcessed(results) => {
+                // Notify elections about alternative (forked) blocks
+                self.fork_processor.handle_forks(&results);
+            }
+            _ => {}
+        }
+    }
+}

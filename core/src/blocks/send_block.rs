@@ -1,0 +1,458 @@
+use super::{Block, BlockBase, BlockType};
+use crate::{
+    utils::{BufferWriter, FixedSizeSerialize, Serialize, Stream},
+    Account, Amount, Blake2HashBuilder, BlockHash, DependentBlocks, JsonBlock, Link, PendingKey,
+    PrivateKey, PublicKey, Root, Signature, WorkNonce,
+};
+use anyhow::Result;
+use serde::de::{Unexpected, Visitor};
+
+#[derive(Clone, Default, Debug)]
+pub struct SendBlock {
+    hashables: SendHashables,
+    signature: Signature,
+    work: WorkNonce,
+    hash: BlockHash,
+}
+
+impl SendBlock {
+    pub fn new_test_instance() -> Self {
+        let key = PrivateKey::from(42);
+        SendBlockArgs {
+            key: &key,
+            previous: 1.into(),
+            destination: 2.into(),
+            balance: 3.into(),
+            work: 424269420.into(),
+        }
+        .into()
+    }
+
+    pub fn deserialize(stream: &mut dyn Stream) -> Result<Self> {
+        let hashables = SendHashables::deserialize(stream)?;
+        let signature = Signature::deserialize(stream)?;
+
+        let mut buffer = [0u8; 8];
+        stream.read_bytes(&mut buffer, 8)?;
+        let work = u64::from_le_bytes(buffer).into();
+        let hash = hashables.hash();
+        Ok(SendBlock {
+            hashables,
+            signature,
+            work,
+            hash,
+        })
+    }
+
+    pub fn serialized_size() -> usize {
+        SendHashables::serialized_size() + Signature::serialized_size() + core::mem::size_of::<u64>()
+    }
+
+    pub fn zero(&mut self) {
+        self.work = 0.into();
+        self.signature = Signature::new();
+        self.hashables.clear();
+    }
+
+    pub fn balance(&self) -> Amount {
+        self.hashables.balance
+    }
+
+    pub fn set_destination(&mut self, destination: Account) {
+        self.hashables.destination = destination;
+    }
+
+    pub fn set_previous(&mut self, previous: BlockHash) {
+        self.hashables.previous = previous;
+    }
+
+    pub fn set_balance(&mut self, balance: Amount) {
+        self.hashables.balance = balance;
+    }
+
+    pub fn pending_key(&self) -> PendingKey {
+        PendingKey::new(self.hashables.destination, self.hash())
+    }
+
+    pub fn destination(&self) -> Account {
+        self.hashables.destination
+    }
+
+    pub fn dependent_blocks(&self) -> DependentBlocks {
+        DependentBlocks::new(self.previous(), BlockHash::zero())
+    }
+}
+
+pub fn valid_send_block_predecessor(block_type: BlockType) -> bool {
+    match block_type {
+        BlockType::LegacySend
+        | BlockType::LegacyReceive
+        | BlockType::LegacyOpen
+        | BlockType::LegacyChange => true,
+        BlockType::NotABlock | BlockType::State | BlockType::Invalid => false,
+    }
+}
+
+impl PartialEq for SendBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.hashables == other.hashables
+            && self.signature == other.signature
+            && self.work == other.work
+    }
+}
+
+impl Eq for SendBlock {}
+
+impl BlockBase for SendBlock {
+    fn block_type(&self) -> BlockType {
+        BlockType::LegacySend
+    }
+
+    fn account_field(&self) -> Option<Account> {
+        None
+    }
+
+    fn hash(&self) -> BlockHash {
+        self.hash
+    }
+
+    fn link_field(&self) -> Option<Link> {
+        None
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn set_signature(&mut self, signature: Signature) {
+        self.signature = signature;
+    }
+
+    fn set_work(&mut self, work: WorkNonce) {
+        self.work = work;
+    }
+
+    fn work(&self) -> WorkNonce {
+        self.work
+    }
+
+    fn previous(&self) -> BlockHash {
+        self.hashables.previous
+    }
+
+    fn serialize_without_block_type(&self, writer: &mut dyn BufferWriter) {
+        self.hashables.serialize(writer);
+        self.signature.serialize(writer);
+        writer.write_bytes_safe(&self.work.0.to_le_bytes());
+    }
+
+    fn root(&self) -> Root {
+        self.previous().into()
+    }
+
+    fn balance_field(&self) -> Option<Amount> {
+        Some(self.hashables.balance)
+    }
+
+    fn source_field(&self) -> Option<BlockHash> {
+        None
+    }
+
+    fn representative_field(&self) -> Option<PublicKey> {
+        None
+    }
+
+    fn valid_predecessor(&self, block_type: BlockType) -> bool {
+        valid_send_block_predecessor(block_type)
+    }
+
+    fn destination_field(&self) -> Option<Account> {
+        Some(self.hashables.destination)
+    }
+
+    fn json_representation(&self) -> JsonBlock {
+        JsonBlock::Send(JsonSendBlock {
+            previous: self.hashables.previous,
+            destination: self.hashables.destination,
+            balance: self.hashables.balance.into(),
+            work: self.work,
+            signature: self.signature.clone(),
+        })
+    }
+}
+
+impl From<JsonSendBlock> for SendBlock {
+    fn from(value: JsonSendBlock) -> Self {
+        let hashables = SendHashables {
+            previous: value.previous,
+            destination: value.destination,
+            balance: value.balance.into(),
+        };
+
+        let hash = hashables.hash();
+
+        Self {
+            hashables,
+            work: value.work,
+            signature: value.signature,
+            hash,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+struct SendHashables {
+    pub previous: BlockHash,
+    pub destination: Account,
+    pub balance: Amount,
+}
+
+impl SendHashables {
+    pub fn serialized_size() -> usize {
+        BlockHash::serialized_size() + Account::serialized_size() + Amount::serialized_size()
+    }
+
+    pub fn deserialize(stream: &mut dyn Stream) -> Result<Self> {
+        let mut buffer_32 = [0u8; 32];
+        let mut buffer_16 = [0u8; 16];
+
+        stream.read_bytes(&mut buffer_32, 32)?;
+        let previous = BlockHash::from_bytes(buffer_32);
+
+        stream.read_bytes(&mut buffer_32, 32)?;
+        let destination = Account::from_bytes(buffer_32);
+
+        stream.read_bytes(&mut buffer_16, 16)?;
+        let balance = Amount::raw(u128::from_be_bytes(buffer_16));
+
+        Ok(Self {
+            previous,
+            destination,
+            balance,
+        })
+    }
+
+    fn clear(&mut self) {
+        self.previous = BlockHash::zero();
+        self.destination = Account::zero();
+        self.balance = Amount::raw(0);
+    }
+
+    fn hash(&self) -> BlockHash {
+        Blake2HashBuilder::new()
+            .update(self.previous.as_bytes())
+            .update(self.destination.as_bytes())
+            .update(self.balance.to_be_bytes())
+            .build()
+    }
+}
+
+impl crate::utils::Serialize for SendHashables {
+    fn serialize(&self, stream: &mut dyn BufferWriter) {
+        self.previous.serialize(stream);
+        self.destination.serialize(stream);
+        self.balance.serialize(stream);
+    }
+}
+
+pub struct SendBlockArgs<'a> {
+    pub key: &'a PrivateKey,
+    pub previous: BlockHash,
+    pub destination: Account,
+    pub balance: Amount,
+    pub work: WorkNonce,
+}
+
+impl<'a> From<SendBlockArgs<'a>> for SendBlock {
+    fn from(value: SendBlockArgs<'a>) -> Self {
+        let hashables = SendHashables {
+            previous: value.previous,
+            destination: value.destination,
+            balance: value.balance,
+        };
+
+        let hash = hashables.hash();
+        let signature = value.key.sign(hash.as_bytes());
+
+        Self {
+            hashables,
+            work: value.work,
+            signature,
+            hash,
+        }
+    }
+}
+
+impl<'a> From<SendBlockArgs<'a>> for Block {
+    fn from(value: SendBlockArgs<'a>) -> Self {
+        Block::LegacySend(value.into())
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct JsonSendBlock {
+    pub previous: BlockHash,
+    pub destination: Account,
+    pub balance: AmountHex,
+    pub work: WorkNonce,
+    pub signature: Signature,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct AmountHex(u128);
+
+impl AmountHex {
+    pub fn new(amount: u128) -> Self {
+        Self(amount)
+    }
+}
+
+impl From<Amount> for AmountHex {
+    fn from(value: Amount) -> Self {
+        Self(value.number())
+    }
+}
+
+impl From<AmountHex> for Amount {
+    fn from(value: AmountHex) -> Self {
+        Amount::raw(value.0)
+    }
+}
+
+impl serde::Serialize for AmountHex {
+    fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let amount = Amount::raw(self.0);
+        let hex = amount.encode_hex();
+        serializer.serialize_str(&hex)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AmountHex {
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = deserializer.deserialize_str(AmountHexVisitor {})?;
+        Ok(value)
+    }
+}
+
+struct AmountHexVisitor {}
+
+impl Visitor<'_> for AmountHexVisitor {
+    type Value = AmountHex;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        formatter.write_str("a u128 bit amount in encoded as hex string")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let amount = Amount::decode_hex(v).map_err(|_| {
+            serde::de::Error::invalid_value(
+                Unexpected::Str(v),
+                &"a u128 bit amount in encoded as hex string",
+            )
+        })?;
+        Ok(amount.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{utils::MemoryStream, Block, PrivateKey};
+
+    #[test]
+    fn create_send_block() {
+        let key = PrivateKey::new();
+        let previous = BlockHash::from(1);
+        let destination = Account::from(2);
+        let balance = Amount::raw(3);
+        let mut block: SendBlock = SendBlockArgs {
+            key: &key,
+            previous,
+            destination,
+            balance,
+            work: 2.into(),
+        }
+        .into();
+
+        assert_eq!(block.root(), block.previous().into());
+        assert_eq!(block.destination(), destination);
+        assert_eq!(block.source_field(), None);
+
+        let hash = block.hash().to_owned();
+        assert!(key
+            .public_key()
+            .verify(hash.as_bytes(), &block.signature)
+            .is_ok());
+
+        block.set_signature(Signature::from_bytes([1; 64]));
+        assert!(key
+            .public_key()
+            .verify(hash.as_bytes(), &block.signature)
+            .is_err());
+    }
+
+    // original test: block.send_serialize
+    // original test: send_block.deserialize
+    #[test]
+    fn serialize() {
+        let key = PrivateKey::new();
+        let block1: SendBlock = SendBlockArgs {
+            key: &key,
+            previous: 0.into(),
+            destination: 1.into(),
+            balance: 2.into(),
+            work: 5.into(),
+        }
+        .into();
+        let mut stream = MemoryStream::new();
+        block1.serialize_without_block_type(&mut stream);
+        assert_eq!(SendBlock::serialized_size(), stream.bytes_written());
+
+        let block2 = SendBlock::deserialize(&mut stream).unwrap();
+        assert_eq!(block1, block2);
+    }
+
+    #[test]
+    fn serialize_serde() {
+        let block = Block::LegacySend(SendBlock::new_test_instance());
+        let serialized = serde_json::to_string_pretty(&block).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{
+  "type": "send",
+  "previous": "0000000000000000000000000000000000000000000000000000000000000001",
+  "destination": "nano_11111111111111111111111111111111111111111111111111147dcwzp3c",
+  "balance": "00000000000000000000000000000003",
+  "work": "000000001949D66C",
+  "signature": "076FF9D1587141EC1DDB05493092B0BFE160B6EEE96D37462B11A81F2622A5211756316A9B48BB403EE4AC57BCCA2023C2075F7214B6B33211B9E5350B76A606"
+}"#
+        );
+    }
+
+    #[test]
+    fn serde_serialize_amount_hex() {
+        let serialized =
+            serde_json::to_string_pretty(&AmountHex::new(337010421085160209006996005437231978653))
+                .unwrap();
+        assert_eq!(serialized, "\"FD89D89D89D89D89D89D89D89D89D89D\"");
+    }
+
+    #[test]
+    fn serde_deserialize_amount_hex() {
+        let deserialized: AmountHex =
+            serde_json::from_str("\"FD89D89D89D89D89D89D89D89D89D89D\"").unwrap();
+        assert_eq!(
+            deserialized,
+            AmountHex::new(337010421085160209006996005437231978653)
+        );
+    }
+}

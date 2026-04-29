@@ -1,0 +1,329 @@
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use rsnano_core::ProtocolInfo;
+
+use crate::{
+    validate_header, DeserializedMessage, Message, MessageHeader, MessageType, NetworkFilter,
+    ParseMessageError,
+};
+
+pub struct MessageDeserializer {
+    buffer: VecDeque<u8>,
+    current_header: Option<MessageHeader>,
+    network_filter: Option<Arc<NetworkFilter>>,
+    protocol: ProtocolInfo,
+}
+
+impl MessageDeserializer {
+    pub fn new(protocol: ProtocolInfo) -> Self {
+        Self {
+            buffer: VecDeque::with_capacity(Message::MAX_MESSAGE_SIZE),
+            current_header: None,
+            network_filter: None,
+            protocol,
+        }
+    }
+
+    pub fn with_filter(protocol: ProtocolInfo, network_filter: Arc<NetworkFilter>) -> Self {
+        Self {
+            buffer: VecDeque::with_capacity(Message::MAX_MESSAGE_SIZE),
+            current_header: None,
+            network_filter: Some(network_filter),
+            protocol,
+        }
+    }
+
+    pub fn push(&mut self, data: &[u8]) {
+        self.buffer.extend(data);
+    }
+
+    pub fn try_deserialize(&mut self) -> Option<Result<DeserializedMessage, ParseMessageError>> {
+        if let Some(header) = self.current_header.clone() {
+            // The header was already deserialized. Only the payload has to be read:
+            self.try_deserialize_payload_for(header)
+        } else {
+            self.deserialize_header_and_payload()
+        }
+    }
+
+    fn deserialize_header_and_payload(
+        &mut self,
+    ) -> Option<Result<DeserializedMessage, ParseMessageError>> {
+        let header_bytes = self.read_header_bytes()?;
+
+        let Ok(header) = MessageHeader::deserialize_slice(&header_bytes) else {
+            return Some(Err(ParseMessageError::InvalidHeader));
+        };
+
+        if let Err(e) = validate_header(&header, &self.protocol) {
+            return Some(Err(e));
+        }
+
+        self.current_header = Some(header.clone());
+        self.try_deserialize_payload_for(header)
+    }
+
+    fn read_header_bytes(&mut self) -> Option<[u8; MessageHeader::SERIALIZED_SIZE]> {
+        if self.buffer.len() < MessageHeader::SERIALIZED_SIZE {
+            return None;
+        }
+        let mut header_bytes = [0; MessageHeader::SERIALIZED_SIZE];
+
+        for i in 0..MessageHeader::SERIALIZED_SIZE {
+            header_bytes[i] = self.buffer.pop_front().unwrap();
+        }
+        Some(header_bytes)
+    }
+
+    fn try_deserialize_payload_for(
+        &mut self,
+        header: MessageHeader,
+    ) -> Option<Result<DeserializedMessage, ParseMessageError>> {
+        if header.payload_length() > 0 && self.buffer.len() < header.payload_length() {
+            // We have to wait until more data is received
+            return None;
+        }
+        self.current_header = None;
+        Some(self.deserialize_payload_for(header))
+    }
+
+    fn deserialize_payload_for(
+        &mut self,
+        header: MessageHeader,
+    ) -> Result<DeserializedMessage, ParseMessageError> {
+        let payload_buffer: Vec<u8> = self.buffer.drain(..header.payload_length()).collect();
+
+        let digest = self.filter_duplicate_messages(header.message_type, &payload_buffer)?;
+
+        let Some(message) = Message::deserialize(&payload_buffer, &header, digest) else {
+            return Err(ParseMessageError::InvalidMessage(header.message_type));
+        };
+
+        Ok(DeserializedMessage::new(message, header.protocol))
+    }
+
+    /// Early filtering to not waste time deserializing duplicate blocks
+    fn filter_duplicate_messages(
+        &self,
+        message_type: MessageType,
+        payload_bytes: &[u8],
+    ) -> Result<u128, ParseMessageError> {
+        if matches!(message_type, MessageType::Publish | MessageType::ConfirmAck) {
+            if let Some(filter) = self.network_filter.as_ref() {
+                let (digest, existed) = filter.apply(payload_bytes);
+                if existed {
+                    if message_type == MessageType::ConfirmAck {
+                        Err(ParseMessageError::DuplicateConfirmAckMessage)
+                    } else {
+                        Err(ParseMessageError::DuplicatePublishMessage)
+                    }
+                } else {
+                    Ok(digest)
+                }
+            } else {
+                Ok(0)
+            }
+        } else {
+            Ok(0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AscPullAck, Keepalive, MessageSerializer};
+
+    mod happy_path {
+        use super::*;
+
+        #[test]
+        fn empty() {
+            let mut deserializer = create_deserializer();
+            assert!(deserializer.try_deserialize().is_none());
+        }
+
+        #[test]
+        fn deserialize_message_without_payload() {
+            let mut deserializer = create_deserializer();
+            deserializer.push(&message_bytes(&Message::TelemetryReq));
+
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Ok(DeserializedMessage::new(
+                    Message::TelemetryReq,
+                    Default::default()
+                )))
+            );
+        }
+
+        #[test]
+        fn deserialize_message_with_payload() {
+            let mut deserializer = create_deserializer();
+
+            let keepalive = Message::Keepalive(Keepalive::new_test_instance());
+            deserializer.push(&message_bytes(&keepalive));
+
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Ok(DeserializedMessage::new(keepalive, Default::default())))
+            );
+        }
+
+        #[test]
+        fn deserialize_multiple_messages() {
+            let mut deserializer = create_deserializer();
+
+            let keepalive = Message::Keepalive(Keepalive::new_test_instance());
+            deserializer.push(&message_bytes(&Message::TelemetryReq));
+            deserializer.push(&message_bytes(&keepalive));
+            deserializer.push(&message_bytes(&Message::TelemetryReq));
+
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Ok(DeserializedMessage::new(
+                    Message::TelemetryReq,
+                    Default::default()
+                )))
+            );
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Ok(DeserializedMessage::new(keepalive, Default::default())))
+            );
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Ok(DeserializedMessage::new(
+                    Message::TelemetryReq,
+                    Default::default()
+                )))
+            );
+            assert_eq!(deserializer.try_deserialize(), None);
+        }
+    }
+
+    mod unhappy_path {
+        use super::*;
+        use crate::{ConfirmAck, Publish};
+        use rsnano_core::Networks;
+
+        #[test]
+        fn push_incomplete_header() {
+            let mut deserializer = create_deserializer();
+            deserializer.push(&[1, 2]);
+            assert!(deserializer.try_deserialize().is_none());
+        }
+
+        #[test]
+        fn invalid_header() {
+            let mut deserializer = create_deserializer();
+            deserializer.push(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Err(ParseMessageError::InvalidHeader))
+            );
+        }
+
+        #[test]
+        fn invalid_network() {
+            let mut deserializer = create_deserializer();
+
+            let mut serializer =
+                MessageSerializer::new(ProtocolInfo::default_for(Networks::NanoBetaNetwork));
+            let message = serializer.serialize(&Message::TelemetryReq);
+
+            deserializer.push(&message);
+
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Err(ParseMessageError::InvalidNetwork))
+            );
+        }
+
+        #[test]
+        fn invalid_payload() {
+            let mut deserializer = create_deserializer();
+            deserializer.push(&invalid_asc_pull_ack_bytes());
+
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Err(ParseMessageError::InvalidMessage(
+                    MessageType::AscPullAck
+                )))
+            );
+        }
+
+        #[test]
+        fn incomplete_playload() {
+            let mut deserializer = create_deserializer();
+            let keepalive = Message::Keepalive(Keepalive::new_test_instance());
+            let data = message_bytes(&keepalive);
+
+            // push incomplete message
+            deserializer.push(&data[..data.len() - 1]);
+            assert_eq!(deserializer.try_deserialize(), None);
+
+            // push missing byte
+            deserializer.push(&data[data.len() - 1..]);
+            assert_eq!(
+                deserializer.try_deserialize(),
+                Some(Ok(DeserializedMessage::new(keepalive, Default::default())))
+            );
+        }
+
+        // Send two publish messages and asserts that the duplication is detected.
+        #[test]
+        fn duplicate_publish_message() {
+            let mut deserializer = create_deserializer();
+
+            let message = Message::Publish(Publish::new_test_instance());
+            let message_bytes = message_bytes(&message);
+
+            deserializer.push(&message_bytes);
+            deserializer.try_deserialize();
+
+            deserializer.push(&message_bytes);
+            let result = deserializer.try_deserialize();
+
+            assert_eq!(
+                result,
+                Some(Err(ParseMessageError::DuplicatePublishMessage))
+            );
+        }
+        //
+        // Send two publish messages and asserts that the duplication is detected.
+        #[test]
+        fn duplicate_confirm_ack() {
+            let mut deserializer = create_deserializer();
+            let message = Message::ConfirmAck(ConfirmAck::new_test_instance());
+            let message_bytes = message_bytes(&message);
+
+            deserializer.push(&message_bytes);
+            deserializer.try_deserialize();
+
+            deserializer.push(&message_bytes);
+            let result = deserializer.try_deserialize();
+
+            assert_eq!(
+                result,
+                Some(Err(ParseMessageError::DuplicateConfirmAckMessage))
+            );
+        }
+    }
+
+    fn message_bytes(message: &Message) -> Vec<u8> {
+        let mut serializer = MessageSerializer::default();
+        serializer.serialize(message).to_vec()
+    }
+
+    fn invalid_asc_pull_ack_bytes() -> Vec<u8> {
+        let mut data = message_bytes(&Message::AscPullAck(AscPullAck::new_test_instance_blocks()));
+        // make message invalid:
+        data[MessageHeader::SERIALIZED_SIZE..].fill(0xFF);
+        data
+    }
+
+    fn create_deserializer() -> MessageDeserializer {
+        let filter = Arc::new(NetworkFilter::default());
+        MessageDeserializer::with_filter(ProtocolInfo::default(), filter)
+    }
+}

@@ -1,0 +1,108 @@
+use spin::Mutex;
+
+use rsnano_core::Frontier;
+use rsnano_ledger::OwningAnySet;
+use rsnano_stats::{DetailType, StatType, Stats};
+
+use super::frontier_checker::FrontierChecker;
+use crate::bootstrap::state::{BootstrapState, OutdatedAccounts};
+
+/// Handles received frontiers
+pub(crate) struct FrontierWorker<'a> {
+    stats: &'a Stats,
+    state: &'a Mutex<BootstrapState>,
+    checker: FrontierChecker<'a>,
+}
+
+impl<'a> FrontierWorker<'a> {
+    pub(crate) fn new(
+        any: &'a OwningAnySet<'a>,
+        stats: &'a Stats,
+        state: &'a Mutex<BootstrapState>,
+    ) -> Self {
+        Self {
+            stats,
+            state,
+            checker: FrontierChecker::new(any),
+        }
+    }
+
+    pub fn process(&mut self, frontiers: Vec<Frontier>) {
+        let outdated = self.checker.get_outdated_accounts(&frontiers);
+        self.update_stats(&frontiers, &outdated);
+        self.state.lock().unwrap().frontiers_processed(&outdated);
+    }
+
+    fn update_stats(&self, frontiers: &[Frontier], outdated: &OutdatedAccounts) {
+        self.stats.add(
+            StatType::BootstrapFrontiers,
+            DetailType::Processed,
+            frontiers.len() as u64,
+        );
+        self.stats.add(
+            StatType::BootstrapFrontiers,
+            DetailType::Prioritized,
+            outdated.accounts.len() as u64,
+        );
+        self.stats.add(
+            StatType::BootstrapFrontiers,
+            DetailType::Outdated,
+            outdated.outdated as u64,
+        );
+        self.stats.add(
+            StatType::BootstrapFrontiers,
+            DetailType::Pending,
+            outdated.pending as u64,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bootstrap::state::CandidateAccounts;
+    use rsnano_core::{Account, AccountInfo, BlockHash};
+    use rsnano_ledger::Ledger;
+
+    #[test]
+    fn empty() {
+        let ledger = Ledger::new_null();
+        let any = ledger.any();
+        let stats = Stats::default();
+        let state = Mutex::new(BootstrapState::default());
+        let mut worker = FrontierWorker::new(&any, &stats, &state);
+
+        worker.process(Vec::new());
+
+        assert_eq!(state.lock().unwrap().candidate_accounts.priority_len(), 0);
+    }
+
+    #[test]
+    fn prioritize_one_account() {
+        let account = Account::from(1);
+        let ledger = Ledger::new_null_builder()
+            .account_info(
+                &account,
+                &AccountInfo {
+                    head: BlockHash::from(2),
+                    ..Default::default()
+                },
+            )
+            .finish();
+        let any = ledger.any();
+        let stats = Stats::default();
+        let state = Mutex::new(BootstrapState::default());
+        let mut worker = FrontierWorker::new(&any, &stats, &state);
+
+        worker.process(vec![Frontier::new(account, BlockHash::from(3))]);
+
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.candidate_accounts.priority_len(), 1);
+        assert_eq!(
+            guard.candidate_accounts.priority(&account),
+            CandidateAccounts::PRIORITY_CUTOFF
+        );
+        assert_eq!(guard.counters.outdated_accounts_found, 1);
+        assert_eq!(guard.counters.received_frontiers, 1);
+    }
+}

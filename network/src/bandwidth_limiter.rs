@@ -1,0 +1,80 @@
+use rsnano_core::utils::ContainerInfo;
+
+use crate::{token_bucket::TokenBucket, TrafficType};
+use rsnano_nullable_clock::SteadyClock;
+use spin::Mutex;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BandwidthLimiterConfig {
+    pub generic_limit: usize,
+    pub generic_burst_ratio: f64,
+
+    pub bootstrap_limit: usize,
+    pub bootstrap_burst_ratio: f64,
+}
+
+impl Default for BandwidthLimiterConfig {
+    fn default() -> Self {
+        Self {
+            generic_limit: 10 * 1024 * 1024,
+            generic_burst_ratio: 3_f64,
+            bootstrap_limit: 5 * 1024 * 1024,
+            bootstrap_burst_ratio: 1_f64,
+        }
+    }
+}
+
+pub struct BandwidthLimiter {
+    clock: SteadyClock,
+    limiter_generic: Mutex<TokenBucket>,
+    limiter_bootstrap: Mutex<TokenBucket>,
+}
+
+impl BandwidthLimiter {
+    pub fn new(config: BandwidthLimiterConfig) -> Self {
+        Self {
+            clock: SteadyClock::default(),
+            limiter_generic: Mutex::new(TokenBucket::with_burst_ratio(
+                config.generic_limit,
+                config.generic_burst_ratio,
+            )),
+            limiter_bootstrap: Mutex::new(TokenBucket::with_burst_ratio(
+                config.bootstrap_limit,
+                config.bootstrap_burst_ratio,
+            )),
+        }
+    }
+
+    /**
+     * Check whether packet falls withing bandwidth limits and should be allowed
+     * @return true if OK, false if needs to be dropped
+     */
+    pub fn should_pass(&self, buffer_size: usize, limit_type: TrafficType) -> bool {
+        self.select_limiter(limit_type)
+            .lock()
+            .try_consume(buffer_size, self.clock.now())
+    }
+
+    fn select_limiter(&self, limit_type: TrafficType) -> &Mutex<TokenBucket> {
+        match limit_type {
+            TrafficType::BootstrapServer => &self.limiter_bootstrap,
+            _ => &self.limiter_generic,
+        }
+    }
+
+    pub fn container_info(&self) -> ContainerInfo {
+        let generic_size = self.limiter_generic.lock().size();
+        let bootstrap_size = self.limiter_bootstrap.lock().size();
+        [
+            ("generic", generic_size, 0),
+            ("bootstrap", bootstrap_size, 0),
+        ]
+        .into()
+    }
+}
+
+impl Default for BandwidthLimiter {
+    fn default() -> Self {
+        Self::new(Default::default())
+    }
+}

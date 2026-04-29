@@ -1,0 +1,11 @@
+[package]
+name = "rsnano_nullable_random"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rand = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.9", default-features = false }
+rand_core_06 = { package = "rand_core", version = "0.6", default-features = false }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+kernel-common = { path = "../../common" }

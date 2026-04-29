@@ -1,0 +1,17 @@
+[package]
+name = "rsnano_daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rsnano_core = { path = "../core" }
+rsnano_stats = { path = "../stats" }
+rsnano_ledger = { path = "../ledger" }
+rsnano_node = { path = "../node" }
+rsnano_websocket_server = { path = "../websocket_server" }
+rsnano_nullable_http_client = { path = "../nullables/http_client" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+anyhow = { version = "1", default-features = false }
+tracing = { version = "0.1", default-features = false }
+kernel-common = { path = "../common" }

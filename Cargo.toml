@@ -1,0 +1,31 @@
+[workspace]
+members = [
+	"common",
+	"main",
+	"tools/sha",
+	"nullables/clock",
+	"nullables/output_tracker",
+	"nullables/console",
+	"nullables/env",
+	"nullables/fs",
+	"nullables/http_client",
+	"nullables/random",
+	"nullables/tcp",
+	"nullables/tracing_subscriber",
+	"core",
+	"stats",
+	"work",
+	"network",
+	"messages",
+	"ledger_store",
+	"websocket_messages",
+	"ledger",
+	"websocket_client",
+	"websocket_server",
+	"node",
+	"daemon",
+]
+resolver = "2"
+
+[profile.release]
+panic = "abort"

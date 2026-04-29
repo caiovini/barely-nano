@@ -1,0 +1,18 @@
+[package]
+name = "hello-bare"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "hello-bare"
+path = "src/bin.rs"
+
+[features]
+default = ["smode"]
+mmode = ["kernel-common/mmode"]   # -bios none, direct CLINT
+smode = ["kernel-common/smode"]   # OpenSBI, SBI ecalls
+
+[dependencies]
+kernel-common = { path = "../common" }
+linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }

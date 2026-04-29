@@ -1,0 +1,146 @@
+use crate::consensus::election::ElectionBehavior;
+use rsnano_core::Amount;
+use once_cell::sync::Lazy as LazyLock;
+
+static BUCKETING: LazyLock<Bucketing> = LazyLock::new(|| Bucketing::default());
+
+pub fn prio_bucket_index(balance: Amount) -> usize {
+    BUCKETING.bucket_index(balance)
+}
+
+/// Count of the priority buckets
+pub fn prio_bucket_count() -> usize {
+    BUCKETING.bucket_count()
+}
+
+/// Count of priority buckets + extra buckets for optimistic, hinted and manual elections
+pub fn bucket_count() -> usize {
+    const OPTIMISIC_BUCKET: usize = 1;
+    const HINTED_BUCKET: usize = 1;
+    const MANUAL_BUCKET: usize = 1;
+    prio_bucket_count() + OPTIMISIC_BUCKET + HINTED_BUCKET + MANUAL_BUCKET
+}
+
+pub fn bucket_index(behavior: ElectionBehavior, balance: Amount) -> usize {
+    match behavior {
+        ElectionBehavior::Priority => prio_bucket_index(balance),
+        ElectionBehavior::Manual => prio_bucket_count(),
+        ElectionBehavior::Hinted => prio_bucket_count() + 1,
+        ElectionBehavior::Optimistic => prio_bucket_count() + 2,
+    }
+}
+
+#[derive(Clone)]
+pub struct Bucketing {
+    /// Mininum balance for each bucket in ascending order
+    minimums: Vec<Amount>,
+}
+
+impl Bucketing {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn bucket_index(&self, balance: Amount) -> usize {
+        let result = self
+            .minimums
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, minimum)| balance >= **minimum);
+
+        match result {
+            Some((index, _)) => index,
+            None => {
+                // There should always be a bucket with a minimum_balance of 0
+                unreachable!()
+            }
+        }
+    }
+
+    pub fn bucket_count(&self) -> usize {
+        self.minimums.len()
+    }
+}
+
+impl Default for Bucketing {
+    fn default() -> Self {
+        let mut minimums = Vec::new();
+        let mut build_region = |begin: u128, end: u128, count: usize| {
+            let width = (end - begin) / (count as u128);
+            for i in 0..count {
+                let minimum_balance = begin + (i as u128 * width);
+                minimums.push(minimum_balance.into())
+            }
+        };
+
+        build_region(0, 1 << 79, 1);
+        build_region(1 << 79, 1 << 88, 1);
+        build_region(1 << 88, 1 << 92, 2);
+        build_region(1 << 92, 1 << 96, 4);
+        build_region(1 << 96, 1 << 100, 8);
+        build_region(1 << 100, 1 << 104, 16);
+        build_region(1 << 104, 1 << 108, 16);
+        build_region(1 << 108, 1 << 112, 8);
+        build_region(1 << 112, 1 << 116, 4);
+        build_region(1 << 116, 1 << 120, 2);
+        build_region(1 << 120, 1 << 127, 1);
+
+        Self { minimums }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bucket_creation() {
+        assert_eq!(Bucketing::new().bucket_count(), 63);
+    }
+
+    #[test]
+    fn bucket_0() {
+        assert_eq!(Bucketing::new().bucket_index(0.into()), 0);
+        assert_eq!(Bucketing::new().bucket_index(1.into()), 0);
+        assert_eq!(Bucketing::new().bucket_index(Amount::raw((1 << 79) - 1)), 0);
+    }
+
+    #[test]
+    fn bucket_1() {
+        assert_eq!(Bucketing::new().bucket_index(Amount::raw(1 << 79)), 1);
+    }
+
+    #[test]
+    fn nano_index() {
+        assert_eq!(Bucketing::new().bucket_index(Amount::nano(1)), 14);
+    }
+
+    #[test]
+    fn knano_index() {
+        assert_eq!(Bucketing::new().bucket_index(Amount::nano(1000)), 49);
+    }
+
+    #[test]
+    fn max_index() {
+        assert_eq!(Bucketing::new().bucket_index(Amount::MAX), 62);
+        assert_eq!(
+            Bucketing::new().bucket_index(Amount::MAX - Amount::nano(1000)),
+            62
+        );
+    }
+
+    #[test]
+    fn bucket_2_and_3() {
+        let bucketing = Bucketing::new();
+        assert_eq!(bucketing.bucket_index(Amount::from(1u128 << 88)), 2);
+        assert_eq!(bucketing.bucket_index(Amount::from(1u128 << 89)), 2);
+        assert_eq!(bucketing.bucket_index(Amount::from(1u128 << 90)), 2);
+        assert_eq!(bucketing.bucket_index(Amount::from(1u128 << 91)), 2);
+        assert_eq!(bucketing.bucket_index(Amount::from((1u128 << 92) - 1)), 3);
+        assert_eq!(
+            bucketing.bucket_index(Amount::from((1u128 << 92) - 1000)),
+            3
+        );
+    }
+}

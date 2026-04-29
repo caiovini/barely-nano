@@ -1,0 +1,10 @@
+[package]
+name = "rsnano_nullable_tracing_subscriber"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rsnano_nullable_env = { path = "../env" }
+rsnano_output_tracker = { path = "../output_tracker" }
+tracing = { version = "0.1", default-features = false, features = ["log"] }
+log = { version = "0.4", default-features = false }

@@ -1,0 +1,18 @@
+[package]
+name = "rsnano_network_protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rsnano_core = { path = "../core" }
+rsnano_stats = { path = "../stats" }
+rsnano_messages = { path = "../messages" }
+rsnano_network = { path = "../network" }
+rsnano_nullable_clock = { path = "../nullables/clock" }
+anyhow = { version = "1", default-features = false }
+rand = { version = "0.9.2", default-features = false }
+tracing = { version = "0.1", default-features = false }
+strum = { version = "0.26", default-features = false, features = ["derive"] }
+strum_macros = { version = "0.26", default-features = false }
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock"] }

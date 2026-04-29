@@ -1,0 +1,22 @@
+[package]
+name = "rsnano_ledger_store"
+version = "0.1.0"
+authors = ["Gustav Schauwecker <service@simpago.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+output_tracking = []
+
+[dependencies]
+rsnano_core = { path = "../core" }
+rsnano_output_tracker = { path = "../nullables/output_tracker" }
+kernel-common = { path = "../common" }
+primitive-types = { version = "0.12", default-features = false }
+anyhow = { version = "1", default-features = false }
+num-traits = { version = "0.2", default-features = false }
+num-derive = "0.4"
+serde = { version = "1", default-features = false, features = ["derive"] }
+rsnano_nullable_clock = { path = "../nullables/clock" }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }

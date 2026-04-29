@@ -1,0 +1,126 @@
+use rsnano_core::{AccountInfo, BlockHash, SavedBlock};
+use alloc::vec::Vec;
+
+use crate::{BorrowingAnySet, Ledger, LedgerSet, AnySet};
+
+use super::{
+    instructions_executor::RollbackInstructionsExecutor, planner_factory::RollbackPlannerFactory,
+    rollback_planner::RollbackStep,
+};
+
+pub(crate) struct BlockRollbackPerformer<'a> {
+    ledger: &'a Ledger,
+    pub rolled_back: Vec<SavedBlock>,
+}
+
+impl<'a> BlockRollbackPerformer<'a> {
+    pub(crate) fn new(ledger: &'a Ledger, _txn: &'a mut ()) -> Self {
+        Self {
+            ledger,
+            rolled_back: Vec::new(),
+        }
+    }
+
+    /// Rolls back the given block and all of its successor blocks and dependencies
+    pub(crate) fn roll_back(&mut self, block_hash: &BlockHash) -> Result<(), RollbackError> {
+        let mut targets: Vec<(SavedBlock, SavedBlock)> = Vec::new();
+
+        let target_block = self.load_block(block_hash)?;
+        let head_block = self.load_account_head(&target_block)?;
+        targets.push((target_block, head_block));
+
+        self.roll_back_impl(&mut targets)
+    }
+
+    fn roll_back_impl(
+        &mut self,
+        targets: &mut Vec<(SavedBlock, SavedBlock)>,
+    ) -> Result<(), RollbackError> {
+        while let Some((target_block, head_block)) = targets.last_mut() {
+            if self.any().block_exists(&target_block.hash()) {
+                let step = self.roll_back_head_block(&head_block)?;
+                match step {
+                    RollbackStep::RollBackBlock(instructions) => {
+                        RollbackInstructionsExecutor::new(self.ledger, &mut (), &instructions)
+                            .execute();
+                        self.rolled_back.push(head_block.clone());
+                        if head_block.hash() != target_block.hash() {
+                            *head_block = self.load_account_head(target_block)?;
+                        }
+                    }
+                    RollbackStep::RequestDependencyRollback(dependency_hash) => {
+                        let dep_block = self.load_block(&dependency_hash)?;
+                        let dep_head = self.load_account_head(&dep_block)?;
+                        targets.push((dep_block, dep_head));
+                    }
+                }
+            } else {
+                targets.pop();
+            }
+        }
+        Ok(())
+    }
+
+    fn load_account_head(&self, block: &SavedBlock) -> Result<SavedBlock, RollbackError> {
+        let account_info = self.get_account_info(block);
+        self.load_block(&account_info.head)
+    }
+
+    fn get_account_info(&self, block: &SavedBlock) -> AccountInfo {
+        self.any()
+            .get_account(&block.account())
+            .expect("account not found")
+    }
+
+    fn load_block(&self, block_hash: &BlockHash) -> Result<SavedBlock, RollbackError> {
+        self.any()
+            .get_block(block_hash)
+            .ok_or(RollbackError::BlockNotFound)
+    }
+
+    fn roll_back_head_block(
+        &mut self,
+        head_block: &SavedBlock,
+    ) -> Result<RollbackStep, RollbackError> {
+        let any = self.any();
+        let planner =
+            RollbackPlannerFactory::new(self.ledger, &any, head_block).create_planner()?;
+        planner.roll_back_head_block()
+    }
+
+    fn any(&self) -> BorrowingAnySet {
+        BorrowingAnySet {
+            constants: &self.ledger.constants,
+            store: &self.ledger.store,
+            tx: &(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum RollbackError {
+    /// The block to roll back wasn't found
+    BlockNotFound,
+
+    /// A confirmed block must not be rolled back!
+    BlockConfirmed,
+
+    PreviousBlockMissing,
+    RepresentativeBlockMissing,
+    /// Some other component rejected the rollback
+    Rejected,
+}
+
+impl core::fmt::Display for RollbackError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RollbackError::BlockNotFound => f.write_str("Block not found"),
+            RollbackError::BlockConfirmed => f.write_str("Cannot roll back confirmed block"),
+            RollbackError::PreviousBlockMissing => f.write_str("Previous block missing"),
+            RollbackError::RepresentativeBlockMissing => {
+                f.write_str("Representative block missing")
+            }
+            RollbackError::Rejected => f.write_str("Rollback rejected"),
+        }
+    }
+}

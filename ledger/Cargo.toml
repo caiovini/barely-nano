@@ -1,0 +1,23 @@
+[package]
+name = "rsnano_ledger"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rsnano_core = { path = "../core" }
+rsnano_work = { path = "../work" }
+rsnano_stats = { path = "../stats" }
+rsnano_ledger_store = { path = "../ledger_store" }
+rsnano_nullable_clock = { path = "../nullables/clock" }
+anyhow = { version = "1", default-features = false }
+num-traits = { version = "0.2", default-features = false }
+num-derive = "0.4"
+rand = { version = "0.9", default-features = false, features = ["alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+tracing = { version = "0.1", default-features = false }
+strum = { version = "0.26", default-features = false, features = ["derive"] }
+strum_macros = { version = "0.26", default-features = false }
+spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock", "once"] }
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc"] }

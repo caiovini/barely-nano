@@ -1,0 +1,18 @@
+[package]
+name = "rsnano_nullable_http_client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rsnano_output_tracker = { path = "../output_tracker" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+anyhow = { version = "1", default-features = false }
+reqwless = { version = "0.12", default-features = false, features = ["alloc"] }
+embedded-io-async = { version = "0.6", default-features = false }
+url = { version = "2", default-features = false }
+kernel-common = { path = "../../common" }
+smoltcp = { version = "0.13", default-features = false, features = ["alloc", "proto-ipv4", "socket-dns", "socket-tcp"] }
+embedded-nal-async = { version = "0.7", default-features = false }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more"] }

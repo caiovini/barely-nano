@@ -1,0 +1,97 @@
+use core::sync::atomic::Ordering;
+
+use rsnano_core::{Amount, PublicKey};
+use rsnano_stats::StatType;
+
+use super::rollback_planner::RollbackInstructions;
+use crate::Ledger;
+
+/// Updates the ledger according to the RollbackInstructions
+pub(crate) struct RollbackInstructionsExecutor<'a> {
+    ledger: &'a Ledger,
+    instructions: &'a RollbackInstructions,
+}
+
+impl<'a> RollbackInstructionsExecutor<'a> {
+    pub(crate) fn new(
+        ledger: &'a Ledger,
+        _txn: &'a mut (),
+        instructions: &'a RollbackInstructions,
+    ) -> Self {
+        Self {
+            ledger,
+            instructions,
+        }
+    }
+
+    pub(crate) fn execute(&mut self) {
+        self.update_pending_table();
+        self.update_account_table();
+        self.update_block_table();
+        self.roll_back_representative_cache();
+        self.ledger
+            .store
+            .cache
+            .block_count
+            .fetch_sub(1, Ordering::SeqCst);
+
+        self.ledger
+            .stats
+            .inc(StatType::Rollback, self.instructions.block_sub_type.into());
+    }
+
+    fn update_block_table(&mut self) {
+        self.ledger
+            .store
+            .block
+            .del(&self.instructions.block_hash);
+
+        if let Some(hash) = self.instructions.clear_successor {
+            self.ledger.store.successors.del(&hash);
+        }
+    }
+
+    fn update_account_table(&mut self) {
+        self.ledger.update_account(
+            &mut (),
+            &self.instructions.account,
+            &self.instructions.old_account_info,
+            &self.instructions.set_account_info,
+        );
+    }
+
+    fn update_pending_table(&mut self) {
+        if let Some(pending_key) = &self.instructions.remove_pending {
+            self.ledger.store.pending.del(pending_key);
+        }
+        if let Some((key, info)) = &self.instructions.add_pending {
+            self.ledger.store.pending.put(key, info);
+        }
+    }
+
+    fn roll_back_representative_cache(&mut self) {
+        if let Some(previous_rep) = &self.instructions.new_representative {
+            self.roll_back_change_in_representative_cache(previous_rep);
+        } else {
+            self.roll_back_receive_in_representative_cache()
+        }
+    }
+
+    fn roll_back_change_in_representative_cache(&mut self, previous_representative: &PublicKey) {
+        self.ledger.rep_weights_updater.representation_add_dual(
+            &mut (),
+            self.instructions.old_account_info.representative,
+            Amount::zero().wrapping_sub(self.instructions.old_account_info.balance),
+            *previous_representative,
+            self.instructions.new_balance,
+        );
+    }
+
+    fn roll_back_receive_in_representative_cache(&mut self) {
+        self.ledger.rep_weights_updater.representation_add(
+            &mut (),
+            self.instructions.old_account_info.representative,
+            Amount::zero().wrapping_sub(self.instructions.old_account_info.balance),
+        );
+    }
+}
