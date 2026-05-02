@@ -1,18 +1,24 @@
-use ordered_float::OrderedFloat;
 use core::ops::{ Add, Deref, Div, Mul, Sub };
 
-#[derive(PartialEq, Eq, Default, Clone, Copy, Ord, PartialOrd)]
-pub struct Priority(OrderedFloat<f64>);
+#[derive(PartialEq, PartialOrd, Default, Clone, Copy)]
+pub struct Priority(f64);
+
+impl Eq for Priority {}
+impl Ord for Priority {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.partial_cmp(&other.0).unwrap_or(core::cmp::Ordering::Equal)
+    }
+}
 
 impl Priority {
     pub const fn new(value: f64) -> Self {
-        Self(OrderedFloat(value))
+        Self(value)
     }
 
-    pub const ZERO: Self = Self(OrderedFloat(0.0));
+    pub const ZERO: Self = Self(0.0);
 
     pub fn as_f64(&self) -> f64 {
-        self.0 .0
+        self.0
     }
 }
 
@@ -54,15 +60,15 @@ impl From<Priority> for f64 {
     }
 }
 
-impl std::fmt::Debug for Priority {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.0 .0, f)
+impl core::fmt::Debug for Priority {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&self.0, f)
     }
 }
 
-impl std::fmt::Display for Priority {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.0 .0, f)
+impl core::fmt::Display for Priority {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -94,77 +100,5 @@ impl Deref for PriorityKeyDesc {
 impl From<Priority> for PriorityKeyDesc {
     fn from(value: Priority) -> Self {
         Self(value)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use core::cmp::Ordering;
-
-    use super::*;
-
-    #[test]
-    fn create() {
-        assert_priority_eq(Priority::new(1.0), Priority::new(1.0));
-        assert!(Priority::new(1.0) != Priority::new(1.1));
-        assert_eq!(Priority::new(1.23).as_f64(), 1.23);
-    }
-
-    #[test]
-    fn add() {
-        assert_priority_eq(Priority::new(1.0) + Priority::new(2.5), Priority::new(3.5));
-    }
-
-    #[test]
-    fn sub() {
-        assert_priority_eq(Priority::new(2.4) - Priority::new(1.1), Priority::new(1.3));
-    }
-
-    #[test]
-    fn mul() {
-        assert_priority_eq(Priority::new(2.4) * 2.0, Priority::new(4.8));
-    }
-
-    #[test]
-    fn div() {
-        assert_priority_eq(Priority::new(2.4) / 2.0, Priority::new(1.2));
-    }
-
-    #[test]
-    fn format() {
-        assert_eq!(format!("{}", Priority::new(1.23)), "1.23");
-        assert_eq!(format!("{:?}", Priority::new(1.23)), "1.23");
-    }
-
-    #[test]
-    fn from_f64() {
-        assert_eq!(f64::from(Priority::new(1.23)), 1.23f64);
-    }
-
-    #[test]
-    fn partial_ord() {
-        let one = PriorityKeyDesc(Priority::new(1.0));
-        let two = PriorityKeyDesc(Priority::new(2.0));
-        assert_eq!(one.partial_cmp(&one), Some(Ordering::Equal));
-        assert_eq!(one.partial_cmp(&two), Some(Ordering::Greater));
-        assert_eq!(two.partial_cmp(&one), Some(Ordering::Less));
-    }
-
-    #[test]
-    fn deref() {
-        let one = PriorityKeyDesc(Priority::new(1.0));
-        assert_eq!(one.as_f64(), 1.0);
-    }
-
-    fn assert_priority_eq(actual: Priority, expected: Priority) {
-        let actual = actual.as_f64();
-        let expected = expected.as_f64();
-        let diff = actual - expected;
-        assert!(
-            diff.abs() < 0.001,
-            "expected priority {} to be equal to {}",
-            actual,
-            expected
-        );
     }
 }

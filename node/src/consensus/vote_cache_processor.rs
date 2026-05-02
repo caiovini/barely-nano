@@ -1,8 +1,8 @@
-use alloc::sync::{ Arc };
-use alloc::collections::{ VecDeque };
-use spin::{ Mutex };
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use spin::{ Mutex, MutexGuard };
 use hashbrown::{ HashSet };
-// // // // // // use std::{   sync::Condvar, sync::MutexGuard, thread::JoinHandle   }; // TODO: fix this
+use crate::utils::{Condvar, JoinHandle};
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
@@ -45,40 +45,40 @@ impl VoteCacheProcessor {
 
 impl VoteCacheProcessor {
     pub fn start(&self) {
-        debug_assert!(self.state.lock().unwrap().thread.is_none());
-        let cache_loop = VoteCacheLoop {
-            state: self.state.clone(),
-            condition: self.condition.clone(),
-            stats: self.stats.clone(),
-            vote_cache: self.vote_cache.clone(),
-            vote_queue: self.vote_queue.clone(),
-        };
-
-        self.state.lock().unwrap().thread = Some(
-            std::thread::Builder::new()
-                .name("Vote cache proc".to_owned())
-                .spawn(move || cache_loop.run())
-                .unwrap(),
-        );
+        // debug_assert!(self.state.lock().thread.is_none());
+        // let cache_loop = VoteCacheLoop {
+        //     state: self.state.clone(),
+        //     condition: self.condition.clone(),
+        //     stats: self.stats.clone(),
+        //     vote_cache: self.vote_cache.clone(),
+        //     vote_queue: self.vote_queue.clone(),
+        // };
+        //
+        // self.state.lock().thread = Some(
+        //     std::/* /* /* thread::Builder::new()
+        //         .name("Vote cache proc".to_owned())
+        //         .spawn(move || cache_loop.run())
+        //         .unwrap(),
+        // );
     }
 
     pub fn stop(&self) {
-        let thread = {
-            let mut state = self.state.lock().unwrap();
+        {
+            let mut state = self.state.lock();
             state.stopped = true;
-            state.thread.take()
-        };
+            state.thread.take();
+        }
 
         self.condition.notify_all();
 
-        if let Some(handle) = thread {
-            handle.join().unwrap();
-        }
+        // if let Some(handle) = thread {
+        //     handle.join().unwrap(); */ */ */
+        // }
     }
 
     pub fn trigger(&self, hash: BlockHash) {
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if state.triggered.len() > self.config.max_triggered {
                 state.triggered.pop_front();
                 self.stats
@@ -92,13 +92,13 @@ impl VoteCacheProcessor {
     }
 
     pub fn len(&self) -> usize {
-        self.state.lock().unwrap().triggered.len()
+        self.state.lock().triggered.len()
     }
 }
 
 impl Drop for VoteCacheProcessor {
     fn drop(&mut self) {
-        debug_assert!(self.state.lock().unwrap().thread.is_none())
+        // debug_assert!(self.state.lock().thread.is_none())
     }
 }
 
@@ -114,6 +114,7 @@ struct State {
     triggered: VecDeque<BlockHash>,
 }
 
+#[allow(dead_code)]
 struct VoteCacheLoop {
     state: Arc<Mutex<State>>,
     condition: Arc<Condvar>,
@@ -123,12 +124,13 @@ struct VoteCacheLoop {
 }
 
 impl VoteCacheLoop {
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
         while !guard.stopped {
             if !guard.triggered.is_empty() {
                 self.run_batch(guard);
-                guard = self.state.lock().unwrap();
+                guard = self.state.lock();
             } else {
                 guard = self
                     .condition
@@ -138,6 +140,7 @@ impl VoteCacheLoop {
         }
     }
 
+    #[allow(dead_code)]
     fn run_batch(&self, mut state: MutexGuard<'_, State>) {
         let mut triggered = VecDeque::new();
         core::mem::swap(&mut triggered, &mut state.triggered);
@@ -153,7 +156,7 @@ impl VoteCacheLoop {
         );
 
         for hash in hashes {
-            let cached = self.vote_cache.lock().unwrap().find(&hash);
+            let cached = self.vote_cache.lock().find(&hash);
             for cached_vote in cached {
                 self.vote_queue
                     .enqueue(cached_vote, None, VoteSource::Cache, Some(hash));

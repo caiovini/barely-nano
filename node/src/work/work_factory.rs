@@ -89,6 +89,19 @@ impl ContainerInfoProvider for WorkFactory {
     }
 }
 
+impl WorkFactory {
+    pub fn builder() -> WorkFactoryBuilder {
+        WorkFactoryBuilder {
+            local_work_pool: None,
+            work_peers: Vec::new(),
+        }
+    }
+
+    pub fn new_null() -> Self {
+        Self::disabled()
+    }
+}
+
 pub struct WorkFactoryBuilder {
     local_work_pool: Option<WorkPool>,
     work_peers: Vec<Peer>,

@@ -8,6 +8,11 @@ use spin::Mutex;
 
 static GLOBAL_RNG: Mutex<Option<ChaCha8Rng>> = Mutex::new(None);
 
+pub fn set_seed(seed: u64) {
+    let mut lock = GLOBAL_RNG.lock();
+    *lock = Some(ChaCha8Rng::seed_from_u64(seed));
+}
+
 pub struct NullableRng {
     strategy: RngStrategy,
 }

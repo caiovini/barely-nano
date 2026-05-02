@@ -9,6 +9,7 @@ rsnano_stats = { path = "../stats" }
 rsnano_messages = { path = "../messages" }
 rsnano_network = { path = "../network" }
 rsnano_nullable_clock = { path = "../nullables/clock" }
+rsnano_nullable_random = { path = "../nullables/random" }
 anyhow = { version = "1", default-features = false }
 rand = { version = "0.9.2", default-features = false }
 tracing = { version = "0.1", default-features = false }

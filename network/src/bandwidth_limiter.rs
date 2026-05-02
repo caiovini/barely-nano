@@ -71,6 +71,10 @@ impl BandwidthLimiter {
         ]
         .into()
     }
+
+    pub fn limit(&self) -> usize {
+        self.limiter_generic.lock().limit()
+    }
 }
 
 impl Default for BandwidthLimiter {

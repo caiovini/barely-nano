@@ -33,7 +33,7 @@ impl BlockInspector {
     }
 
     pub fn inspect(&self, batch: &[ProcessedResult]) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let any = self.ledger.any();
         for result in batch {
             let account = self.get_account(&any, &result.block, &result.saved_block);

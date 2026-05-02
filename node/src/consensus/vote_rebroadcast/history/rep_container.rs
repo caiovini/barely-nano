@@ -1,7 +1,8 @@
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use super::RepresentativeEntry;
 use rsnano_core::{Amount, PublicKey};
 use hashbrown::{ HashMap };
-use alloc::collections::{ BTreeMap };
 
 #[derive(Default)]
 pub(crate) struct RepresentativeContainer {

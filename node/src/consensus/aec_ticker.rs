@@ -1,6 +1,10 @@
-use alloc::sync::{ Arc };
+use core::any::Any;
+use core::any::TypeId;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use spin::{ RwLock };
-// // // // // // use std::{   any::Any, any::TypeId   }; // TODO: fix this
+// // // // // // // use std::{    any::Any, any::TypeId    }; // TODO: fix this
 
 use rsnano_core::utils::{CancellationToken, Tickable};
 use rsnano_nullable_clock::SteadyClock;
@@ -57,7 +61,7 @@ impl AecTicker {
 impl Tickable for AecTicker {
     fn tick(&mut self, _cancel_token: &CancellationToken) {
         {
-            let mut aec = self.active_elections.write().unwrap();
+            let mut aec = self.active_elections.write();
             aec.transition_time(self.clock.now());
         }
 
@@ -67,7 +71,7 @@ impl Tickable for AecTicker {
     }
 }
 
-pub trait AecTickerPlugin: Send + 'static {
+pub trait AecTickerPlugin: Send + Sync + 'static {
     fn run(&mut self, aec: &RwLock<ActiveElectionsContainer>);
     fn type_id(&self) -> TypeId {
         TypeId::of::<Self>()

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use super::running_query::QuerySource;
 use super::{CandidateAccounts, FrontierScan, PeerScoring, PriorityResult, RunningQueryContainer};
 use crate::bootstrap::{AscPullQuerySpec, BootstrapConfig};

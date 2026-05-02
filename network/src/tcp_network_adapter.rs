@@ -46,7 +46,7 @@ impl TcpNetworkAdapter {
             }
 
             // Simple yielding wait
-            async_rt::spawn(async {}); 
+            async_rt::yield_now().await;
             for _ in 0..100 { core::hint::spin_loop(); }
         }
     }
@@ -83,6 +83,8 @@ impl TcpNetworkAdapter {
             .add(local_addr, peer_addr, direction, self.clock.now())
             .map_err(|e| anyhow!("Could not add channel: {:?}", e))?;
 
+        receiver.ensure_handshake();
+
         let channel_id = channel.channel_id();
         let channel_adapter =
             TcpChannelAdapter::create(channel, stream, self.clock.clone());
@@ -91,12 +93,15 @@ impl TcpNetworkAdapter {
             .lock()
             .insert(channel_id, channel_adapter.clone());
 
-        debug!(?peer_addr, ?direction, "Accepted connection");
+        tracing::info!("[node] Connection established! Peer: {}, Direction: {:?}", peer_addr, direction);
+        tracing::info!("[node] Spawning receiver task...");
 
         let adapter_l = channel_adapter.clone();
         async_rt::spawn(async move {
+            tracing::info!("[node] Receiver task started for {}", peer_addr);
             let channel_l = adapter_l.channel.clone();
             let mut buffer = [0u8; 1024];
+            let mut total_bytes = 0usize;
 
             loop {
                 if channel_l.is_closed() {
@@ -111,18 +116,34 @@ impl TcpNetworkAdapter {
                     }
                 }).await;
 
-                let read_count = match adapter_l.try_read(&mut buffer) {
-                    Ok(n) => n,
+                match adapter_l.readable().await {
+                    Ok(()) => {}
                     Err(e) => {
-                        debug!("Error reading buffer: {:?} ({})", e, channel_l.peer_addr());
+                        tracing::info!("[node] Stream not readable: {:?} ({})", e, channel_l.peer_addr());
+                        return;
+                    }
+                }
+
+                let read_count = match adapter_l.try_read(&mut buffer) {
+                    Ok(n) => {
+                        if n > 0 {
+                            total_bytes += n;
+                        }
+                        n
+                    },
+                    Err(e) => {
+                        let msg = alloc::format!("{:?}", e);
+                        if msg.contains("Would block") {
+                            continue;
+                        }
+                        tracing::error!("[node] Error reading buffer: {:?} ({})", e, channel_l.peer_addr());
                         return;
                     }
                 };
 
                 if read_count == 0 {
-                    async_rt::spawn(async {});
-                    for _ in 0..100 { core::hint::spin_loop(); }
-                    continue;
+                    tracing::info!("[node] EOF (0 bytes) from {}", channel_l.peer_addr());
+                    break;
                 }
 
                 let new_data = &buffer[..read_count];
@@ -132,7 +153,7 @@ impl TcpNetworkAdapter {
                     ReceiveResult::Abort => break,
                     ReceiveResult::Pause => {
                         loop {
-                            async_rt::spawn(async {});
+                            async_rt::yield_now().await;
                             for _ in 0..100 { core::hint::spin_loop(); }
                             if channel_l.is_cancelled() { break; }
                             match receiver.try_unpause() {

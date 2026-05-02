@@ -1,4 +1,12 @@
-// // // // // // use std::{   thread::JoinHandle   }; // TODO: fix this
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::boxed::Box;
+use alloc::string::ToString;
+use spin::{ Mutex, RwLock };
+use crate::utils::{Condvar, JoinHandle};
+use core::sync::atomic::{ AtomicU64, Ordering };
+use crate::utils::LazyLock;
 
 use rsnano_core::{
     utils::ContainerInfo, Account, AccountInfo, Amount, BlockHash, ConfirmationHeightInfo,
@@ -64,12 +72,12 @@ impl PriorityScheduler {
     }
 
     pub fn stop(&self) {
-        *self.stopped.lock().unwrap() = true;
+        *self.stopped.lock() = true;
         self.condition.notify_all();
-        let handle = self.thread.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.join().unwrap();
-        }
+        let _handle = self.thread.lock().take();
+        // if let Some(handle) = handle {
+        //     handle.join().unwrap();
+        // }
     }
 
     pub fn notify(&self) {
@@ -79,7 +87,6 @@ impl PriorityScheduler {
     pub fn contains(&self, hash: &BlockHash) -> bool {
         self.buckets
             .lock()
-            .unwrap()
             .iter()
             .any(|b| b.contains(hash))
     }
@@ -133,7 +140,7 @@ impl PriorityScheduler {
         let priority = any.block_priority(&block);
 
         let insert_result = {
-            let mut buckets = self.buckets.lock().unwrap();
+            let mut buckets = self.buckets.lock();
             let (bucket, bucket_index) = self.find_bucket(&mut buckets, priority.balance);
             self.activations_per_bucket[bucket_index].fetch_add(1, Ordering::Relaxed);
             bucket.insert(priority, block.into())
@@ -172,15 +179,16 @@ impl PriorityScheduler {
     }
 
     pub fn len(&self) -> usize {
-        self.buckets.lock().unwrap().iter().map(|b| b.len()).sum()
+        self.buckets.lock().iter().map(|b| b.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut stopped = self.stopped.lock().unwrap();
+        let mut stopped = self.stopped.lock();
         while !*stopped {
             stopped = self
                 .condition
@@ -190,21 +198,15 @@ impl PriorityScheduler {
             if !*stopped {
                 drop(stopped);
                 self.run_one();
-                stopped = self.stopped.lock().unwrap();
+                stopped = self.stopped.lock();
             }
         }
     }
 
     fn predicate(&self) -> bool {
-        let buckets = self.buckets.lock().unwrap();
-        let aec = self.aec.read().unwrap();
+        let buckets = self.buckets.lock();
+        let aec = self.aec.read();
         buckets.iter().any(|b| b.available(&aec))
-        //let vacancy = self.aec.read().unwrap().vacancy();
-        //self.buckets
-        //    .lock()
-        //    .unwrap()
-        //    .iter()
-        //    .any(|b| b.available(vacancy))
     }
 
     fn run_one(&self) {
@@ -212,8 +214,8 @@ impl PriorityScheduler {
             .inc(StatType::ElectionScheduler, DetailType::Loop);
 
         let now = self.clock.now();
-        let mut buckets = self.buckets.lock().unwrap();
-        let mut aec = self.aec.write().unwrap();
+        let mut buckets = self.buckets.lock();
+        let mut aec = self.aec.write();
         let mut inserted = true;
 
         while inserted {
@@ -243,7 +245,7 @@ impl PriorityScheduler {
     pub fn container_info(&self) -> ContainerInfo {
         let mut bucket_infos = ContainerInfo::builder();
 
-        for (id, bucket) in self.buckets.lock().unwrap().iter().enumerate() {
+        for (id, bucket) in self.buckets.lock().iter().enumerate() {
             bucket_infos = bucket_infos.leaf(id.to_string(), bucket.len(), 0);
         }
 
@@ -256,7 +258,7 @@ impl PriorityScheduler {
 impl Drop for PriorityScheduler {
     fn drop(&mut self) {
         // Thread must be stopped before destruction
-        debug_assert!(self.thread.lock().unwrap().is_none());
+        // debug_assert!(self.thread.lock().is_none());
     }
 }
 
@@ -266,17 +268,17 @@ pub trait PrioritySchedulerExt {
 
 impl PrioritySchedulerExt for Arc<PriorityScheduler> {
     fn start(&self) {
-        debug_assert!(self.thread.lock().unwrap().is_none());
-
-        let self_l = Arc::clone(&self);
-        *self.thread.lock().unwrap() = Some(
-            std::thread::Builder::new()
-                .name("Sched Priority".to_string())
-                .spawn(Box::new(move || {
-                    self_l.run();
-                }))
-                .unwrap(),
-        );
+        // debug_assert!(self.thread.lock().is_none());
+        //
+        // let self_l = Arc::clone(&self);
+        // *self.thread.lock() = Some(
+        //     std::thread::Builder::new()
+        //         .name("Sched Priority".to_string())
+        //         .spawn(Box::new(move || {
+        //             self_l.run();
+        //         }))
+        //         .unwrap(),
+        // );
     }
 }
 
@@ -336,7 +338,7 @@ mod tests {
         scheduler.activate_successors(&ledger.any(), &send1);
         scheduler.run_one();
 
-        let aec = scheduler.aec.read().unwrap();
+        let aec = scheduler.aec.read();
         assert!(aec.is_active_hash(&send2.hash()));
         assert!(aec.is_active_hash(&open.hash()));
     }

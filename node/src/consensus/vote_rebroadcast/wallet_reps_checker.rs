@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use crate::wallets::WalletRepresentatives;
 use rsnano_core::utils::{CancellationToken, Tickable};
 use alloc::sync::Arc;
@@ -23,7 +25,7 @@ impl WalletRepsChecker {
 
 impl Tickable for WalletRepsChecker {
     fn tick(&mut self, _cancel_token: &CancellationToken) {
-        let reps = self.wallet_reps.lock().unwrap().clone();
+        let reps = self.wallet_reps.lock().clone();
         for consumer in &self.consumers {
             consumer.update_wallet_reps(&reps);
         }

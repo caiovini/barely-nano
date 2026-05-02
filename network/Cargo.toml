@@ -20,6 +20,7 @@ spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock
 strum = { version = "0.26", default-features = false, features = ["derive"] }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc"] }
 rand = { version = "0.9", default-features = false, features = ["alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 serde_json = "1"

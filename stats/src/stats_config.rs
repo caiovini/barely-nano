@@ -1,6 +1,7 @@
 use core::time::Duration;
 use alloc::string::{String, ToString};
 
+#[repr(C)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatsConfig {
     /** How many sample intervals to keep in the ring buffer */

@@ -33,25 +33,23 @@ impl Task {
     }
 }
 
-/// A waker that puts the task back into the executor's run queue.
-struct TaskWaker {
-    task: Arc<Task>,
-    queue: Arc<Mutex<VecDeque<Arc<Task>>>>,
-}
-
-impl Wake for TaskWaker {
+impl Wake for Task {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        if !self.task.is_queued.swap(true, Ordering::SeqCst) {
-            self.queue.lock().push_back(self.task.clone());
+        if !self.is_queued.swap(true, Ordering::SeqCst) {
+            // tracing::info!("[boot] Task wake: re-queueing task");
+            if let Some(executor) = EXECUTOR.lock().as_ref() {
+                executor.run_queue.lock().push_back(self.clone());
+            }
         }
     }
 }
 
 /// A minimal single-threaded executor for bare-metal `#![no_std]`.
+#[derive(Clone)]
 pub struct Executor {
     run_queue: Arc<Mutex<VecDeque<Arc<Task>>>>,
 }
@@ -72,20 +70,22 @@ impl Executor {
     /// Runs all currently queued tasks until the queue is empty.
     /// Does not sleep; returns immediately when no tasks are ready.
     pub fn run_ready_tasks(&self) {
-        while let Some(task) = {
-            let mut queue = self.run_queue.lock();
-            queue.pop_front()
-        } {
+        let mut count = self.run_queue.lock().len();
+        while count > 0 {
+            let task = {
+                let mut queue = self.run_queue.lock();
+                queue.pop_front()
+            };
+            
+            let Some(task) = task else { break; };
+            count -= 1;
+            
             // Unmark as queued so a waker can re-queue it.
             task.is_queued.store(false, Ordering::SeqCst);
 
             let mut future_slot = task.future.lock();
             if let Some(mut future) = future_slot.take() {
-                let waker = Arc::new(TaskWaker {
-                    task: task.clone(),
-                    queue: self.run_queue.clone(),
-                });
-                let waker = Waker::from(waker);
+                let waker = Waker::from(task.clone());
                 let mut context = Context::from_waker(&waker);
 
                 match future.as_mut().poll(&mut context) {
@@ -99,6 +99,10 @@ impl Executor {
                 }
             }
         }
+    }
+
+    pub fn task_count(&self) -> usize {
+        self.run_queue.lock().len()
     }
 }
 
@@ -133,4 +137,29 @@ impl Future for YieldNow {
 
 pub fn yield_now() -> YieldNow {
     YieldNow { yielded: false }
+}
+
+pub struct Sleep {
+    target_ticks: u64,
+}
+
+impl Future for Sleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let now = crate::clint::mtime();
+        if now >= self.target_ticks {
+            Poll::Ready(())
+        } else {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+pub fn sleep(duration: core::time::Duration) -> Sleep {
+    let ticks = (duration.as_micros() as u64) * (crate::clint::FREQ / 1_000_000);
+    Sleep {
+        target_ticks: crate::clint::mtime() + ticks,
+    }
 }

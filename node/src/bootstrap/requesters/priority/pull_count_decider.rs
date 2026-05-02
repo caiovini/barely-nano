@@ -37,7 +37,6 @@ impl Default for PullCountDecider {
 #[cfg(test)]
 mod tests {
     use super::PullCountDecider;
-    use crate::bootstrap::{state::Priority, BootstrapServer};
 
     #[test]
     fn min_count() {

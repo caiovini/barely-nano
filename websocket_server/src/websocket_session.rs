@@ -2,7 +2,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -94,7 +94,7 @@ impl WebsocketSession {
         Self {
             entry,
             topic_subscriber_count,
-            _peer_addr,
+            peer_addr: _peer_addr,
             stream,
             ws,
             read_buffer: [0u8; 4096],

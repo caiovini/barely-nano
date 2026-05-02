@@ -25,60 +25,7 @@ use alloc::string::String;
 use alloc::format;
 use alloc::borrow::ToOwned;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
-pub struct Ipv6Addr([u8; 16]);
-
-impl Ipv6Addr {
-    pub const UNSPECIFIED: Self = Ipv6Addr([0; 16]);
-    pub const fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
-        Ipv6Addr([
-            (a >> 8) as u8, a as u8,
-            (b >> 8) as u8, b as u8,
-            (c >> 8) as u8, c as u8,
-            (d >> 8) as u8, d as u8,
-            (e >> 8) as u8, e as u8,
-            (f >> 8) as u8, f as u8,
-            (g >> 8) as u8, g as u8,
-            (h >> 8) as u8, h as u8,
-        ])
-    }
-
-    pub const fn octets(&self) -> [u8; 16] {
-        self.0
-    }
-
-    pub const fn new_from_octets(octets: [u8; 16]) -> Self {
-        Self(octets)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
-pub struct SocketAddrV6 {
-    addr: Ipv6Addr,
-    port: u16,
-}
-
-impl SocketAddrV6 {
-    pub const fn new(addr: Ipv6Addr, port: u16, _flowinfo: u32, _scope_id: u32) -> Self {
-        Self { addr, port }
-    }
-
-    pub const fn ip(&self) -> Ipv6Addr {
-        self.addr
-    }
-
-    pub const fn port(&self) -> u16 {
-        self.port
-    }
-}
-
-impl core::str::FromStr for SocketAddrV6 {
-    type Err = anyhow::Error;
-    fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        // Placeholder
-        Ok(Self::default())
-    }
-}
+pub use core::net::{Ipv6Addr, SocketAddrV6};
 
 pub trait Serialize {
     fn serialize(&self, stream: &mut dyn BufferWriter);
@@ -354,16 +301,17 @@ pub fn parse_endpoint(s: &str) -> SocketAddrV6 {
     s.parse().unwrap()
 }
 
-pub const NULL_ENDPOINT: SocketAddrV6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
+pub const NULL_ENDPOINT: SocketAddrV6 =
+    SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 0, 0, 0);
 
 pub const TEST_ENDPOINT_1: SocketAddrV6 =
-    SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0xffff, 0x10, 0, 0, 1), 1111, 0, 0);
+    SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x1000, 1), 1111, 0, 0);
 
 pub const TEST_ENDPOINT_2: SocketAddrV6 =
-    SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0xffff, 0x10, 0, 0, 2), 2222, 0, 0);
+    SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x1000, 2), 2222, 0, 0);
 
 pub const TEST_ENDPOINT_3: SocketAddrV6 =
-    SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0xffff, 0x10, 0, 0, 3), 3333, 0, 0);
+    SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x1000, 3), 3333, 0, 0);
 
 pub fn new_test_timestamp() -> Timestamp {
     Timestamp::new_test_instance()

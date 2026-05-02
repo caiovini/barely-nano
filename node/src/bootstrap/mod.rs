@@ -17,11 +17,11 @@ use rsnano_messages::{AscPullReqType, FrontiersReqPayload, HashType};
 use rsnano_network::Channel;
 use rsnano_nullable_clock::Timestamp;
 
-pub(self) trait BootstrapPromise<T> {
+pub(crate) trait BootstrapPromise<T> {
     fn poll(&mut self, state: &mut state::BootstrapState, now: Timestamp) -> PollResult<T>;
 }
 
-pub(self) enum PollResult<T> {
+pub(crate) enum PollResult<T> {
     Progress,
     Wait,
     Finished(T),

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use alloc::sync::Arc;
 use spin::Mutex;
 use alloc::collections::BTreeMap;
@@ -111,6 +112,6 @@ impl VoteCache {
 
 impl ContainerInfoProvider for VoteCache {
     fn container_info(&self) -> ContainerInfo {
-        ContainerInfo::new()
+        ContainerInfo::builder().finish()
     }
 }

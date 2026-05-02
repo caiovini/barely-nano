@@ -1,5 +1,8 @@
+use crate::utils::SyncSender;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use spin::{ RwLock };
-use alloc::sync::{ Arc };
 
 use rsnano_core::Networks;
 use rsnano_stats::{DetailType, StatType, Stats};
@@ -67,6 +70,7 @@ impl BackpressureEventProcessor<LedgerEvent> for LedgerEventProcessor {
     }
 
     fn process(&mut self, event: LedgerEvent) {
+        tracing::info!("[node] LedgerEventProcessor::process");
         for plugin in &mut self.plugins {
             plugin.process(&event);
         }
@@ -86,7 +90,7 @@ impl BackpressureEventProcessor<LedgerEvent> for LedgerEventProcessor {
             }
             LedgerEvent::BlocksRolledBack(rolled_back) => {
                 {
-                    let mut aec = self.active_elections.write().unwrap();
+                    let mut aec = self.active_elections.write();
                     for result in rolled_back.iter() {
                         for block in &result.rolled_back {
                             // Stop all rolled back elections except initial
@@ -97,7 +101,8 @@ impl BackpressureEventProcessor<LedgerEvent> for LedgerEventProcessor {
                     }
                 }
 
-                self.vote_history.erase_batch(rolled_back.roots());
+                self.vote_history
+                    .erase_batch(rolled_back.roots().into_iter().map(|r| r.root));
 
                 self.bootstrapper
                     .unblock_batch(rolled_back.affected_accounts());
@@ -106,25 +111,22 @@ impl BackpressureEventProcessor<LedgerEvent> for LedgerEventProcessor {
                 // Do some cleanup due to this block never being processed
                 self.active_elections
                     .write()
-                    .unwrap()
                     .remove_recently_confirmed(&block_hash);
             }
             LedgerEvent::ConfirmingSetNearFull => {
                 self.active_elections
                     .write()
-                    .unwrap()
                     .set_cooldown(true, AecCooldownReason::ConfirmingSetFull);
             }
             LedgerEvent::ConfirmingSetRecovered => {
                 self.active_elections
                     .write()
-                    .unwrap()
                     .set_cooldown(false, AecCooldownReason::ConfirmingSetFull);
             }
         }
     }
 }
 
-pub(crate) trait LedgerEventProcessorPlugin: Send {
+pub(crate) trait LedgerEventProcessorPlugin: Send + Sync {
     fn process(&mut self, event: &LedgerEvent);
 }

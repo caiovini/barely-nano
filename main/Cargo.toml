@@ -16,3 +16,11 @@ smode = ["kernel-common/smode"]   # OpenSBI, SBI ecalls
 [dependencies]
 kernel-common = { path = "../common" }
 linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
+rsnano_node = { path = "../node" }
+rsnano_core = { path = "../core" }
+rsnano_network = { path = "../network" }
+rsnano_nullable_random = { path = "../nullables/random" }
+smoltcp = { version = "0.13", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-tcp", "socket-udp", "socket-dns", "async"] }
+anyhow = { version = "1.0", default-features = false }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+tracing = { version = "0.1", default-features = false }

@@ -9,7 +9,7 @@ use crate::sbi;
 
 pub static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
-const TIMER_INTERVAL: u64 = clint::FREQ; // 1 second
+const TIMER_INTERVAL: u64 = clint::FREQ / 100; // 10ms (100 Hz)
 
 // ---- CSR helpers --------------------------------------------------------
 
@@ -94,6 +94,7 @@ global_asm!(
     "sd   x29, 224(sp)",
     "sd   x30, 232(sp)",
     "sd   x31, 240(sp)",
+    "mv   a0, sp",
     "call rust_trap_handler",
     "ld   x1,   0(sp)",
     "ld   x3,  16(sp)",
@@ -167,6 +168,7 @@ global_asm!(
     "sd   x29, 224(sp)",
     "sd   x30, 232(sp)",
     "sd   x31, 240(sp)",
+    "mv   a0, sp",
     "call rust_trap_handler",
     "ld   x1,   0(sp)",
     "ld   x3,  16(sp)",
@@ -237,7 +239,7 @@ pub fn init() {
 // ---- Rust trap handler --------------------------------------------------
 
 #[no_mangle]
-pub extern "C" fn rust_trap_handler() {
+pub extern "C" fn rust_trap_handler(regs: *const usize) {
     // Read the correct cause register for the current privilege mode
     #[cfg(feature = "mmode")]
     let xcause = csrr!("mcause");
@@ -255,12 +257,7 @@ pub extern "C" fn rust_trap_handler() {
     let timer_cause = 5usize;
 
     if is_interrupt && cause == timer_cause {
-        let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        uart::print(b"[tick] #");
-        uart::print_usize(tick as usize);
-        uart::print(b"  mtime=");
-        uart::print_usize(clint::mtime() as usize);
-        uart::print(b"\n");
+        let _tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Schedule next tick
         #[cfg(feature = "mmode")]
@@ -269,13 +266,17 @@ pub extern "C" fn rust_trap_handler() {
         sbi::set_timer(clint::mtime() + TIMER_INTERVAL);
     } else {
         uart::print(b"[TRAP] unexpected xcause=");
-        uart::print_usize(xcause);
+        uart::print_hex(xcause);
         #[cfg(feature = "smode")]
         {
             uart::print(b" sepc=");
-            uart::print_usize(csrr!("sepc"));
+            uart::print_hex(csrr!("sepc"));
             uart::print(b" stval=");
-            uart::print_usize(csrr!("stval"));
+            uart::print_hex(csrr!("stval"));
+            uart::print(b" sp=");
+            unsafe {
+                uart::print_hex(*regs.add(1));
+            }
         }
         uart::print(b"\n");
         loop {}

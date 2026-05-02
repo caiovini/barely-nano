@@ -135,7 +135,7 @@ mod tests {
     fn happy_path() {
         let (mut requester, network) = create_test_requester();
         let mut state = BootstrapState::default();
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
 
         let PollResult::Finished(result) = progress(&mut requester, &mut state) else {
             panic!("promise did not finish!")
@@ -212,7 +212,7 @@ mod tests {
         let result = requester.poll(&mut state, now);
         assert!(matches!(result, PollResult::Wait));
 
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
         let result = requester.poll(&mut state, now);
         assert!(matches!(result, PollResult::Progress));
     }
@@ -221,7 +221,7 @@ mod tests {
     fn finish_request() {
         let (mut requester, network) = create_test_requester();
         let mut state = BootstrapState::default();
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
 
         let PollResult::Finished(spec) = progress(&mut requester, &mut state) else {
             panic!("did not finish");
@@ -239,7 +239,7 @@ mod tests {
     fn wait_when_frontier_scan_rate_limited() {
         let (mut requester, network) = create_test_requester();
         let mut state = BootstrapState::default();
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
         state.frontier_scan = FrontierScan::new_test_instance_blocked();
 
         let result = progress(&mut requester, &mut state);

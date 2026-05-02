@@ -1,8 +1,10 @@
+use core::time::Duration;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use rsnano_core::{BlockHash, Root};
 use rsnano_nullable_clock::Timestamp;
-use alloc::collections::{ BTreeMap };
 use hashbrown::{ HashMap, HashSet };
-// // // // // // use std::{   time::Duration   }; // TODO: fix this
+// // // // // // // use std::{    time::Duration    }; // TODO: fix this
 
 pub struct VoteSpacing {
     delay: Duration,
@@ -223,7 +225,6 @@ mod tests {
     }
 
     mod entry_container_tests {
-        use super::*;
 
         #[test]
         fn trim() {

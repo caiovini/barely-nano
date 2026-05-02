@@ -1,4 +1,12 @@
-// // // // // // use std::{   cmp::min, collections::VecDeque, thread::JoinHandle, time::Duration   }; // TODO: fix this
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use spin::{ Mutex, MutexGuard };
+use core::sync::atomic::{ AtomicBool, Ordering };
+use core::time::Duration;
+use core::cmp::min;
+use crate::utils::{Condvar, JoinHandle};
 
 use rsnano_core::{utils::FairQueue, Block, BlockHash, Frontier};
 use rsnano_ledger::{AnySet, ConfirmedSet, Ledger, OwningAnySet};
@@ -33,9 +41,6 @@ impl Default for BootstrapServerConfig {
     }
 }
 
-/**
- * Processes bootstrap requests (`asc_pull_req` messages) and replies with bootstrap responses (`asc_pull_ack`)
- */
 pub struct BootstrapServer {
     config: BootstrapServerConfig,
     stats: Arc<Stats>,
@@ -45,7 +50,6 @@ pub struct BootstrapServer {
 }
 
 impl BootstrapServer {
-    /** Maximum number of blocks to send in a single response, cannot be higher than capacity of a single `asc_pull_ack` message */
     pub const MAX_BLOCKS: u8 = BlocksAckPayload::MAX_BLOCKS as u8;
     pub const MAX_FRONTIERS: usize = AscPullAck::MAX_FRONTIERS;
 
@@ -80,20 +84,20 @@ impl BootstrapServer {
     }
 
     pub fn start(&self) {
-        debug_assert!(self.threads.lock().unwrap().is_empty());
-
-        let mut threads = self.threads.lock().unwrap();
-        for _ in 0..self.config.threads {
-            let server_impl = Arc::clone(&self.server_impl);
-            threads.push(
-                std::thread::Builder::new()
-                    .name("Bootstrap serv".to_string())
-                    .spawn(move || {
-                        server_impl.run();
-                    })
-                    .unwrap(),
-            );
-        }
+        // debug_assert!(self.threads.lock().is_empty());
+        //
+        // let mut threads = self.threads.lock();
+        // for _ in 0..self.config.threads {
+        //     let server_impl = Arc::clone(&self.server_impl);
+        //     threads.push(
+        //         /* std::/* /* /* thread::Builder::new()
+        //             .name("Bootstrap serv".to_string())
+        //             .spawn(move || {
+        //                 server_impl.run();
+        //             })
+        //             .unwrap(),
+        //     );
+        // }
 
         self.running.store(true, Ordering::Relaxed);
     }
@@ -102,16 +106,16 @@ impl BootstrapServer {
         self.server_impl.stopped.store(true, Ordering::SeqCst);
         self.server_impl.condition.notify_all();
 
-        let mut threads = self.threads.lock().unwrap();
-        for thread in threads.drain(..) {
-            thread.join().unwrap();
+        let mut threads = self.threads.lock();
+        for _thread in threads.drain(..) {
+            // thread.join().unwrap(); */ */ */ */
         }
 
         self.running.store(false, Ordering::Relaxed);
     }
 
     pub fn set_response_callback(&self, cb: Box<dyn Fn(&AscPullAck, &Arc<Channel>) + Send + Sync>) {
-        *self.server_impl.on_response.lock().unwrap() = Some(cb);
+        *self.server_impl.on_response.lock() = Some(cb);
     }
 
     pub fn enqueue(&self, message: AscPullReq, channel: Arc<Channel>) -> bool {
@@ -125,7 +129,6 @@ impl BootstrapServer {
             return false;
         }
 
-        // If channel is full our response will be dropped anyway, so filter that early
         if channel.should_drop(TrafficType::BootstrapServer) {
             self.stats.inc_dir(
                 StatType::BootstrapServer,
@@ -137,7 +140,7 @@ impl BootstrapServer {
 
         let req_type = DetailType::from(&message.req_type);
         let added = {
-            let mut guard = self.server_impl.queue.lock().unwrap();
+            let mut guard = self.server_impl.queue.lock();
             guard.push(channel.channel_id(), (message, channel.clone()))
         };
 
@@ -167,7 +170,7 @@ impl BootstrapServer {
 
 impl Drop for BootstrapServer {
     fn drop(&mut self) {
-        debug_assert!(self.threads.lock().unwrap().is_empty());
+        // debug_assert!(self.threads.lock().is_empty());
     }
 }
 
@@ -185,8 +188,9 @@ pub(crate) struct BootstrapResponderImpl {
 }
 
 impl BootstrapResponderImpl {
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         while !self.stopped.load(Ordering::SeqCst) {
             queue = self
                 .condition
@@ -195,19 +199,17 @@ impl BootstrapResponderImpl {
                 })
                 .unwrap();
 
-            // Rate limit the processing
             while !self.stopped.load(Ordering::SeqCst)
                 && !self
                     .limiter
                     .lock()
-                    .unwrap()
                     .try_consume(self.batch_size, self.clock.now())
             {
                 self.stats
                     .inc(StatType::BootstrapServer, DetailType::Cooldown);
                 queue = self
                     .condition
-                    .wait_timeout(queue, Duration::from_millis(100))
+                    .wait_timeout_while(queue, Duration::from_millis(100), |q| !q.is_empty())
                     .unwrap()
                     .0;
             }
@@ -248,7 +250,7 @@ impl BootstrapResponderImpl {
             }
         }
 
-        self.queue.lock().unwrap()
+        self.queue.lock()
     }
 
     fn process(&self, any: &OwningAnySet, message: AscPullReq) -> AscPullAck {
@@ -267,7 +269,6 @@ impl BootstrapResponderImpl {
         match request.start_type {
             HashType::Account => {
                 if let Some(info) = any.get_account(&request.start.into()) {
-                    // Start from open block if pulling by account
                     return self.prepare_response(any, id, info.open_block, count);
                 }
             }
@@ -278,13 +279,8 @@ impl BootstrapResponderImpl {
             }
         }
 
-        // Neither block nor account found, send empty response to indicate that
         self.prepare_empty_blocks_response(id)
     }
-
-    /*
-     * Account info request
-     */
 
     fn process_account(
         &self,
@@ -295,7 +291,6 @@ impl BootstrapResponderImpl {
         let target = match request.target_type {
             HashType::Account => request.target.into(),
             HashType::Block => {
-                // Try to lookup account assuming target is block hash
                 any.block_account(&request.target.into())
                     .unwrap_or_default()
             }
@@ -316,17 +311,13 @@ impl BootstrapResponderImpl {
                 response_payload.account_conf_height = conf_info.height;
             }
         }
-        // If account is missing the response payload will contain all 0 fields, except for the target
-        //
+
         AscPullAck {
             id,
             pull_type: AscPullAckType::AccountInfo(response_payload),
         }
     }
 
-    /*
-     * Frontiers request
-     */
     fn process_frontiers(
         &self,
         any: &OwningAnySet,
@@ -335,6 +326,7 @@ impl BootstrapResponderImpl {
     ) -> AscPullAck {
         let frontiers = any
             .accounts_range(request.start..)
+            .into_iter()
             .map(|(account, info)| Frontier::new(account, info.head))
             .take(request.count as usize)
             .collect();
@@ -401,7 +393,6 @@ impl BootstrapResponderImpl {
             DetailType::from(&response.pull_type),
         );
 
-        // Increase relevant stats depending on payload type
         match &response.pull_type {
             AscPullAckType::Blocks(blocks) => {
                 self.stats.add_dir(
@@ -429,7 +420,7 @@ impl BootstrapResponderImpl {
         }
 
         {
-            let callback = self.on_response.lock().unwrap();
+            let callback = self.on_response.lock();
             if let Some(cb) = &*callback {
                 (cb)(&response, channel);
             }
@@ -438,7 +429,6 @@ impl BootstrapResponderImpl {
         let msg = Message::AscPullAck(response);
         self.message_sender
             .lock()
-            .unwrap()
             .try_send(channel, &msg, TrafficType::BootstrapServer);
     }
 }
@@ -453,7 +443,7 @@ impl BootstrapResponderCleanup {
 
 impl DeadChannelCleanupStep for BootstrapResponderCleanup {
     fn clean_up_dead_channels(&self, dead_channel_ids: &[ChannelId]) {
-        let mut queue = self.0.queue.lock().unwrap();
+        let mut queue = self.0.queue.lock();
         for channel_id in dead_channel_ids {
             queue.remove(channel_id);
         }

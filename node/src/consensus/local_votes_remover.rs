@@ -16,7 +16,6 @@ impl LocalVotesRemover {
 
         self.active_elections
             .write()
-            .unwrap()
             .remove_votes(root, votes.iter().map(|i| &i.voter));
 
         self.vote_history.erase(&root.root);

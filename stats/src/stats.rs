@@ -1,13 +1,12 @@
 use alloc::{
-    collections::BTreeMap,
     sync::Arc,
     vec::Vec,
 };
 use core::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering, AtomicU32},
     time::Duration,
 };
-use spin::{Mutex, RwLock};
+use spin::{RwLock, Mutex};
 use rsnano_nullable_clock::{Timestamp, SteadyClock};
 
 use anyhow::Result;
@@ -20,9 +19,12 @@ use crate::{
     StatsSource,
 };
 
+const STATS_MAP_SIZE: usize = 4096;
+const MAX_SAMPLES_PER_TYPE: usize = 16;
+
 pub struct Stats {
     config: StatsConfig,
-    mutables: Arc<RwLock<StatMutables>>,
+    mutables: Arc<StatMutables>,
     enable_logging: bool,
     clock: SteadyClock,
 }
@@ -36,104 +38,38 @@ impl Default for Stats {
 impl Stats {
     pub fn new(config: StatsConfig) -> Self {
         let clock = SteadyClock::default();
-        let mutables = Arc::new(RwLock::new(StatMutables {
-            counters: BTreeMap::new(),
-            samplers: BTreeMap::new(),
-            timestamp: clock.now(),
-        }));
         Self {
             config: config.clone(),
-            mutables,
+            mutables: Arc::new(StatMutables::new(clock.now())),
             enable_logging: get_env_bool("NANO_LOG_STATS").unwrap_or(false),
             clock,
         }
     }
 
-    /// Add `value` to given counter
     pub fn add(&self, stat_type: StatType, detail: DetailType, value: u64) {
         self.add_dir(stat_type, detail, Direction::In, value)
     }
 
-    /// Add `value` to given counter
     pub fn add_dir(&self, stat_type: StatType, detail: DetailType, dir: Direction, value: u64) {
-        if value == 0 {
-            return;
-        }
-
+        if value == 0 { return; }
         self.log_add(stat_type, detail, dir, value);
+        
+        self.mutables.add(stat_type, detail, dir, value);
 
-        let key = CounterKey::new(stat_type, detail, dir);
-
-        // This is a two-step process to avoid exclusively locking the mutex in the common case
-        {
-            let lock = self.mutables.read();
-
-            if let Some(counter) = lock.counters.get(&key) {
-                counter.add(value);
-                return;
-            }
-        }
-        // Not found, create a new entry
-        {
-            let mut lock = self.mutables.write();
-            let counter = lock.counters.entry(key).or_insert(CounterEntry::new());
-            counter.add(value);
-
-            let all_key = CounterKey::new(stat_type, DetailType::All, dir);
-            if key != all_key {
-                lock.counters.entry(all_key).or_insert(CounterEntry::new());
-            }
+        let all_key = DetailType::All;
+        if detail != all_key {
+            self.mutables.add(stat_type, all_key, dir, value);
         }
     }
 
     fn log_add(&self, stat_type: StatType, detail: DetailType, dir: Direction, value: u64) {
         if self.enable_logging {
-            debug!(
-                "Stat: {:?}::{:?}::{:?} += {}",
-                stat_type, detail, dir, value
-            );
+            debug!("Stat: {:?}::{:?}::{:?} += {}", stat_type, detail, dir, value);
         }
     }
 
-    pub fn add_dir_aggregate(
-        &self,
-        stat_type: StatType,
-        detail: DetailType,
-        dir: Direction,
-        value: u64,
-    ) {
-        if value == 0 {
-            return;
-        }
-
-        self.log_add(stat_type, detail, dir, value);
-
-        let key = CounterKey::new(stat_type, detail, dir);
-        let all_key = CounterKey::new(stat_type, DetailType::All, dir);
-
-        // This is a two-step process to avoid exclusively locking the mutex in the common case
-        {
-            let lock = self.mutables.read();
-
-            if let Some(counter) = lock.counters.get(&key) {
-                counter.add(value);
-                if key != all_key {
-                    let all_counter = lock.counters.get(&all_key).unwrap();
-                    all_counter.add(value);
-                }
-                return;
-            }
-        }
-        // Not found, create a new entry
-        {
-            let mut lock = self.mutables.write();
-            let counter = lock.counters.entry(key).or_insert(CounterEntry::new());
-            counter.add(value);
-            if key != all_key {
-                let all_counter = lock.counters.entry(all_key).or_insert(CounterEntry::new());
-                all_counter.add(value);
-            }
-        }
+    pub fn add_dir_aggregate(&self, stat_type: StatType, detail: DetailType, dir: Direction, value: u64) {
+        self.add_dir(stat_type, detail, dir, value)
     }
 
     pub fn inc(&self, stat_type: StatType, detail: DetailType) {
@@ -148,26 +84,14 @@ impl Stats {
         self.add_dir_aggregate(stat_type, detail, dir, 1)
     }
 
-    pub fn sample(&self, sample: Sample, value: i64, expected_min_max: (i64, i64)) {
+    pub fn sample(&self, sample: Sample, value: i64, _expected_min_max: (i64, i64)) {
         self.log_sample(sample, value);
-        let key = SamplerKey::new(sample);
-        // This is a two-step process to avoid exclusively locking the mutex in the common case
-        {
-            let lock = self.mutables.read();
-            if let Some(sampler) = lock.samplers.get(&key) {
-                sampler.add(value);
-                return;
-            }
+        let mut guard = self.mutables.samples.lock();
+        let samples = &mut guard[sample as usize];
+        if samples.len() >= MAX_SAMPLES_PER_TYPE {
+            samples.remove(0);
         }
-        // Not found, create a new entry
-        {
-            let mut lock = self.mutables.write();
-            let sampler = lock
-                .samplers
-                .entry(key)
-                .or_insert(SamplerEntry::new(self.config.max_samples, expected_min_max));
-            sampler.add(value)
-        }
+        samples.push(value);
     }
 
     fn log_sample(&self, sample: Sample, value: i64) {
@@ -177,68 +101,122 @@ impl Stats {
     }
 
     pub fn samples(&self, sample: Sample) -> Vec<i64> {
-        let key = SamplerKey::new(sample);
-        let lock = self.mutables.read();
-        if let Some(sampler) = lock.samplers.get(&key) {
-            sampler.collect()
-        } else {
-            Vec::new()
-        }
+        let guard = self.mutables.samples.lock();
+        guard[sample as usize].clone()
     }
 
-    /// Log counters to the given log link
     pub fn log_counters(&self, sink: &mut dyn StatsLogSink) -> Result<()> {
         let now = self.clock.now();
-        let lock = self.mutables.write();
-        lock.log_counters_impl(sink, &self.config, now)
+        sink.begin()?;
+        
+        let mut entries = Vec::new();
+        for i in 0..STATS_MAP_SIZE {
+            let key_val = self.mutables.keys[i].load(Ordering::Relaxed);
+            if key_val != 0 {
+                let val = self.mutables.values[i].load(Ordering::Relaxed);
+                if val > 0 {
+                    let key = CounterKey::from_u32(key_val);
+                    entries.push((key, val));
+                }
+            }
+        }
+        
+        entries.sort_by_key(|e| e.0);
+
+        for (key, val) in entries {
+            sink.write_counter_entry(now, key.stat_type.as_str(), key.detail.as_str(), key.dir.as_str(), val)?;
+        }
+        
+        sink.finalize();
+        Ok(())
     }
 
-    /// Log samples to the given log sink
     pub fn log_samples(&self, sink: &mut dyn StatsLogSink) -> Result<()> {
         let now = self.clock.now();
-        let lock = self.mutables.write();
-        lock.log_samples_impl(sink, &self.config, now)
-    }
-
-    /// Returns the duration since `clear()` was last called, or node startup if it's never called.
-    pub fn last_reset(&self) -> Duration {
-        let lock = self.mutables.read();
-        lock.timestamp.elapsed(self.clock.now())
-    }
-
-    /// Clear all stats
-    pub fn clear(&self) {
-        let mut lock = self.mutables.write();
-        lock.counters.clear();
-        lock.samplers.clear();
-        lock.timestamp = self.clock.now();
-    }
-    ///
-    /// Returns current value for the given counter at the type level
-    pub fn count_all(&self, stat_type: StatType, dir: Direction) -> u64 {
-        let guard = self.mutables.read();
-        let start = CounterKey::new(stat_type, DetailType::All, dir);
-        let mut result = 0u64;
-        for (key, entry) in guard.counters.range(start..) {
-            if key.stat_type != stat_type {
-                break;
+        sink.begin()?;
+        let guard = self.mutables.samples.lock();
+        for (i, samples) in guard.iter().enumerate() {
+            if !samples.is_empty() {
+                let sample_type: Sample = unsafe { core::mem::transmute(i as u8) };
+                sink.write_sampler_entry(now, sample_type.as_str(), samples.clone(), (0, 0))?;
             }
-            if key.dir == dir && key.detail != DetailType::All {
-                result += u64::from(entry);
+        }
+        sink.finalize();
+        Ok(())
+    }
+
+    pub fn last_reset(&self) -> Duration {
+        let last = self.mutables.timestamp.load(Ordering::Relaxed);
+        Duration::from_millis(self.clock.now().millis() as u64 - last as u64)
+    }
+
+    pub fn clear(&self) {
+        for i in 0..STATS_MAP_SIZE {
+            self.mutables.keys[i].store(0, Ordering::Relaxed);
+            self.mutables.values[i].store(0, Ordering::Relaxed);
+        }
+        let mut samples = self.mutables.samples.lock();
+        for s in samples.iter_mut() {
+            s.clear();
+        }
+        self.mutables.timestamp.store(self.clock.now().millis() as u64, Ordering::Relaxed);
+    }
+
+    pub fn count_all(&self, stat_type: StatType, dir: Direction) -> u64 {
+        let mut result = 0;
+        for i in 0..STATS_MAP_SIZE {
+            let key_val = self.mutables.keys[i].load(Ordering::Relaxed);
+            if key_val != 0 {
+                let key = CounterKey::from_u32(key_val);
+                if key.stat_type == stat_type && key.dir == dir && key.detail != DetailType::All {
+                    result += self.mutables.values[i].load(Ordering::Relaxed);
+                }
             }
         }
         result
     }
 
-    /// Returns current value for the given counter at the type level
     pub fn count(&self, stat_type: StatType, detail: DetailType, dir: Direction) -> u64 {
         let key = CounterKey::new(stat_type, detail, dir);
-        self.mutables
-            .read()
-            .counters
-            .get(&key)
-            .map(|i| i.into())
-            .unwrap_or_default()
+        self.mutables.get_value(key)
+    }
+
+    pub fn flush_to_db(&self) -> Result<()> {
+        let mut updates = Vec::new();
+        for i in 0..STATS_MAP_SIZE {
+            let key_val = self.mutables.keys[i].load(Ordering::Relaxed);
+            if key_val != 0 {
+                let val = self.mutables.values[i].load(Ordering::Relaxed);
+                if val > 0 {
+                    updates.push((CounterKey::from_u32(key_val), val));
+                }
+            }
+        }
+
+        if updates.is_empty() { return Ok(()); }
+
+        kernel_common::uart::print(b"[stats] Bulk flushing ");
+        kernel_common::uart::print_usize(updates.len());
+        kernel_common::uart::print(b" counters...\n");
+
+        let mut db_guard = kernel_common::storage::DB.lock();
+        if let Some(db) = db_guard.as_mut() {
+            for (key, val) in updates {
+                let mut db_key = [0u8; 65];
+                db_key[0] = 1; // Stats table
+                db_key[1] = key.stat_type as u8;
+                let detail_bytes = (key.detail as u16).to_le_bytes();
+                db_key[2] = detail_bytes[0];
+                db_key[3] = detail_bytes[1];
+                db_key[4] = key.dir as u8;
+
+                let mut db_val = [0u8; 256];
+                db_val[0..8].copy_from_slice(&val.to_le_bytes());
+                db.insert(db_key, db_val);
+            }
+            db.flush().map_err(|e| anyhow::anyhow!("DB flush failed: {:?}", e))?;
+        }
+        Ok(())
     }
 }
 
@@ -251,150 +229,102 @@ struct CounterKey {
 
 impl CounterKey {
     fn new(stat_type: StatType, detail: DetailType, dir: Direction) -> Self {
+        Self { stat_type, detail, dir }
+    }
+
+    fn to_u32(&self) -> u32 {
+        let s = self.stat_type as u32;
+        let d = self.detail as u32;
+        let r = self.dir as u32;
+        (s << 24) | (d << 8) | r | 0x80000000 // Set MSB to ensure non-zero
+    }
+
+    fn from_u32(val: u32) -> Self {
+        let s = ((val >> 24) & 0x7F) as u8;
+        let d = ((val >> 8) & 0xFFFF) as u16;
+        let r = (val & 0xFF) as u8;
         Self {
-            stat_type,
-            detail,
-            dir,
+            stat_type: unsafe { core::mem::transmute(s) },
+            detail: unsafe { core::mem::transmute(d) },
+            dir: unsafe { core::mem::transmute(r) },
         }
     }
-}
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-struct SamplerKey {
-    sample: Sample,
-}
-
-impl SamplerKey {
-    fn new(sample: Sample) -> Self {
-        Self { sample }
+    fn hash(&self) -> usize {
+        let val = self.to_u32();
+        ((val ^ (val >> 16)) as usize) % STATS_MAP_SIZE
     }
-}
-
-pub enum StatCategory {
-    Counters,
-    Samples,
 }
 
 struct StatMutables {
-    /// Stat entries are sorted by key to simplify processing of log output
-    counters: BTreeMap<CounterKey, CounterEntry>,
-    samplers: BTreeMap<SamplerKey, SamplerEntry>,
-
-    /// Time of last clear() call
-    timestamp: Timestamp,
+    keys: [AtomicU32; STATS_MAP_SIZE],
+    values: [AtomicU64; STATS_MAP_SIZE],
+    samples: Mutex<[Vec<i64>; 8]>, // Fixed size array of samples (8 is enough for Sample enum)
+    timestamp: AtomicU64,
 }
 
 impl StatMutables {
-    /// Unlocked implementation of log_samples() to avoid using recursive locking
-    fn log_samples_impl(
-        &self,
-        sink: &mut dyn StatsLogSink,
-        config: &StatsConfig,
-        time: Timestamp,
-    ) -> Result<()> {
-        sink.begin()?;
-        if sink.entries() >= config.log_rotation_count {
-            sink.rotate()?;
-        }
-
-        if config.log_headers {
-            sink.write_header("samples", time)?;
-        }
-
-        for (&key, entry) in &self.samplers {
-            let sample = key.sample.as_str();
-            sink.write_sampler_entry(time, sample, entry.collect(), entry.expected_min_max)?;
-        }
-        sink.inc_entries();
-        sink.finalize();
-        Ok(())
-    }
-
-    /// Unlocked implementation of log_counters() to avoid using recursive locking
-    fn log_counters_impl(
-        &self,
-        sink: &mut dyn StatsLogSink,
-        config: &StatsConfig,
-        time: Timestamp,
-    ) -> Result<()> {
-        sink.begin()?;
-        if sink.entries() >= config.log_rotation_count {
-            sink.rotate()?;
-        }
-
-        if config.log_headers {
-            sink.write_header("counters", time)?;
-        }
-
-        for (&key, entry) in &self.counters {
-            let type_str = key.stat_type.as_str();
-            let detail = key.detail.as_str();
-            let dir = key.dir.as_str();
-            sink.write_counter_entry(time, type_str, detail, dir, entry.into())?;
-        }
-        sink.inc_entries();
-        sink.finalize();
-        Ok(())
-    }
-}
-
-struct CounterEntry(AtomicU64);
-
-impl CounterEntry {
-    fn new() -> Self {
-        Self(AtomicU64::new(0))
-    }
-
-    fn add(&self, value: u64) {
-        self.0.fetch_add(value, Ordering::SeqCst);
-    }
-}
-
-impl From<&CounterEntry> for u64 {
-    fn from(value: &CounterEntry) -> Self {
-        value.0.load(Ordering::SeqCst)
-    }
-}
-
-struct SamplerEntry {
-    samples: Mutex<alloc::collections::VecDeque<i64>>,
-    max_samples: usize,
-    pub expected_min_max: (i64, i64),
-}
-
-impl SamplerEntry {
-    pub fn new(max_samples: usize, expected_min_max: (i64, i64)) -> Self {
+    fn new(now: Timestamp) -> Self {
+        let keys = unsafe { core::mem::transmute([0u32; STATS_MAP_SIZE]) };
+        let values = unsafe { core::mem::transmute([0u64; STATS_MAP_SIZE]) };
         Self {
-            samples: Mutex::new(alloc::collections::VecDeque::new()),
-            max_samples,
-            expected_min_max,
+            keys,
+            values,
+            samples: Mutex::new(Default::default()),
+            timestamp: AtomicU64::new(now.millis() as u64),
         }
     }
 
-    fn add(&self, value: i64) {
-        let mut guard = self.samples.lock();
-        guard.push_back(value);
-        if guard.len() > self.max_samples {
-            guard.pop_front();
+    fn add(&self, stat_type: StatType, detail: DetailType, dir: Direction, value: u64) {
+        let key = CounterKey::new(stat_type, detail, dir);
+        let key_u32 = key.to_u32();
+        let mut idx = key.hash();
+        
+        loop {
+            let current_key = self.keys[idx].load(Ordering::Relaxed);
+            if current_key == key_u32 {
+                self.values[idx].fetch_add(value, Ordering::Relaxed);
+                return;
+            }
+            if current_key == 0 {
+                if self.keys[idx].compare_exchange(0, key_u32, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                    self.values[idx].fetch_add(value, Ordering::Relaxed);
+                    return;
+                }
+                continue;
+            }
+            idx = (idx + 1) % STATS_MAP_SIZE;
         }
     }
 
-    fn collect(&self) -> Vec<i64> {
-        let mut guard = self.samples.lock();
-        guard.drain(..).collect()
+    fn get_value(&self, key: CounterKey) -> u64 {
+        let key_u32 = key.to_u32();
+        let mut idx = key.hash();
+        let start_idx = idx;
+        
+        loop {
+            let current_key = self.keys[idx].load(Ordering::Relaxed);
+            if current_key == key_u32 {
+                return self.values[idx].load(Ordering::Relaxed);
+            }
+            if current_key == 0 {
+                return 0;
+            }
+            idx = (idx + 1) % STATS_MAP_SIZE;
+            if idx == start_idx { return 0; }
+        }
     }
 }
 
 impl StatsSource for Stats {
     fn collect_stats(&self, result: &mut StatsCollection) {
-        let guard = self.mutables.read();
-        for (key, entry) in &guard.counters {
-            result.insert_dir(
-                key.stat_type.as_str(),
-                key.detail.as_str(),
-                key.dir,
-                entry.0.load(Ordering::Relaxed),
-            );
+        for i in 0..STATS_MAP_SIZE {
+            let key_val = self.mutables.keys[i].load(Ordering::Relaxed);
+            if key_val != 0 {
+                let key = CounterKey::from_u32(key_val);
+                let val = self.mutables.values[i].load(Ordering::Relaxed);
+                result.insert_dir(key.stat_type.as_str(), key.detail.as_str(), key.dir, val);
+            }
         }
     }
 }

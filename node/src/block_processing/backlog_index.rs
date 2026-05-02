@@ -1,9 +1,10 @@
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use rsnano_core::{
     utils::{ContainerInfo, TimePriority},
     Account, BlockHash,
 };
 use hashbrown::{ HashMap };
-use alloc::collections::{ BTreeMap };
 
 #[derive(Clone)]
 pub(super) struct BacklogEntry {
@@ -148,7 +149,7 @@ impl BacklogIndex {
     pub fn container_info(&self) -> ContainerInfo {
         let mut bucket_sizes = ContainerInfo::builder();
         for (index, len) in self.bucket_lens.iter().enumerate() {
-            bucket_sizes = bucket_sizes.leaf(index.to_string(), *len, 0);
+            bucket_sizes = bucket_sizes.leaf(alloc::format!("{}", index), *len, 0);
         }
 
         ContainerInfo::builder()

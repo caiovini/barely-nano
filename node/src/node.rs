@@ -1,3 +1,7 @@
+use crate::utils::Receiver;
+use spin::MutexGuard;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -7,6 +11,7 @@ use spin::{Mutex, RwLock};
 
 use crate::utils::BoundedVecDeque;
 use tracing::{debug, error, info, warn};
+use kernel_common::async_rt;
 
 use rsnano_core::{
     utils::{
@@ -19,7 +24,7 @@ use rsnano_ledger::{AnySet, BlockError, Ledger, LedgerBuilder, LedgerSet};
 use rsnano_messages::NetworkFilter;
 use rsnano_network::{
     ChannelId, DeadChannelCleanup, Network, NetworkCleanup, PeerConnector, TcpListener,
-    TcpListenerExt, TcpNetworkAdapter, TrafficType,
+     TcpNetworkAdapter, TrafficType,
 };
 use rsnano_network_protocol::{
     HandshakeStats, InboundMessageQueue, InboundMessageQueueCleanup, LatestKeepalives,
@@ -27,7 +32,7 @@ use rsnano_network_protocol::{
 };
 use rsnano_nullable_clock::{SteadyClock, SystemTimeFactory};
 use rsnano_nullable_fs::NullableFilesystem;
-use rsnano_nullable_lmdb::{EnvironmentFlags, EnvironmentOptions, LmdbEnv, LmdbEnvironmentFactory};
+
 use rsnano_output_tracker::OutputListenerMt;
 use rsnano_stats::{Direction, Stats, StatsCollection, StatsCollector};
 
@@ -108,27 +113,27 @@ pub struct Node {
     pub vote_cache: Arc<Mutex<VoteCache>>,
     pub block_processor: Arc<BlockProcessor>,
     pub block_processor_queue: Arc<BlockProcessorQueue>,
-    // pub wallets: Arc<Wallets>,
-    // pub vote_generators: Arc<VoteGenerators>,
+    pub wallets: Arc<Wallets>,
+    pub vote_generators: Arc<VoteGenerators>,
     pub active: Arc<RwLock<ActiveElectionsContainer>>,
     pub vote_processor: Arc<VoteProcessor>,
     vote_cache_processor: Arc<VoteCacheProcessor>,
     pub rep_crawler: Arc<RepCrawler>,
     pub tcp_listener: Arc<TcpListener>,
     pub election_schedulers: Arc<ElectionSchedulers>,
-    // pub request_aggregator: Arc<RequestAggregator>,
+    pub request_aggregator: Arc<RequestAggregator>,
     pub backlog_scan: BacklogScan,
     bounded_backlog: Arc<BoundedBacklog>,
     pub bootstrapper: Arc<Bootstrapper>,
     pub local_block_broadcaster: Arc<LocalBlockBroadcaster>,
-    message_processor: Mutex<MessageProcessor>,
+    pub message_processor: Mutex<MessageProcessor>,
     network_threads: Arc<Mutex<NetworkThreads>>,
     ledger_pruning: Arc<LedgerPruning>,
     pub peer_connector: Arc<PeerConnector>,
     peer_cache_updater: Arc<PeerCacheUpdater>,
     peer_cache_connector: Arc<PeerCacheConnector>,
     pub inbound_message_queue: Arc<InboundMessageQueue>,
-    monitor: Arc<NodeMonitor>,
+    monitor: Arc<Mutex<NodeMonitor>>,
     stopped: AtomicBool,
     pub network_filter: Arc<NetworkFilter>,
     pub message_sender: Arc<Mutex<MessageSender>>, // TODO remove this. It is needed right now
@@ -149,6 +154,7 @@ pub struct Node {
     block_rate_calculator: Arc<BlockRateCalculator>,
     block_rates: Arc<CurrentBlockRates>,
     pub aec_voter: Arc<AecVoter>,
+    pub dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
 }
 
 pub(crate) struct NodeArgs {
@@ -158,6 +164,7 @@ pub(crate) struct NodeArgs {
     pub flags: NodeFlags,
     pub callbacks: NodeCallbacks,
     pub event_sender: Option<Arc<dyn Fn(NodeEvent) + Send + Sync>>,
+    pub resolver: Arc<dyn rsnano_network::AsyncDnsResolver>,
 }
 
 impl NodeArgs {
@@ -171,11 +178,17 @@ impl NodeArgs {
             flags: Default::default(),
             callbacks: Default::default(),
             event_sender: None,
+            resolver: Arc::new(rsnano_network::NullDnsResolver),
         }
     }
 }
 
 impl Node {
+    pub fn tick_monitor(&self) {
+        let mut guard = self.monitor.lock();
+        let cancel_token = rsnano_core::utils::CancellationToken::new();
+        rsnano_core::utils::Tickable::tick(&mut *guard, &cancel_token);
+    }
     pub fn new_null() -> Self {
         Self::new_null_with_callbacks(Default::default())
     }
@@ -188,7 +201,7 @@ impl Node {
         Self::new(args, true, NodeIdKeyFile::new_null())
     }
 
-    pub(crate) fn new_with_args(args: NodeArgs) -> Self {
+    pub fn new_with_args(args: NodeArgs) -> Self {
         Self::new(args, false, NodeIdKeyFile::default())
     }
 
@@ -196,14 +209,25 @@ impl Node {
         self.node_id.public_key().into()
     }
 
-    fn new(args: NodeArgs, is_nulled: bool, _node_id_key_file: NodeIdKeyFile) -> Self {
+    fn new(args: NodeArgs, is_nulled: bool, mut node_id_key_file: NodeIdKeyFile) -> Self {
+        let node_id_key = node_id_key_file.initialize(".").unwrap_or_else(|_| {
+            PrivateKey::from_bytes(&[0u8; 32])
+        });
+        let node_id = NodeId::from(&node_id_key);
+        info!("--- DYNAMIC NODE START ---");
+        info!("Node ID: {}", node_id);
+        let global_config = GlobalConfig::default();
+        let (ledger_tx, ledger_rx) = backpressure_channel(1024 * 5);
+        let mut event_queues_info = ContainerInfoFactory::new();
+        let ledger_tx_clone = ledger_tx.clone();
+        event_queues_info.add_leaf("ledger", move || ledger_tx_clone.len());
         let network_params = args.network_params;
         let current_network = network_params.network.current_network;
         let network_label = network_params.network.get_current_network_as_string();
         let application_path = args.data_path;
 
         info!("Node started");
-        info!("Version: 2.0.0");
+        info!("Version: 27.1");
         info!("Network: {}", network_label);
         info!("Data path: {}", application_path);
         info!(
@@ -236,9 +260,8 @@ impl Node {
             Arc::new(SteadyClock::default())
         };
 
-        let node_id_key = PrivateKey::from_bytes([0u8; 32]); // Hardcoded for now
-        let node_id = NodeId::from(&node_id_key);
-        info!("Node ID: {}", node_id);
+
+        let node_observer = args.event_sender.as_ref().map(|f| crate::utils::SyncSender::new(f.clone()));
 
         let stats = Arc::new(Stats::new(Default::default()));
 
@@ -275,14 +298,14 @@ impl Node {
         info!("Confirmed count: {}", ledger.confirmed_count());
         info!("Account count: {}", ledger.account_count());
 
-        let _syn_cookies = Arc::new(SynCookies::new(network_params.network.max_peers_per_ip, steady_clock.clone()));
+        let syn_cookies = Arc::new(SynCookies::new(network_params.network.max_peers_per_ip, steady_clock.clone()));
 
         // In bare-metal we don't have multiple threads, so we use a dummy thread pool
-        let workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::new());
-        let wallet_workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::new());
+        let workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::create(1, "Workers"));
+        let wallet_workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::create(1, "Wallet Workers"));
 
         let mut inbound_message_queue =
-            InboundMessageQueue::new(config.message_processor.max_queue);
+            InboundMessageQueue::new(1024);
         if let Some(cb) = args.callbacks.on_inbound {
             inbound_message_queue.set_inbound_callback(cb);
         }
@@ -291,8 +314,8 @@ impl Node {
         }
         let inbound_message_queue = Arc::new(inbound_message_queue);
 
-        let network = Network::new(config.network.clone());
-        runtime.spawn(run_loopback_channel_adapter(
+        let network = Network::new_from_config(config.network.clone());
+        let _ = (run_loopback_channel_adapter(
             network.loopback().clone(),
             node_id,
             current_network,
@@ -385,6 +408,7 @@ impl Node {
             config.confirming_set.clone(),
             ledger.clone(),
             stats.clone(),
+            steady_clock.clone(),
         ));
         confirming_set.set_event_publisher(ledger_tx.clone());
 
@@ -398,17 +422,11 @@ impl Node {
             config.fork_cache_max_forks_per_root,
         )));
 
-        let block_processor_config = ProcessQueueConfig::from(global_config);
+        let block_processor_config = ProcessQueueConfig::default();
         let block_processor_queue = Arc::new(BlockProcessorQueue::new(block_processor_config));
 
-        /*
-        let mut wallets_path = application_path.clone();
-        wallets_path.push("wallets.ldb");
-
-        let wallets_env = Arc::new(LmdbEnv::new_null());
 
         let wallets = Wallets::new(
-            wallets_env,
             ledger.clone(),
             &config,
             network_params.work.clone(),
@@ -422,7 +440,7 @@ impl Node {
             current_network,
         );
         let wallets = Arc::new(wallets);
-        */
+
 
         let vote_broadcaster = Arc::new(VoteBroadcaster::new(
             vote_processor_queue.clone(),
@@ -430,7 +448,7 @@ impl Node {
             stats.clone(),
         ));
 
-        /*
+
         let vote_generators = Arc::new(VoteGenerators::new(
             ledger.clone(),
             wallets.clone(),
@@ -442,7 +460,6 @@ impl Node {
             message_sender.clone(),
             steady_clock.clone(),
         ));
-        */
 
         let base_latency = match current_network {
             Networks::NanoDevNetwork => Duration::from_millis(25),
@@ -452,6 +469,7 @@ impl Node {
         let (aec_sender, aec_receiver) = backpressure_channel(1024 * 5);
         let aec_sender_clone = aec_sender.clone();
         event_queues_info.add_leaf("aec", move || aec_sender_clone.len());
+        let mut ledger_event_processor_plugins = Vec::<Box<dyn LedgerEventProcessorPlugin>>::new();
 
         let mut active_elections =
             ActiveElectionsContainer::new(config.active_elections.clone(), base_latency);
@@ -533,7 +551,7 @@ impl Node {
         let handshake_stats = Arc::new(HandshakeStats::default());
 
         let inbound_queue_clone = inbound_message_queue.clone();
-        let try_enqueue = Arc::new(move |msg, channel| inbound_queue_clone.put(msg, channel));
+        let try_enqueue = move |msg, channel| inbound_queue_clone.put(msg, channel);
 
         let data_receiver_factory = alloc::boxed::Box::new(NanoDataReceiverFactory::new(
             &network,
@@ -572,6 +590,7 @@ impl Node {
             peer_connector.clone(),
             message_sender.clone(),
             keepalive_factory.clone(),
+            args.resolver.clone(),
         ));
 
         let rep_crawler = Arc::new(RepCrawler::new(
@@ -589,21 +608,20 @@ impl Node {
         ));
 
         let tcp_listener = Arc::new(TcpListener::new(
-            network.read().listening_port(),
             network_adapter.clone(),
         ));
 
-        /*
+
         let request_aggregator = Arc::new(RequestAggregator::new(
             config.request_aggregator.clone(),
             stats.clone(),
             vote_generators.clone(),
             ledger.clone(),
         ));
-        */
+
 
         let mut backlog_scan =
-            BacklogScan::new(global_config.into(), ledger.clone(), steady_clock.clone());
+            BacklogScan::new(Default::default(), ledger.clone(), steady_clock.clone());
 
         //  TODO: Hook this direclty in the schedulers
         let schedulers_w = Arc::downgrade(&election_schedulers);
@@ -665,7 +683,7 @@ impl Node {
             });
         }
 
-        let track_conf_times = Box::new(TrackConfirmationTimes::default());
+        let track_conf_times = Box::new(TrackConfirmationTimes::new(steady_clock.clone()));
         let conf_time_stats = track_conf_times.stats();
         ledger_event_processor_plugins.push(track_conf_times);
 
@@ -718,13 +736,13 @@ impl Node {
         // TODO: remove the duplication of the on_rolling_back event
         bounded_backlog.can_roll_back(move |hash| {
             if let Some(i) = vote_cache_w.upgrade() {
-                if i.lock().unwrap().contains(hash) {
+                if i.lock().contains(hash) {
                     return false;
                 }
             }
 
             if let Some(i) = active_w.upgrade() {
-                let guard = i.read().unwrap();
+                let guard = i.read();
                 if guard.is_active_hash(hash) || guard.was_recently_confirmed(hash) {
                     return false;
                 }
@@ -788,6 +806,7 @@ impl Node {
             request_aggregator.state.clone(),
         ));
         dead_channel_cleanup.add_step(BootstrapperCleanup(bootstrapper.clone()));
+        let dead_channel_cleanup = Arc::new(Mutex::new(dead_channel_cleanup));
 
         let realtime_message_handler = Arc::new(RealtimeMessageHandler::new(
             stats.clone(),
@@ -814,7 +833,7 @@ impl Node {
             network_filter.clone(),
             keepalive_factory.clone(),
             latest_keepalives.clone(),
-            dead_channel_cleanup,
+            dead_channel_cleanup.clone(),
             message_flooder.clone(),
             steady_clock.clone(),
         )));
@@ -838,7 +857,6 @@ impl Node {
         if !flags.disable_rep_crawler {
             network
                 .write()
-                .unwrap()
                 .on_new_realtime_channel(Arc::new(move |channel| {
                     if let Some(crawler) = rep_crawler_w.upgrade() {
                         crawler.query_with_priority(channel);
@@ -878,7 +896,6 @@ impl Node {
         let message_publisher_w = Arc::downgrade(&message_publisher_l);
         network
             .write()
-            .unwrap()
             .on_new_realtime_channel(Arc::new(move |channel| {
                 // Send a keepalive message to the new channel
                 let Some(factory) = keepalive_factory_w.upgrade() else {
@@ -890,7 +907,6 @@ impl Node {
                 let keepalive = factory.create_keepalive_self();
                 publisher
                     .lock()
-                    .unwrap()
                     .try_send(&channel, &keepalive, TrafficType::Keepalive);
             }));
 
@@ -899,12 +915,11 @@ impl Node {
         }
 
         info!(
-            "Outbound bandwidth limit: {} bytes/s, burst ratio: {}",
-            config.network.limiter.generic_limit, config.network.limiter.generic_burst_ratio
+            "Outbound bandwidth limit: disabled (bare-metal)",
         );
 
         let has_local_reps = {
-            let wallet_reps = wallets.wallet_reps.lock().unwrap();
+            let wallet_reps = wallets.wallet_reps.lock();
             let has_local_reps = wallet_reps.voting_reps() > 0;
             if has_local_reps {
                 info!(
@@ -978,13 +993,13 @@ impl Node {
             stats.clone(),
         ));
 
-        let monitor = Arc::new(NodeMonitor::new(
+        let monitor = Arc::new(Mutex::new(NodeMonitor::new(
             ledger.clone(),
             network.clone(),
             online_reps.clone(),
             active_elections.clone(),
             block_rates.clone(),
-        ));
+        )));
 
         let mut wallet_reps_checker = WalletRepsChecker::new(wallets.wallet_reps.clone());
         wallet_reps_checker.add_consumer(vote_rebroadcast_queue.clone());
@@ -1102,9 +1117,9 @@ impl Node {
         stats_collector.add_source(active_elections.clone());
         stats_collector.add_source(vote_rebroadcaster.stats.clone());
         stats_collector.add_source(election_schedulers.clone());
-        stats_collector.add_source(network.clone());
+        // stats_collector.add_source(network.clone());
         stats_collector.add_source(backlog_scan.stats());
-        stats_collector.add_source(handshake_stats);
+        // stats_collector.add_source(handshake_stats);
         stats_collector.add_source(inbound_message_queue.clone());
         stats_collector.add_source(bootstrap_stale_stats);
         stats_collector.add_source(block_processor.clone());
@@ -1116,9 +1131,9 @@ impl Node {
 
         let mut container_info = ContainerInfoFactory::new();
         container_info.add("work", work_factory.clone());
-        container_info.add("ledger", ledger.clone());
+        // container_info.add("ledger", ledger.clone());
         container_info.add("active", active_elections.clone());
-        container_info.add("network", network.clone());
+        // container_info.add("network", network.clone());
         container_info.add("syn_cookies", syn_cookies);
         container_info.add("telemetry", telemetry.clone());
         container_info.add("wallets", wallets.clone());
@@ -1141,7 +1156,7 @@ impl Node {
         container_info.add("bounded_backlog", bounded_backlog.clone());
         container_info.add("vote_rebroadcaster", vote_rebroadcast_queue.clone());
         container_info.add("fork_cache", fork_cache.clone());
-        container_info.add("event_queues", event_queues_info);
+        // container_info.add("event_queues", event_queues_info);
 
         Self {
             is_nulled,
@@ -1173,15 +1188,15 @@ impl Node {
             vote_cache,
             block_processor,
             block_processor_queue,
-            // wallets,
-            // vote_generators,
+            wallets,
+            vote_generators,
             active: active_elections,
             vote_processor,
             vote_cache_processor,
             rep_crawler,
             tcp_listener,
             election_schedulers,
-            // request_aggregator,
+            request_aggregator,
             backlog_scan,
             bounded_backlog,
             bootstrapper,
@@ -1190,7 +1205,7 @@ impl Node {
             network_threads,
             message_processor,
             inbound_message_queue,
-            monitor: Arc::new(monitor),
+            monitor,
             message_sender: message_publisher_l,
             message_flooder,
             network_filter,
@@ -1210,6 +1225,7 @@ impl Node {
             block_rate_calculator: Arc::new(block_rate_calculator),
             block_rates,
             aec_voter: Arc::new(aec_voter),
+            dead_channel_cleanup,
         }
     }
 
@@ -1267,7 +1283,7 @@ impl Node {
     pub fn insert_into_wallet(&self, keys: &PrivateKey) {
         let wallet_id = self.wallets.wallet_ids()[0];
         self.wallets
-            .insert_adhoc2(&wallet_id, &keys.raw_key(), true)
+            .insert_adhoc2(&wallet_id, keys.raw_key().as_bytes(), true)
             .unwrap();
     }
 
@@ -1349,11 +1365,11 @@ impl Node {
     }
 
     pub fn is_active_root(&self, root: &QualifiedRoot) -> bool {
-        self.active.read().unwrap().is_active_root(root)
+        self.active.read().is_active_root(root)
     }
 
     pub fn is_active_hash(&self, hash: &BlockHash) -> bool {
-        self.active.read().unwrap().is_active_hash(hash)
+        self.active.read().is_active_hash(hash)
     }
 
     pub fn flood_block_many(
@@ -1372,7 +1388,6 @@ impl Node {
         );
         self.active
             .write()
-            .unwrap()
             .force_confirm(hash, self.steady_clock.now());
     }
 
@@ -1428,7 +1443,7 @@ impl Node {
         }
 
         if self.config.tcp.max_inbound_connections > 0 {
-            self.tcp_listener.start();
+            self.tcp_listener.run();
         } else {
             warn!("Peering is disabled");
         }
@@ -1474,6 +1489,7 @@ impl Node {
         self.bootstrapper.start();
         self.telemetry.start();
         self.local_block_broadcaster.start();
+        self.rep_crawler.start();
 
         /*
         self.peer_cache_updater.start_delayed(if is_dev_network {
@@ -1487,6 +1503,28 @@ impl Node {
             self.peer_cache_connector
                 .start(self.config.network.cached_peer_reachout);
         }
+
+        let cleanup = self.dead_channel_cleanup.clone();
+        let stats = self.stats.clone();
+        let clock = self.steady_clock.clone();
+        async_rt::spawn(async move {
+            let mut last_cleanup = clock.now();
+            let mut last_stats_flush = clock.now();
+            let cleanup_interval = core::time::Duration::from_secs(60);
+            let stats_interval = core::time::Duration::from_secs(10);
+            loop {
+                let now = clock.now();
+                if now.millis() - last_cleanup.millis() >= cleanup_interval.as_millis() as i64 {
+                    cleanup.lock().clean_up();
+                    last_cleanup = now;
+                }
+                if now.millis() - last_stats_flush.millis() >= stats_interval.as_millis() as i64 {
+                    let _ = stats.flush_to_db();
+                    last_stats_flush = now;
+                }
+                async_rt::yield_now().await;
+            }
+        });
         /*
         if self.config.enable_monitor {
             self.monitor.start_delayed(self.config.monitor.interval);
@@ -1510,13 +1548,13 @@ impl Node {
         info!("Node stopping...");
 
         self.tcp_listener.stop();
-        self.aec_voter.stop();
-        self.wallet_reps_checker.stop();
-        self.online_weight_calculation.stop();
+        // self.aec_voter.stop();
+        // self.wallet_reps_checker.stop();
+        // self.online_weight_calculation.stop();
         self.peer_connector.stop();
         self.ledger_pruning.stop();
-        self.peer_cache_connector.stop();
-        self.peer_cache_updater.stop();
+        // self.peer_cache_connector.stop();
+        // self.peer_cache_updater.stop();
         // Cancels ongoing work generation tasks, which may be blocking other threads
         // No tasks may wait for work generation in I/O threads, or termination signal capturing will be unable to call node::stop()
         self.work_factory.stop();
@@ -1529,9 +1567,9 @@ impl Node {
         self.request_aggregator.stop();
         self.vote_cache_processor.stop();
         self.vote_processor.stop();
-        self.rep_tiers_calculator.stop();
+        // self.rep_tiers_calculator.stop();
         self.election_schedulers.stop();
-        self.aec_ticker.stop();
+        // self.aec_ticker.stop();
         self.active.write().stop();
         self.vote_generators.stop();
         self.confirming_set.stop();
@@ -1541,14 +1579,14 @@ impl Node {
         self.local_block_broadcaster.stop();
         self.message_processor.lock().stop();
         self.network_threads.lock().stop(); // Stop network last to avoid killing in-use sockets
-        self.monitor.stop();
+        // self.monitor.stop();
         self.vote_rebroadcaster.stop();
-        self.block_rate_calculator.stop();
+        // self.block_rate_calculator.stop();
 
-        self.wallet_workers.stop();
-        self.workers.stop();
+        // self.wallet_workers.stop();
+        // self.workers.stop();
 
-        self.tokio_runner.stop();
+        // self.tokio_runner.stop();
         // work pool is not stopped on purpose due to testing setup
     }
 }
@@ -1600,8 +1638,8 @@ mod tests {
     };
     use rsnano_core::Networks;
     use rsnano_stats::StatsSource;
-    // // // // // // use std::{   any::type_name, ops::Deref, ops::DerefMut   }; // TODO: fix this
-    // // use uuid::Uuid;
+    // // // // // // // use std::{    any::type_name, ops::Deref, ops::DerefMut    }; // TODO: fix this
+    // // // // // // // // // use uuid::Uuid;
 
     #[test]
     fn start_peer_cache_updater() {
@@ -1720,7 +1758,7 @@ mod tests {
     #[test]
     fn connect_winner_block_rebroadcaster() {
         let node = Node::new_null();
-        let broadcast_tracker = node.winner_block_broadcaster.lock().unwrap().track();
+        let broadcast_tracker = node.winner_block_broadcaster.lock().track();
         let election = ConfirmedElection::new_test_instance();
         let winner_hash = election.winner.hash();
 
@@ -1766,7 +1804,7 @@ mod tests {
     impl Drop for TestNode {
         fn drop(&mut self) {
             self.node.stop();
-            // std::fs::remove_dir_all(&self.app_path).unwrap();
+            // // // // // // // // std::fs::remove_dir_all(&self.app_path).unwrap();
         }
     }
 

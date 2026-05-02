@@ -1,6 +1,9 @@
-use alloc::sync::{ Arc };
-use spin::{ Mutex };
-// // // // // // use std::{   cmp::max, cmp::min, sync::Condvar, sync::MutexGuard, thread::JoinHandle   }; // TODO: fix this
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::ToString;
+use spin::{ Mutex, MutexGuard };
+use crate::utils::{Condvar, JoinHandle};
+use core::cmp::{max, min};
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider, FairQueue},
@@ -74,24 +77,24 @@ impl RequestAggregator {
     }
 
     pub fn start(&self) {
-        let mut guard = self.threads.lock().unwrap();
-        for _ in 0..self.config.threads {
-            let aggregator_loop = RequestAggregatorLoop {
-                mutex: self.state.clone(),
-                condition: self.condition.clone(),
-                stats: self.stats.clone(),
-                config: self.config.clone(),
-                ledger: self.ledger.clone(),
-                vote_generators: self.vote_generators.clone(),
-            };
-
-            guard.push(
-                std::thread::Builder::new()
-                    .name("Req aggregator".to_string())
-                    .spawn(move || aggregator_loop.run())
-                    .unwrap(),
-            );
-        }
+        // let mut guard = self.threads.lock();
+        // for _ in 0..self.config.threads {
+        //     let aggregator_loop = RequestAggregatorLoop {
+        //         mutex: self.state.clone(),
+        //         condition: self.condition.clone(),
+        //         stats: self.stats.clone(),
+        //         config: self.config.clone(),
+        //         ledger: self.ledger.clone(),
+        //         vote_generators: self.vote_generators.clone(),
+        //     };
+        //
+        //     guard.push(
+        //         std::/* /* /* thread::Builder::new()
+        //             .name("Req aggregator".to_string())
+        //             .spawn(move || aggregator_loop.run())
+        //             .unwrap(),
+        //     );
+        // }
     }
 
     pub fn request(&self, request: AggregatorRequest) -> bool {
@@ -104,7 +107,6 @@ impl RequestAggregator {
         let added = {
             self.state
                 .lock()
-                .unwrap()
                 .queue
                 .push(request.channel.channel_id(), request)
         };
@@ -142,21 +144,21 @@ impl RequestAggregator {
     }
 
     pub fn stop(&self) {
-        self.state.lock().unwrap().stopped = true;
+        self.state.lock().stopped = true;
         self.condition.notify_all();
-        let mut threads = Vec::new();
+        let mut _threads = Vec::new();
         {
-            let mut guard = self.threads.lock().unwrap();
-            core::mem::swap(&mut threads, &mut *guard);
+            let mut guard = self.threads.lock();
+            core::mem::swap(&mut _threads, &mut *guard);
         }
-        for thread in threads {
-            thread.join().unwrap();
-        }
+        // for thread in threads {
+        //     thread.join().unwrap(); */ */ */
+        // }
     }
 
     /// Returns the number of currently queued request pools
     pub fn len(&self) -> usize {
-        self.state.lock().unwrap().queue.len()
+        self.state.lock().queue.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -166,13 +168,13 @@ impl RequestAggregator {
 
 impl Drop for RequestAggregator {
     fn drop(&mut self) {
-        debug_assert!(self.threads.lock().unwrap().is_empty())
+        // debug_assert!(self.threads.lock().is_empty())
     }
 }
 
 impl ContainerInfoProvider for RequestAggregator {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.state.lock().unwrap();
+        let guard = self.state.lock();
         ContainerInfo::builder()
             .node("queue", guard.queue.container_info())
             .finish()
@@ -190,6 +192,7 @@ pub(crate) struct RequestAggregatorState {
     stopped: bool,
 }
 
+#[allow(dead_code)]
 struct RequestAggregatorLoop {
     mutex: Arc<Mutex<RequestAggregatorState>>,
     condition: Arc<Condvar>,
@@ -200,8 +203,9 @@ struct RequestAggregatorLoop {
 }
 
 impl RequestAggregatorLoop {
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         while !guard.stopped {
             if !guard.queue.is_empty() {
                 guard = self.run_batch(guard);
@@ -214,6 +218,7 @@ impl RequestAggregatorLoop {
         }
     }
 
+    #[allow(dead_code)]
     fn run_batch<'a>(
         &'a self,
         mut state: MutexGuard<'a, RequestAggregatorState>,
@@ -241,9 +246,10 @@ impl RequestAggregatorLoop {
             }
         }
 
-        self.mutex.lock().unwrap()
+        self.mutex.lock()
     }
 
+    #[allow(dead_code)]
     fn process(&self, any: &dyn AnySet, request: &AggregatorRequest) {
         let remaining = self.aggregate(any, request);
 
@@ -284,8 +290,7 @@ impl RequestAggregatorLoop {
         }
     }
 
-    /// Aggregate requests and send cached votes to channel.
-    /// Return the remaining hashes that need vote generation for each block for regular & final vote generators
+    #[allow(dead_code)]
     fn aggregate(&self, any: &dyn AnySet, requests: &AggregatorRequest) -> AggregateResult {
         let mut aggregator = RequestAggregatorImpl::new(&self.stats, any);
         aggregator.add_votes(&requests.roots_hashes);
@@ -305,7 +310,7 @@ impl RequestAggregatorCleanup {
 
 impl DeadChannelCleanupStep for RequestAggregatorCleanup {
     fn clean_up_dead_channels(&self, dead_channel_ids: &[ChannelId]) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
         for channel_id in dead_channel_ids {
             guard.queue.remove(channel_id);
         }

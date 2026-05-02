@@ -156,7 +156,7 @@ impl TcpChannelAdapter {
         loop {
             // Simple yielding wait
             for _ in 0..5 {
-                async_rt::spawn(async {});
+                async_rt::yield_now().await;
                 for _ in 0..100 { core::hint::spin_loop(); }
             }
 

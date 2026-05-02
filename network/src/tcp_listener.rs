@@ -24,36 +24,32 @@ impl TcpListener {
         let cancel_token = self.cancel_token.clone();
 
         async_rt::spawn(async move {
-            let run_loop = async {
-                loop {
-                    if cancel_token.is_cancelled() {
-                        break;
-                    }
-
-                    network_adapter.wait_for_available_inbound_slot().await;
-
-                    if cancel_token.is_cancelled() {
-                        break;
-                    }
-
-                    // For now, we don't have a real AsyncTcpListener implementation in kernel-common
-                    // that works with the smoltcp stack in a way we can use here yet.
-                    // This will be implemented when the networking stack is further along.
-                    debug!("TCP Listener: waiting for incoming connections (stub)");
-                    pending::<()>().await;
-                }
-            };
-
-            let _ = core::future::poll_fn(|cx| {
+            loop {
                 if cancel_token.is_cancelled() {
-                    core::task::Poll::Ready(())
-                } else {
-                    // This is a stub, so we just stay pending
-                    core::task::Poll::Pending
+                    break;
                 }
-            });
-            
-            run_loop.await;
+
+                network_adapter.wait_for_available_inbound_slot().await;
+
+                if cancel_token.is_cancelled() {
+                    break;
+                }
+
+                let handle = if let Some(ref mut ctx) = *::kernel_common::net::NET.lock() {
+                    ctx.accept_peering()
+                } else {
+                    None
+                };
+
+                if let Some(handle) = handle {
+                    tracing::info!("TCP Listener: accepted inbound connection");
+                    let async_stream = ::kernel_common::net::async_tcp::AsyncTcpStream::new(handle);
+                    let stream = ::rsnano_nullable_tcp::TcpStream::new(async_stream);
+                    network_adapter.add(stream, crate::ChannelDirection::Inbound);
+                } else {
+                    ::kernel_common::async_rt::sleep(core::time::Duration::from_millis(10)).await;
+                }
+            }
         });
     }
 

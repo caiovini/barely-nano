@@ -1,6 +1,12 @@
-use alloc::collections::{ VecDeque };
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use hashbrown::{ HashSet };
-// // // // // // use std::{   thread::JoinHandle, time::Duration, time::Instant   }; // TODO: fix this
+use spin::{ Mutex };
+use core::sync::atomic::{ AtomicBool, Ordering };
+use core::time::Duration;
+use rsnano_nullable_clock::{SteadyClock, Timestamp as Instant};
+use crate::utils::{Condvar, JoinHandle};
 
 use rsnano_core::{
     utils::{BackpressureSender, ContainerInfo, ContainerInfoProvider},
@@ -55,7 +61,12 @@ pub struct ConfirmingSet {
 }
 
 impl ConfirmingSet {
-    pub fn new(config: ConfirmingSetConfig, ledger: Arc<Ledger>, stats: Arc<Stats>) -> Self {
+    pub fn new(
+        config: ConfirmingSetConfig,
+        ledger: Arc<Ledger>,
+        stats: Arc<Stats>,
+        clock: Arc<SteadyClock>,
+    ) -> Self {
         Self {
             join_handle: Mutex::new(None),
             thread: Arc::new(ConfirmingSetThread {
@@ -75,6 +86,40 @@ impl ConfirmingSet {
                 condition: Condvar::new(),
                 ledger,
                 stats,
+                clock: clock.clone(),
+                config,
+                workers: ThreadPoolImpl::create(1, "Conf notif"),
+                event_publisher: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub fn new_with_clock(
+        config: ConfirmingSetConfig,
+        ledger: Arc<Ledger>,
+        stats: Arc<Stats>,
+        clock: Arc<SteadyClock>,
+    ) -> Self {
+        Self {
+            join_handle: Mutex::new(None),
+            thread: Arc::new(ConfirmingSetThread {
+                mutex: Mutex::new(ConfirmingSetImpl {
+                    set: OrderedEntries::default(),
+                    deferred: OrderedEntries::default(),
+                    current: HashSet::new(),
+                    stats: stats.clone(),
+                    config: config.clone(),
+                    near_full: false,
+                    cool_down: false,
+                    near_full_limit: config.max_blocks * 100 / 75,
+                    recovered_limit: config.max_blocks * 100 / 50,
+                    election_cache: ConfirmedElectionsCache::default(),
+                }),
+                stopped: AtomicBool::new(false),
+                condition: Condvar::new(),
+                ledger,
+                stats,
+                clock,
                 config,
                 workers: ThreadPoolImpl::create(1, "Conf notif"),
                 event_publisher: Mutex::new(None),
@@ -87,11 +132,12 @@ impl ConfirmingSet {
             ConfirmingSetConfig::default(),
             Arc::new(Ledger::new_null()),
             Arc::new(Stats::default()),
+            Arc::new(SteadyClock::new_null()),
         )
     }
 
     pub fn set_event_publisher(&self, sink: BackpressureSender<LedgerEvent>) {
-        *self.thread.event_publisher.lock().unwrap() = Some(sink);
+        *self.thread.event_publisher.lock() = Some(sink);
     }
 
     /// Adds a block to the set of blocks to be confirmed
@@ -104,24 +150,32 @@ impl ConfirmingSet {
         self.thread.add(election.winner.hash(), Some(election));
     }
 
-    pub fn start(&self) {
-        debug_assert!(self.join_handle.lock().unwrap().is_none());
+    pub fn run(&self) {
+        self.thread.run();
+    }
 
-        let thread = Arc::clone(&self.thread);
-        *self.join_handle.lock().unwrap() = Some(
-            std::thread::Builder::new()
-                .name("Conf height".to_string())
-                .spawn(move || thread.run())
-                .unwrap(),
-        );
+    pub fn run_once(&self) {
+        self.thread.run_once();
+    }
+
+    pub fn start(&self) {
+        // debug_assert!(self.join_handle.lock().is_none());
+        //
+        // let thread = Arc::clone(&self.thread);
+        // *self.join_handle.lock() = Some(
+        //     /* std::/* /* /* thread::Builder::new()
+        //         .name("Conf height".to_string())
+        //         .spawn(move || thread.run())
+        //         .unwrap(),
+        // );
     }
 
     pub fn stop(&self) {
         self.thread.stop();
-        let handle = self.join_handle.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.join().unwrap();
-        }
+        let _handle = self.join_handle.lock().take();
+        // if let Some(handle) = handle {
+        //     handle.join().unwrap(); */ */ */ */
+        // }
         self.thread.workers.stop();
     }
 
@@ -135,7 +189,7 @@ impl ConfirmingSet {
     }
 
     pub fn info(&self) -> ConfirmingSetInfo {
-        let guard = self.thread.mutex.lock().unwrap();
+        let guard = self.thread.mutex.lock();
         ConfirmingSetInfo {
             size: guard.set.len(),
             max_size: self.thread.config.max_blocks,
@@ -146,7 +200,7 @@ impl ConfirmingSet {
     pub fn requeue_blocks(&self, batch: &[ProcessedResult]) {
         let mut should_notify = false;
         {
-            let mut guard = self.thread.mutex.lock().unwrap();
+            let mut guard = self.thread.mutex.lock();
             for result in batch {
                 if let Some(entry) = guard.deferred.remove(&result.block.hash()) {
                     self.thread
@@ -164,19 +218,19 @@ impl ConfirmingSet {
     }
 
     pub(crate) fn do_election_cache(&self, mut action: impl FnMut(&ConfirmedElectionsCache)) {
-        let guard = self.thread.mutex.lock().unwrap();
+        let guard = self.thread.mutex.lock();
         action(&guard.election_cache);
     }
 
     pub fn set_cooldown(&self, cool_down: bool) {
-        self.thread.mutex.lock().unwrap().cool_down = cool_down;
+        self.thread.mutex.lock().cool_down = cool_down;
         self.thread.condition.notify_all();
     }
 }
 
 impl ContainerInfoProvider for ConfirmingSet {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.thread.mutex.lock().unwrap();
+        let guard = self.thread.mutex.lock();
         [
             ("set", guard.set.len(), 0),
             ("deferred", guard.deferred.len(), 0),
@@ -203,6 +257,7 @@ struct ConfirmingSetThread {
     condition: Condvar,
     ledger: Arc<Ledger>,
     stats: Arc<Stats>,
+    clock: Arc<SteadyClock>,
     config: ConfirmingSetConfig,
     workers: ThreadPoolImpl,
     event_publisher: Mutex<Option<BackpressureSender<LedgerEvent>>>,
@@ -211,10 +266,10 @@ struct ConfirmingSetThread {
 impl ConfirmingSetThread {
     fn stop(&self) {
         {
-            let _guard = self.mutex.lock().unwrap();
+            let _guard = self.mutex.lock();
             self.stopped.store(true, Ordering::SeqCst);
         }
-        drop(self.event_publisher.lock().unwrap().take());
+        drop(self.event_publisher.lock().take());
         self.condition.notify_all();
     }
 
@@ -222,13 +277,13 @@ impl ConfirmingSetThread {
         let added;
         let mut near_full_warning = false;
         {
-            let mut guard = self.mutex.lock().unwrap();
+            let mut guard = self.mutex.lock();
             if let Some(e) = election {
                 guard.election_cache.insert(e);
             }
             added = guard.set.push_back(CementingEntry {
                 confirmation_root: hash,
-                timestamp: Instant::now(),
+                timestamp: self.clock.now(),
             });
 
             if !guard.near_full && guard.set.len() + guard.current.len() >= guard.near_full_limit {
@@ -251,23 +306,22 @@ impl ConfirmingSetThread {
     }
 
     fn contains(&self, hash: &BlockHash) -> bool {
-        let guard = self.mutex.lock().unwrap();
+        let guard = self.mutex.lock();
         guard.set.contains(hash) || guard.deferred.contains(hash) || guard.current.contains(hash)
     }
 
     fn len(&self) -> usize {
-        // Do not report deferred blocks, as they are not currently being processed (and might never be requeued)
-        let guard = self.mutex.lock().unwrap();
+        let guard = self.mutex.lock();
         guard.set.len() + guard.current.len()
     }
 
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         while !self.stopped.load(Ordering::SeqCst) {
             self.stats.inc(StatType::ConfirmingSet, DetailType::Loop);
-            let evicted = guard.cleanup();
+            let evicted = guard.cleanup(self.clock.now());
 
-            // Notify about evicted blocks so that other components can perform necessary cleanup
             if !evicted.is_empty() {
                 drop(guard);
                 {
@@ -275,13 +329,12 @@ impl ConfirmingSetThread {
                         self.notify(LedgerEvent::ConfirmationFailed(entry.confirmation_root));
                     }
                 }
-                guard = self.mutex.lock().unwrap();
+                guard = self.mutex.lock();
             }
 
-            if !guard.set.is_empty() {
+            if !guard.set.is_empty() && !guard.cool_down {
                 let batch = guard.next_batch(self.config.batch_size);
 
-                // Keep track of the blocks we're currently cementing, so that the .contains (...) check is accurate
                 debug_assert!(guard.current.is_empty());
                 for entry in &batch {
                     guard.current.insert(entry.confirmation_root);
@@ -298,7 +351,7 @@ impl ConfirmingSetThread {
                     self.notify(LedgerEvent::ConfirmingSetRecovered);
                 }
 
-                guard = self.mutex.lock().unwrap();
+                guard = self.mutex.lock();
             } else {
                 guard = self
                     .condition
@@ -310,7 +363,47 @@ impl ConfirmingSetThread {
         }
     }
 
+    fn run_once(&self) {
+        let mut guard = self.mutex.lock();
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+
+        self.stats.inc(StatType::ConfirmingSet, DetailType::Loop);
+        let evicted = guard.cleanup(self.clock.now());
+
+        if !evicted.is_empty() {
+            drop(guard);
+            {
+                for entry in evicted {
+                    self.notify(LedgerEvent::ConfirmationFailed(entry.confirmation_root));
+                }
+            }
+            guard = self.mutex.lock();
+        }
+
+        if !guard.set.is_empty() && !guard.cool_down {
+            let batch = guard.next_batch(self.config.batch_size);
+
+            for entry in &batch {
+                guard.current.insert(entry.confirmation_root);
+            }
+            let recovered = guard.near_full && guard.set.len() < guard.recovered_limit;
+            if recovered {
+                guard.near_full = false;
+            }
+
+            drop(guard);
+
+            self.run_batch(batch);
+            if recovered {
+                self.notify(LedgerEvent::ConfirmingSetRecovered);
+            }
+        }
+    }
+
     fn run_batch(&self, batch: VecDeque<CementingEntry>) {
+        tracing::info!("[node] ConfirmingSetThread::run_batch, batch size: {}", batch.len());
         let mut notifier = CementedNotifier::new(self);
         self.ledger.confirm_batch(
             batch.iter().map(|i| &i.confirmation_root),
@@ -319,23 +412,19 @@ impl ConfirmingSetThread {
             &mut notifier,
         );
 
-        // Clear current set only after the transaction is committed
-        self.mutex.lock().unwrap().current.clear();
+        self.mutex.lock().current.clear();
     }
 
     fn notify(&self, event: LedgerEvent) {
-        if let Some(sender) = self.event_publisher.lock().unwrap().as_ref() {
+        if let Some(sender) = self.event_publisher.lock().as_ref() {
             sender.send(event).unwrap();
         }
     }
 }
 
 struct ConfirmingSetImpl {
-    /// Blocks that are ready to be cemented
     set: OrderedEntries,
-    /// Blocks that could not be cemented immediately (e.g. waiting for rollbacks to complete)
     deferred: OrderedEntries,
-    /// Blocks that are being cemented in the current batch
     current: HashSet<BlockHash>,
 
     stats: Arc<Stats>,
@@ -350,7 +439,6 @@ struct ConfirmingSetImpl {
 impl ConfirmingSetImpl {
     fn next_batch(&mut self, max_count: usize) -> VecDeque<CementingEntry> {
         let mut results = VecDeque::new();
-        // TODO: use extract_if once it is stablized
         while let Some(entry) = self.set.pop_front() {
             results.push_back(entry);
             if results.len() >= max_count {
@@ -360,13 +448,12 @@ impl ConfirmingSetImpl {
         results
     }
 
-    fn cleanup(&mut self) -> Vec<CementingEntry> {
+    fn cleanup(&mut self, now: Instant) -> Vec<CementingEntry> {
         let mut evicted = Vec::new();
 
-        let cutoff = Instant::now() - self.config.deferred_age_cutoff;
+        let cutoff = now - self.config.deferred_age_cutoff;
         let should_evict = |entry: &CementingEntry| entry.timestamp < cutoff;
 
-        // Iterate in sequenced (insertion) order
         loop {
             let Some(entry) = self.deferred.front() else {
                 break;
@@ -377,7 +464,6 @@ impl ConfirmingSetImpl {
                 let entry = self.deferred.pop_front().unwrap();
                 evicted.push(entry);
             } else {
-                // Entries are sequenced, so we can stop here and avoid unnecessary iteration
                 break;
             }
         }
@@ -386,14 +472,13 @@ impl ConfirmingSetImpl {
 }
 
 pub struct ConfirmationContext {
-    /// The block that was confirmed
     pub block: SavedBlock,
-    /// The hash of the block which caused the block to be cemented
     pub confirmation_root: BlockHash,
 }
 
 struct CementedNotifier<'a> {
     confirming_set: &'a ConfirmingSetThread,
+    #[allow(dead_code)]
     already_confirmed: VecDeque<BlockHash>,
 }
 
@@ -407,22 +492,6 @@ impl<'a> CementedNotifier<'a> {
 }
 
 impl<'a> CementingObserver for CementedNotifier<'a> {
-    fn already_confirmed(&mut self, hash: &BlockHash) {
-        self.already_confirmed.push_back(*hash);
-    }
-
-    fn cementing_failed(&mut self, hash: &BlockHash) {
-        self.confirming_set
-            .mutex
-            .lock()
-            .unwrap()
-            .deferred
-            .push_back(CementingEntry {
-                confirmation_root: *hash,
-                timestamp: Instant::now(),
-            });
-    }
-
     fn batch_confirmed(&mut self, batch: Vec<(SavedBlock, BlockHash)>) {
         self.confirming_set
             .notify(LedgerEvent::BlocksConfirmed(batch))

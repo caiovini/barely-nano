@@ -1,4 +1,5 @@
-use alloc::sync::{ Arc };
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::{ Mutex, RwLock };
 use core::ops::{ Deref, DerefMut };
 
@@ -50,6 +51,7 @@ impl MessageFlooder {
                 ChannelDirection::Outbound,
                 Timestamp::new_test_instance(),
             )
+            .map_err(|e| anyhow!("could not add channel: {:?}", e))
             .unwrap();
         channel.set_mode(rsnano_network::ChannelMode::Realtime);
 
@@ -68,7 +70,7 @@ impl MessageFlooder {
         scale: f32,
     ) -> FloodCount {
         let mut flood_count = FloodCount::default();
-        let peered_prs = self.online_reps.lock().unwrap().peered_principal_reps();
+        let peered_prs = self.online_reps.lock().peered_principal_reps();
         for rep in peered_prs {
             if self.sender.try_send(&rep.channel, &message, traffic_type) {
                 flood_count.principal_reps += 1;
@@ -78,8 +80,8 @@ impl MessageFlooder {
         let mut channels;
         let fanout;
         {
-            let network = self.network.read().unwrap();
-            fanout = network.fanout(scale);
+            let network = self.network.read();
+            fanout = network.fanout(1.0); // TODO: use scale
             channels = network.shuffled_channels(traffic_type)
         }
 
@@ -95,7 +97,7 @@ impl MessageFlooder {
 
     fn remove_principal_reps(&self, channels: &mut Vec<Arc<Channel>>, count: usize) {
         {
-            let reps = self.online_reps.lock().unwrap();
+            let reps = self.online_reps.lock();
             channels.retain(|c| !reps.is_principal_rep(c.channel_id()));
         }
         channels.truncate(count);
@@ -111,7 +113,7 @@ impl MessageFlooder {
         }
 
         let buffer = self.message_serializer.serialize(message);
-        let network = self.network.read().unwrap();
+        let network = self.network.read();
         let channels = Self::random_fanout(&network, traffic_type, scale);
         let mut sent = 0;
 
@@ -140,7 +142,6 @@ impl MessageFlooder {
     pub fn check_capacity(&self, traffic_type: TrafficType, scale: f32) -> bool {
         self.network
             .read()
-            .unwrap()
             .check_capacity(traffic_type, scale)
     }
 }

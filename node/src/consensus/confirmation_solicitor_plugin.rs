@@ -1,9 +1,11 @@
-use alloc::sync::{ Arc };
+use core::any::Any;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::{ Mutex, RwLock };
-// // // // // // use std::{   any::Any   }; // TODO: fix this
+// // // // // // // use std::{    any::Any    }; // TODO: fix this
 
 use super::{
-    confirm_req_sender::ConfirmReqSender, election::ElectionState,
+    confirm_req_sender::ConfirmReqSender, election::{Election, ElectionState},
     winner_block_broadcaster::WinnerBlockBroadcaster, ActiveElectionsContainer, AecTickerPlugin,
     ConfirmationSolicitor,
 };
@@ -30,7 +32,7 @@ impl ConfirmationSolicitorPlugin {
 
 impl AecTickerPlugin for ConfirmationSolicitorPlugin {
     fn run(&mut self, aec: &RwLock<ActiveElectionsContainer>) {
-        let peered_prs = self.online_reps.lock().unwrap().peered_principal_reps();
+        let peered_prs = self.online_reps.lock().peered_principal_reps();
 
         // TODO don't clone flooder!'
         let flooder = self.message_flooder.clone();
@@ -47,16 +49,14 @@ impl AecTickerPlugin for ConfirmationSolicitorPlugin {
          */
         let elections: Vec<_> = aec
             .read()
-            .unwrap()
             .iter_round_robin()
-            .filter(|e| e.state() == ElectionState::Active)
+            .filter(|e: &&Election| e.state() == ElectionState::Active)
             .cloned()
             .collect();
 
         for election in &elections {
             self.winner_block_broadcaster
                 .lock()
-                .unwrap()
                 .try_broadcast_winner(&election.winner().clone(), election.votes());
             self.confirm_req_sender
                 .send_confirm_req(&mut solicitor, &election);

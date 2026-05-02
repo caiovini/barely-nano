@@ -1,19 +1,15 @@
-// use rsnano_store_lmdb::{LmdbConfig, SyncStrategy};
+use alloc::string::String;
+use alloc::string::ToString;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Default)]
 pub struct LmdbToml {
     pub map_size: Option<usize>,
     pub max_databases: Option<u32>,
     pub sync: Option<String>,
 }
 
-impl Default for LmdbToml {
-    fn default() -> Self {
-        let config = LmdbConfig::default();
-        (&config).into()
-    }
-}
+use crate::config::{LmdbConfig, SyncStrategy};
 
 impl From<&LmdbToml> for LmdbConfig {
     fn from(toml: &LmdbToml) -> Self {
@@ -46,7 +42,6 @@ impl From<&LmdbConfig> for LmdbToml {
                 SyncStrategy::NosyncSafe => "nosync_safe".to_string(),
                 SyncStrategy::NosyncUnsafe => "nosync_unsafe".to_string(),
                 SyncStrategy::NosyncUnsafeLargeMemory => "nosync_unsafe_large_memory".to_string(),
-                _ => panic!("invalid sync strategy"),
             }),
             max_databases: Some(config.max_databases),
             map_size: Some(config.map_size),

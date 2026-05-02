@@ -1,4 +1,7 @@
-// // // // // // use std::{   collections::HashMap, time::Duration, time::SystemTime   }; // TODO: fix this
+use hashbrown::HashMap;
+use core::time::Duration;
+use rsnano_nullable_clock::Timestamp as SystemTime;
+// // // // // // // use std::{    collections::HashMap, time::Duration, time::SystemTime    }; // TODO: fix this
 
 use rsnano_core::{Amount, MaybeSavedBlock, PublicKey, SavedBlock};
 use rsnano_stats::DetailType;
@@ -54,10 +57,10 @@ pub struct ConfirmedElection {
 }
 
 impl ConfirmedElection {
-    pub fn new(block: SavedBlock, confirmation_type: ConfirmationType) -> Self {
+    pub fn new(block: SavedBlock, confirmation_type: ConfirmationType, now: SystemTime) -> Self {
         Self {
             winner: MaybeSavedBlock::Saved(block),
-            election_end: SystemTime::now(),
+            election_end: now,
             block_count: 1,
             confirmation_type,
             tally: Amount::zero(),
@@ -72,6 +75,7 @@ impl ConfirmedElection {
         Self::new(
             SavedBlock::new_test_instance(),
             ConfirmationType::ActiveConfirmedQuorum,
+            SystemTime::new_test_instance(),
         )
     }
 }

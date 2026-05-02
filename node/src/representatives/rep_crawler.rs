@@ -45,6 +45,7 @@ pub struct RepCrawler {
     message_sender: Mutex<MessageSender>,
     preconfigured_peers: Arc<PreconfiguredPeersKeepalive>,
     active_elections: Arc<RwLock<ActiveElectionsContainer>>,
+    keepalive_in_progress: AtomicBool,
 }
 
 impl RepCrawler {
@@ -71,12 +72,15 @@ impl RepCrawler {
             network_params,
             network,
             ledger,
-            steady_clock,
+            steady_clock: Arc::clone(&steady_clock),
             message_sender: Mutex::new(message_sender),
-            preconfigured_peers: Arc::new(PreconfiguredPeersKeepalive::new(
-                config.preconfigured_peers,
-                keepalive_publisher,
-            )),
+            preconfigured_peers: {
+                info!("Initializing RepCrawler with {} preconfigured peers", config.preconfigured_peers.len());
+                Arc::new(PreconfiguredPeersKeepalive::new(
+                    config.preconfigured_peers,
+                    keepalive_publisher,
+                ))
+            },
             rep_crawler_impl: Mutex::new(RepCrawlerImpl {
                 is_dev_network,
                 queries: OrderedQueries::new(),
@@ -87,8 +91,10 @@ impl RepCrawler {
                 last_query: None,
                 responses: BoundedVecDeque::new(Self::MAX_RESPONSES),
                 prioritized: Default::default(),
+                clock: Arc::clone(&steady_clock),
             }),
             active_elections,
+            keepalive_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -126,7 +132,7 @@ impl RepCrawler {
 
                 self.stats.sample(
                     Sample::RepResponseTime,
-                    query.time.elapsed().as_millis() as i64,
+                    self.steady_clock.now().elapsed(query.time).as_millis() as i64,
                     (0, query_timeout.as_millis() as i64),
                 );
 
@@ -152,11 +158,6 @@ impl RepCrawler {
 
         for channel in target_channels {
             guard.track_rep_request(hash_root, channel.channel_id(), self.steady_clock.now());
-            debug!(
-                "Sending query for block: {} to: {}",
-                hash_root.0,
-                channel.peer_addr()
-            );
             self.stats
                 .inc_dir(StatType::RepCrawler, DetailType::QuerySent, Direction::In);
 
@@ -192,7 +193,7 @@ impl RepCrawler {
     }
 
     pub fn run(&self) {
-        // This loop will be called by an async task
+        // tracing::info!("[rep_crawler] run() called");
         let mut guard = self.rep_crawler_impl.lock();
         if guard.stopped {
             return;
@@ -208,9 +209,23 @@ impl RepCrawler {
 
         // If online weight drops below minimum, reach out to preconfigured peers
         if !sufficient_weight {
-            self.stats
-                .inc_dir(StatType::RepCrawler, DetailType::Keepalive, Direction::In);
-            // In bare-metal we don't spawn here, we expect the caller to handle it or use an async runtime
+            if !self.keepalive_in_progress.swap(true, Ordering::SeqCst) {
+                info!("[rep_crawler] Insufficient weight, calling keepalive");
+                self.stats
+                    .inc_dir(StatType::RepCrawler, DetailType::Keepalive, Direction::In);
+                let preconfigured = self.preconfigured_peers.clone();
+                info!("[rep_crawler] Spawning keepalive task");
+                let in_progress = Arc::new(&self.keepalive_in_progress);
+                // unsafe: we know 'self' lives as long as the node
+                let self_ptr = self as *const RepCrawler as usize;
+                kernel_common::async_rt::spawn(async move {
+                    let this = unsafe { &*(self_ptr as *const RepCrawler) };
+                    tracing::info!("[node] Keepalive task started");
+                    preconfigured.keepalive().await;
+                    tracing::info!("[node] Keepalive task finished");
+                    this.keepalive_in_progress.store(false, Ordering::SeqCst);
+                });
+            }
         }
 
         let interval = self.query_interval(sufficient_weight);
@@ -378,6 +393,7 @@ struct RepCrawlerImpl {
     responses: BoundedVecDeque<ReceivedVote>,
     prioritized: Vec<Arc<Channel>>,
     is_dev_network: bool,
+    clock: Arc<SteadyClock>,
 }
 
 impl RepCrawlerImpl {
@@ -455,10 +471,9 @@ impl RepCrawlerImpl {
     }
 
     fn cleanup(&mut self) {
-        let now = Timestamp::new_null(); // TODO: get proper now
+        let now = self.clock.now();
         self.queries.retain(|query| {
-            // Placeholder cleanup logic for no_std
-            true
+            now.elapsed(query.time) < self.query_timeout
         });
     }
 }
@@ -569,6 +584,12 @@ pub trait RepCrawlerExt {
 
 impl RepCrawlerExt for Arc<RepCrawler> {
     fn start(&self) {
-        // In bare-metal we expect the caller to spawn the run loop
+        let this = self.clone();
+        kernel_common::async_rt::spawn(async move {
+            loop {
+                this.run();
+                kernel_common::async_rt::sleep(Duration::from_secs(3)).await;
+            }
+        });
     }
 }

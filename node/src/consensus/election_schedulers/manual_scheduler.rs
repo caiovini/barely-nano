@@ -1,6 +1,9 @@
-use alloc::sync::{ Arc };
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
 use spin::{ Mutex, RwLock };
-// // // // // // use std::{   collections::VecDeque, mem::size_of, sync::Condvar, thread::JoinHandle   }; // TODO: fix this
+use crate::utils::{Condvar, JoinHandle};
+use core::mem::size_of;
 
 use rsnano_core::{utils::ContainerInfo, Amount, Block, BlockHash, SavedBlock};
 use rsnano_stats::{DetailType, StatType, Stats};
@@ -41,18 +44,17 @@ impl ManualScheduler {
     }
 
     pub fn stop(&self) {
-        self.mutex.lock().unwrap().stopped = true;
+        self.mutex.lock().stopped = true;
         self.notify();
-        let handle = self.thread.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.join().unwrap();
-        }
+        let _handle = self.thread.lock().take();
+        // if let Some(handle) = handle {
+        //     handle.join().unwrap();
+        // }
     }
 
     pub fn contains(&self, hash: &BlockHash) -> bool {
         self.mutex
             .lock()
-            .unwrap()
             .queue
             .iter()
             .any(|block| block.hash() == *hash)
@@ -64,14 +66,15 @@ impl ManualScheduler {
 
     pub fn push(&self, block: SavedBlock) {
         {
-            let mut guard = self.mutex.lock().unwrap();
+            let mut guard = self.mutex.lock();
             guard.queue.push_back(block);
         }
         self.notify();
     }
 
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         while !guard.stopped {
             guard = self
                 .condition
@@ -93,7 +96,7 @@ impl ManualScheduler {
 
                     let now = self.clock.now();
 
-                    let mut aec = self.active_elections.write().unwrap();
+                    let mut aec = self.active_elections.write();
                     if aec
                         .insert(AecInsertRequest::new_manual(block, priority), now)
                         .is_ok()
@@ -104,13 +107,13 @@ impl ManualScheduler {
                     drop(guard);
                 }
                 self.notify();
-                guard = self.mutex.lock().unwrap();
+                guard = self.mutex.lock();
             }
         }
     }
 
     pub fn container_info(&self) -> ContainerInfo {
-        let guard = self.mutex.lock().unwrap();
+        let guard = self.mutex.lock();
         [(
             "queue",
             guard.queue.len(),
@@ -123,7 +126,7 @@ impl ManualScheduler {
 impl Drop for ManualScheduler {
     fn drop(&mut self) {
         // Thread must be stopped before destruction
-        debug_assert!(self.thread.lock().unwrap().is_none());
+        // debug_assert!(self.thread.lock().is_none());
     }
 }
 
@@ -133,16 +136,16 @@ pub trait ManualSchedulerExt {
 
 impl ManualSchedulerExt for Arc<ManualScheduler> {
     fn start(&self) {
-        debug_assert!(self.thread.lock().unwrap().is_none());
-        let self_l = Arc::clone(self);
-        *self.thread.lock().unwrap() = Some(
-            std::thread::Builder::new()
-                .name("Sched Manual".to_string())
-                .spawn(Box::new(move || {
-                    self_l.run();
-                }))
-                .unwrap(),
-        )
+        // debug_assert!(self.thread.lock().is_none());
+        // let self_l = Arc::clone(self);
+        // *self.thread.lock() = Some(
+        //     std::thread::Builder::new()
+        //         .name("Sched Manual".to_string())
+        //         .spawn(Box::new(move || {
+        //             self_l.run();
+        //         }))
+        //         .unwrap(),
+        // )
     }
 }
 

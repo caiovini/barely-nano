@@ -1,10 +1,13 @@
-// // // // // // use std::{   collections::VecDeque, time::Duration, time::SystemTime   }; // TODO: fix this
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use core::sync::atomic::{ AtomicBool, Ordering };
+use core::time::Duration;
 
 use tracing::info;
 
 use rsnano_core::{utils::UnixTimestamp, Account, BlockHash};
 use rsnano_ledger::Ledger;
-use rsnano_nullable_lmdb::Transaction;
 use rsnano_stats::{DetailType, StatType, Stats};
 
 use crate::{
@@ -45,9 +48,11 @@ impl LedgerPruning {
             u64::MAX
         };
         let cutoff_time: UnixTimestamp = if bootstrap_weight_reached {
-            (SystemTime::now() - Duration::from_secs(self.config.max_pruning_age_s as u64))
-                .try_into()
-                .unwrap()
+            // SystemTime::now() replacement
+            // (SystemTime::now() - Duration::from_secs(self.config.max_pruning_age_s as u64))
+            //     .try_into()
+            //     .unwrap()
+            UnixTimestamp::MAX // TODO: fix this
         } else {
             UnixTimestamp::MAX
         };
@@ -106,7 +111,7 @@ impl LedgerPruning {
             let mut hash = info.frontier;
             let mut depth = 0;
             while !hash.is_zero() && depth < max_depth {
-                if let Some(block) = self.ledger.store.block.get(&tx, &hash) {
+                if let Some(block) = self.ledger.store.block.get(&hash) {
                     if block.timestamp() > cutoff_time.into() || depth == 0 {
                         hash = block.previous();
                     } else {
@@ -119,7 +124,7 @@ impl LedgerPruning {
                 depth += 1;
                 if depth % batch_read_size == 0 {
                     drop(it);
-                    tx.refresh();
+                    // tx.refresh();
                     it = self
                         .ledger
                         .store
@@ -159,7 +164,7 @@ impl LedgerPruningExt for Arc<LedgerPruning> {
 
     fn ongoing_ledger_pruning(&self) {
         let bootstrap_weight_reached =
-            self.ledger.block_count() >= self.ledger.bootstrap_weight_max_blocks();
+            self.ledger.block_count() as u64 >= self.ledger.bootstrap_weight_max_blocks();
         self.ledger_pruning(2 * 1024, bootstrap_weight_reached);
         let ledger_pruning_interval = if bootstrap_weight_reached {
             Duration::from_secs(self.config.max_pruning_age_s as u64)

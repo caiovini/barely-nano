@@ -28,8 +28,8 @@ SECTIONS
   _stack_top = . + 0x80000;
   . = _stack_top;
 
-  /* Heap: 4MB */
+  /* Heap: 32MB */
   _heap_start = .;
-  . = . + 0x400000;
+  . = . + 0x2000000;
   _heap_end = .;
 }

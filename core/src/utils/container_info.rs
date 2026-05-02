@@ -69,6 +69,18 @@ impl ContainerInfo {
         ContainerInfosBuilder(Vec::new())
     }
 
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl Default for ContainerInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContainerInfo {
     pub fn into_json(self) -> serde_json::Value {
         let mut data = serde_json::Map::new();
         for entry in self.0 {

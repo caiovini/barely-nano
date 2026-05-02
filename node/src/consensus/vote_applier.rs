@@ -1,6 +1,8 @@
-use alloc::sync::{ Arc };
+use hashbrown::HashMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::{ Mutex, RwLock };
-// // // // // // use std::{   collections::HashMap   }; // TODO: fix this
+// // // // // // // use std::{    collections::HashMap    }; // TODO: fix this
 
 use rsnano_nullable_clock::SteadyClock;
 
@@ -39,11 +41,11 @@ impl VoteApplier {
     }
 
     pub fn add_event_sink(&self, sink: BackpressureSender<AecEvent>) {
-        self.event_senders.write().unwrap().push(sink);
+        self.event_senders.write().push(sink);
     }
 
     pub fn stop(&self) {
-        self.event_senders.write().unwrap().clear();
+        self.event_senders.write().clear();
     }
 
     /// Route vote to associated elections
@@ -53,7 +55,7 @@ impl VoteApplier {
     pub fn vote(&self, vote: &FilteredVote) -> HashMap<BlockHash, Result<(), VoteError>> {
         debug_assert!(vote.validate().is_ok());
 
-        let minimum_pr_weight = self.online_reps.lock().unwrap().minimum_principal_weight();
+        let minimum_pr_weight = self.online_reps.lock().minimum_principal_weight();
         let voter_weight = self.rep_weights.weight(&vote.voter);
 
         if !self.is_dev_network && voter_weight <= minimum_pr_weight {
@@ -65,7 +67,7 @@ impl VoteApplier {
         }
 
         let is_active = {
-            let active = self.active_elections.read().unwrap();
+            let active = self.active_elections.read();
             vote.filtered_blocks()
                 .any(|hash| active.is_active_hash(hash))
         };
@@ -73,7 +75,7 @@ impl VoteApplier {
         let now = self.clock.now();
 
         let quorum_specs = {
-            let mut online = self.online_reps.lock().unwrap();
+            let mut online = self.online_reps.lock();
             if is_active {
                 // Representative is defined as online if replying to live votes or rep_crawler queries.
                 // The rep weights have to be updated before the votes are processed!
@@ -83,7 +85,7 @@ impl VoteApplier {
         };
 
         let results = {
-            let mut active = self.active_elections.write().unwrap();
+            let mut active = self.active_elections.write();
             let rep_weights = self.rep_weights.read();
             active.apply_vote(ApplyVoteArgs {
                 vote,
@@ -103,7 +105,7 @@ impl VoteApplier {
         voter_weight: Amount,
         results: &HashMap<BlockHash, Result<(), VoteError>>,
     ) {
-        for sender in self.event_senders.read().unwrap().iter() {
+        for sender in self.event_senders.read().iter() {
             let _ = sender.send(AecEvent::VoteProcessed(
                 vote.clone(),
                 voter_weight,
@@ -147,7 +149,7 @@ mod tests {
             .vote_observed(another_rep.public_key(), clock.now());
 
         assert_eq!(
-            online_reps.lock().unwrap().quorum_delta(),
+            online_reps.lock().quorum_delta(),
             Amount::nano(43_550_000)
         );
 
@@ -169,7 +171,7 @@ mod tests {
 
         vote_applier.vote(&vote.into());
 
-        let aec_guard = aec.read().unwrap();
+        let aec_guard = aec.read();
         let election = aec_guard.election_for_block(&block_hash).unwrap();
         assert_eq!(election.winner_tally(), Amount::nano(50_000_000));
 

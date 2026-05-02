@@ -1,3 +1,7 @@
+use core::net::SocketAddrV6;
+use core::time::Duration;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 
 use tracing::info;
@@ -7,12 +11,15 @@ use rsnano_ledger::Ledger;
 use rsnano_network::PeerConnector;
 use rsnano_stats::{DetailType, StatType, Stats};
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 // Tries to connect to peers that are stored in the peer cache
+#[derive(Clone)]
 pub struct PeerCacheConnector {
     ledger: Arc<Ledger>,
     peer_connector: Arc<PeerConnector>,
     stats: Arc<Stats>,
-    first_run: bool,
+    first_run: Arc<AtomicBool>,
     ///Delay between each connection attempt. This throttles new connections.
     reach_out_delay: Duration,
 }
@@ -28,17 +35,29 @@ impl PeerCacheConnector {
             ledger,
             peer_connector,
             stats,
-            first_run: true,
+            first_run: Arc::new(AtomicBool::new(true)),
             reach_out_delay,
         }
     }
 
+    pub fn start(self: &Arc<Self>, interval: Duration) {
+        let this = self.clone();
+        kernel_common::async_rt::spawn(async move {
+            let cancel = CancellationToken::new();
+            loop {
+                let mut connector = (*this).clone(); // This is a bit hacky but PeerCacheConnector is small
+                connector.tick(&cancel);
+                kernel_common::async_rt::sleep(interval).await;
+            }
+        });
+    }
+
     fn load_peers_from_cache(&self) -> Vec<SocketAddrV6> {
-        let tx = self.ledger.store.tx_begin_read();
         self.ledger
             .store
             .peer
-            .iter(&tx)
+            .iter()
+            .into_iter()
             .map(|(peer, _)| peer)
             .collect()
     }
@@ -50,9 +69,8 @@ impl Tickable for PeerCacheConnector {
             .inc(StatType::Network, DetailType::LoopReachoutCached);
         let cached_peers = self.load_peers_from_cache();
 
-        if self.first_run {
+        if self.first_run.swap(false, Ordering::SeqCst) {
             info!("Adding cached initial peers: {}", cached_peers.len());
-            self.first_run = false;
         }
 
         for peer in cached_peers {
@@ -69,7 +87,7 @@ impl Tickable for PeerCacheConnector {
 
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
+    
 
     use tracing_test::traced_test;
 

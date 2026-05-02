@@ -1,3 +1,5 @@
+use hashbrown::HashMap;
+use alloc::vec::Vec;
 use super::{
     recently_confirmed_cache::RecentlyConfirmedCache,
     root_container::{Entry, RootContainer},
@@ -140,7 +142,7 @@ impl<'a> ApplyVoteToElectionHelper<'a> {
         if winner_changed {
             self.notify(AecEvent::WinnerChanged(
                 old_winner,
-                self.election.winner().deref().clone(),
+                self.election.winner().clone().into(),
             ));
         }
     }
@@ -164,7 +166,7 @@ impl<'a> ApplyVoteToElectionHelper<'a> {
 
     fn notify(&self, event: AecEvent) {
         if let Some(o) = self.observer {
-            o.send(event).unwrap();
+            let _ = o.send(event);
         }
     }
 }

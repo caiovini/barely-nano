@@ -8,4 +8,6 @@ pub mod net;
 pub mod storage;
 pub mod crypto;
 pub mod async_rt;
+pub mod logger;
+pub mod bump_alloc;
 

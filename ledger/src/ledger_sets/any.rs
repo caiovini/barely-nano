@@ -94,6 +94,20 @@ impl<'a> OwningAnySet<'a> {
         Vec::new()
     }
 
+    pub fn iter_account_range(
+        &self,
+        range: impl RangeBounds<Account> + 'static,
+    ) -> impl Iterator<Item = (Account, AccountInfo)> {
+        self.accounts_range(range).into_iter()
+    }
+
+    pub fn iter_pending_range(
+        &self,
+        _range: impl RangeBounds<PendingKey> + 'static,
+    ) -> Vec<(PendingKey, PendingInfo)> {
+        Vec::new()
+    }
+
     pub fn iter_accounts(&self) -> Vec<(Account, AccountInfo)> {
         Vec::new()
     }

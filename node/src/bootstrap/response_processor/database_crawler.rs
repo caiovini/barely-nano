@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use rsnano_core::{Account, AccountInfo, BlockHash, PendingInfo, PendingKey};
 use rsnano_ledger::OwningAnySet;
 
@@ -118,7 +119,7 @@ impl<'a> CrawlSource<'a> for PendingCrawlSource<'a> {
         let start_key = PendingKey::new(start, BlockHash::zero());
         Box::new(
             self.any
-                .iter_pending_range(start_key..)
+                .iter_pending_range(start_key..).into_iter()
                 .map(|(k, v)| (k.receiving_account, v)),
         )
     }

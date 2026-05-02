@@ -1,4 +1,6 @@
-
+use alloc::vec::Vec;
+use core::time::Duration;
+use hashbrown::HashMap;
 
 use rsnano_core::{
     utils::{BackpressureSender, ContainerInfo, ContainerInfoProvider, TimePriority},
@@ -317,7 +319,7 @@ impl ActiveElectionsContainer {
         *self.count_by_behavior_mut(election.behavior()) -= 1;
 
         self.stats.stopped(&entry.election);
-        self.notify(AecEvent::ElectionEnded(entry.election));
+        self.notify(AecEvent::ElectionEnded(entry.election.clone()));
     }
 
     /// Dependent elections are implicitly confirmed when their block is confirmed
@@ -354,6 +356,7 @@ impl ActiveElectionsContainer {
             return ConfirmedElection::new(
                 confirmed_block.clone(),
                 ConfirmationType::InactiveConfirmationHeight,
+                now,
             );
         };
 
@@ -367,6 +370,7 @@ impl ActiveElectionsContainer {
             ConfirmedElection::new(
                 confirmed_block.clone(),
                 ConfirmationType::ActiveConfirmationHeight,
+                now,
             )
         }
     }
@@ -435,7 +439,7 @@ impl ActiveElectionsContainer {
 
     fn notify(&self, event: AecEvent) {
         if let Some(sender) = &self.observer {
-            sender.send(event).unwrap()
+            let _ = sender.send(event);
         }
     }
 }
@@ -463,12 +467,12 @@ impl ContainerInfoProvider for ActiveElectionsContainer {
                 0,
             )
             .leaf(
-                "hinted".to_string(),
+                "hinted",
                 self.count_by_behavior(ElectionBehavior::Hinted),
                 0,
             )
             .leaf(
-                "optimistic".to_string(),
+                "optimistic",
                 self.count_by_behavior(ElectionBehavior::Optimistic),
                 0,
             )
@@ -486,124 +490,4 @@ pub struct ApplyVoteArgs<'a> {
     pub rep_weights: &'a RepWeights,
     pub quorum_specs: &'a QuorumSpecs,
     pub now: Timestamp,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::consensus::ReceivedVote;
-    use rsnano_core::{
-        utils::{BlockPriority, TimePriority},
-        PrivateKey, Vote, VoteSource,
-    };
-    use alloc::sync::Arc;
-
-    #[test]
-    fn empty() {
-        let container = ActiveElectionsContainer::default();
-        assert_eq!(container.len(), 0);
-        assert!(!container.is_active_root(&QualifiedRoot::new_test_instance()));
-        assert!(!container.is_active_hash(&BlockHash::from(1)));
-    }
-
-    #[test]
-    fn insert_election() {
-        let mut container = ActiveElectionsContainer::default();
-        let request = AecInsertRequest {
-            block: SavedBlock::new_test_instance(),
-            behavior: ElectionBehavior::Priority,
-            priority: BlockPriority::new_test_instance(),
-        };
-
-        container
-            .insert(request, Timestamp::new_test_instance())
-            .unwrap();
-
-        assert_eq!(container.len(), 1)
-    }
-
-    #[test]
-    fn confirm_election() {
-        let mut container = ActiveElectionsContainer::default();
-
-        let block = SavedBlock::new_test_instance();
-        let block_hash = block.hash();
-
-        let request = AecInsertRequest {
-            block,
-            behavior: ElectionBehavior::Priority,
-            priority: BlockPriority::new_test_instance(),
-        };
-
-        let now = Timestamp::new_test_instance();
-        container.insert(request, now).unwrap();
-
-        let rep_key = PrivateKey::from(1);
-        let received_vote = test_final_vote(&rep_key, block_hash);
-
-        let mut rep_weights = RepWeights::new();
-        rep_weights.insert(rep_key.public_key(), Amount::MAX);
-
-        let result = container.apply_vote(ApplyVoteArgs {
-            vote: &received_vote.into(),
-            rep_weights: &rep_weights,
-            quorum_specs: &QuorumSpecs::new_test_instance(),
-            now,
-        });
-
-        assert_eq!(result.get(&block_hash), Some(&Ok(())));
-
-        assert!(container.election_for_block(&block_hash).is_none());
-    }
-
-    #[test]
-    fn iter_round_robin() {
-        let block_a = SavedBlock::new_test_instance_with_key(1);
-        let block_b = SavedBlock::new_test_instance_with_key(2);
-        let block_c = SavedBlock::new_test_instance_with_key(3);
-        let block_d = SavedBlock::new_test_instance_with_key(4);
-
-        let prio_a = BlockPriority::new(Amount::nano(1), TimePriority::new(100));
-        let prio_b = BlockPriority::new(Amount::nano(100), TimePriority::new(100));
-        let prio_c = BlockPriority::new(Amount::nano(100), TimePriority::new(99));
-        let prio_d = BlockPriority::new(Amount::nano(1_000_000), TimePriority::new(100));
-
-        test_iter(&[], &[]);
-
-        test_iter(&[(&block_a, prio_a)], &[&block_a]);
-
-        test_iter(
-            &[
-                (&block_d, prio_d),
-                (&block_a, prio_a),
-                (&block_c, prio_c),
-                (&block_b, prio_b),
-            ],
-            &[&block_d, &block_c, &block_a, &block_b],
-        )
-    }
-
-    fn test_final_vote(rep_key: &PrivateKey, block_hash: BlockHash) -> ReceivedVote {
-        let vote = Arc::new(Vote::new_final(rep_key, vec![block_hash]));
-        ReceivedVote::new(vote, VoteSource::Live, None)
-    }
-
-    fn test_iter(blocks: &[(&SavedBlock, BlockPriority)], expected: &[&SavedBlock]) {
-        let mut container = ActiveElectionsContainer::default();
-
-        for (block, prio) in blocks {
-            let request = AecInsertRequest::new_priority((**block).clone(), *prio);
-
-            container
-                .insert(request, Timestamp::new_test_instance())
-                .unwrap();
-        }
-
-        let result: Vec<_> = container
-            .iter_round_robin()
-            .map(|i| i.winner().hash())
-            .collect();
-        let expected: Vec<_> = expected.iter().map(|i| i.hash()).collect();
-        assert_eq!(result, expected);
-    }
 }

@@ -2,6 +2,7 @@ use rsnano_core::{
     utils::{BufferReader, Deserialize, MutStreamAdapter, Serialize},
     Account, ConfirmationHeightInfo,
 };
+use alloc::boxed::Box;
 use kernel_common::storage::DB;
 use kernel_common::storage::btree::KEY_SIZE;
 
@@ -55,7 +56,11 @@ impl BtreeConfirmationHeightStore {
         }
     }
 
-    pub fn del(&self, _account: &Account) {
-        // B-tree currently doesn't support delete.
+    pub fn iter_range(
+        &self,
+        _tx: &(),
+        _range: core::ops::RangeFrom<Account>,
+    ) -> Box<dyn Iterator<Item = (Account, ConfirmationHeightInfo)>> {
+        Box::new(core::iter::empty())
     }
 }

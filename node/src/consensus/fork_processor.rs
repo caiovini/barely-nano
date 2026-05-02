@@ -43,7 +43,7 @@ impl ForkProcessor {
     }
 
     pub fn try_add_cached_forks(&self, root: &QualifiedRoot) {
-        let fork_cache = self.fork_cache.read().unwrap();
+        let fork_cache = self.fork_cache.read();
         for fork in fork_cache.get_forks(&root) {
             self.handle_fork(fork);
         }
@@ -55,7 +55,6 @@ impl ForkProcessor {
         let added = self
             .active_elections
             .write()
-            .unwrap()
             .try_add_fork(fork, fork_tally);
 
         if added {
@@ -64,7 +63,7 @@ impl ForkProcessor {
     }
 
     fn get_cached_tally(&self, hash: &BlockHash) -> Amount {
-        let votes = self.vote_cache.lock().unwrap().find(hash);
+        let votes = self.vote_cache.lock().find(hash);
         let mut tally = Amount::zero();
         let weights = self.rep_weights.read();
         for vote in votes {

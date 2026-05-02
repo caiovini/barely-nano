@@ -29,7 +29,10 @@ impl BTreeNode {
 
     pub fn from_bytes(data: &[u8; BLOCK_SIZE]) -> Self {
         let is_leaf = data[0] != 0;
-        let num_keys = u16::from_le_bytes([data[1], data[2]]) as usize;
+        let mut num_keys = u16::from_le_bytes([data[1], data[2]]) as usize;
+        if num_keys > MAX_KEYS {
+            num_keys = MAX_KEYS;
+        }
         
         let mut keys = [[0; KEY_SIZE]; MAX_KEYS];
         let mut values = [[0; VALUE_SIZE]; MAX_KEYS];
@@ -138,6 +141,10 @@ impl<'a> BTree<'a> {
         let frame = self.bpm.fetch_page(0).unwrap();
         self.meta.to_bytes(&mut frame.data);
         frame.is_dirty = true;
+    }
+
+    pub fn flush(&mut self) -> Result<(), virtio_drivers::Error> {
+        self.bpm.flush_all()
     }
 
     pub fn allocate_page(&mut self) -> u32 {

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use rsnano_core::{Account, Block, BlockHash, Root, SavedBlock};
 use rsnano_ledger::{AnySet, LedgerSet};
 use rsnano_stats::{DetailType, StatType, Stats};

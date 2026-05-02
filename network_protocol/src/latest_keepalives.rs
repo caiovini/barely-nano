@@ -39,6 +39,7 @@ impl LatestKeepalives {
 
     //TODO: randomize
     pub fn pop_random(&mut self) -> Option<Keepalive> {
+        tracing::info!("[node] LatestKeepalives::pop_random");
         let channel_id = *self.entries.keys().next()?;
         self.entries.remove(&channel_id)
     }

@@ -13,6 +13,7 @@ anyhow = { version = "1", default-features = false }
 spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock"] }
 tracing = { version = "0.1", default-features = false }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more"] }
+kernel-common = { path = "../common" }
 
 [dev-dependencies]
 serde_json = "1"

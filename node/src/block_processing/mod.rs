@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 mod backlog_index;
 mod backlog_scan;
 mod backlog_waiter;
@@ -27,6 +28,7 @@ use rsnano_stats::DetailType;
 use strum_macros::{EnumCount, EnumIter, IntoStaticStr};
 pub use unchecked_map::*;
 
+#[derive(Debug)]
 pub enum LedgerEvent {
     /// The confirmed block + it's confirmation root
     BlocksProcessed(Vec<ProcessedResult>),

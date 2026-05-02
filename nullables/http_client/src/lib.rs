@@ -7,7 +7,7 @@ pub mod tcp_client;
 use anyhow::anyhow;
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 use serde::{de::DeserializeOwned, Serialize};
-use alloc::{string::String, vec::Vec, sync::Arc};
+use alloc::{string::String, sync::Arc};
 use hashbrown::HashMap;
 use core::future::poll_fn;
 use core::task::Poll;

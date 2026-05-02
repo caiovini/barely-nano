@@ -82,8 +82,8 @@ impl LedgerEventProcessorPlugin for TrackConfirmationTimes {
             let mut stats = self.stats.lock();
 
             for (block, _) in blocks {
-                let conf_time = now - block.sideband().timestamp;
-                stats.add(conf_time.to_duration());
+                let conf_time = now.millis() - (block.sideband().timestamp.as_u64() as i64);
+                stats.add(Duration::from_millis(conf_time.max(0) as u64));
             }
         }
     }

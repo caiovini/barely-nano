@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use spin::{ Mutex};
 
@@ -83,7 +84,7 @@ impl BlockAckProcessor {
                         Box::new(move |_| {
                             stats.inc(StatType::Bootstrap, DetailType::TimestampReset);
                             {
-                                let mut guard = state.lock().unwrap();
+                                let mut guard = state.lock();
                                 guard.candidate_accounts.reset_last_request(&account);
                             }
                         }),
@@ -103,7 +104,7 @@ impl BlockAckProcessor {
             .inc(StatType::BootstrapVerifyBlocks, DetailType::NothingNew);
 
         {
-            let mut guard = self.state.lock().unwrap();
+            let mut guard = self.state.lock();
             match guard.candidate_accounts.priority_down(&query.account) {
                 PriorityDownResult::Deprioritized => {
                     self.stats

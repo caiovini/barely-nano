@@ -1,3 +1,5 @@
+use core::time::Duration;
+use alloc::sync::Arc;
 use super::OnlineReps;
 use rsnano_core::{Amount, Networks};
 use rsnano_ledger::RepWeightCache;

@@ -1,6 +1,8 @@
-use alloc::sync::{ Arc };
+use rsnano_nullable_clock::Timestamp as SystemTime;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::{ RwLock };
-// // // // // // use std::{   time::SystemTime   }; // TODO: fix this
+// // // // // // // use std::{    time::SystemTime    }; // TODO: fix this
 
 use rsnano_core::{PrivateKey, Signature};
 use rsnano_ledger::Ledger;
@@ -28,7 +30,7 @@ impl TelemetryFactory {
         let protocol_version;
         let bandwidth_cap;
         {
-            let network = self.network.read().unwrap();
+            let network = self.network.read();
             peer_count = network.count_by_mode(ChannelMode::Realtime) as u32;
             protocol_version = network.protocol_info().version_using;
             bandwidth_cap = network.bandwidth_limit() as u64;
@@ -38,21 +40,21 @@ impl TelemetryFactory {
 
         let mut telemetry_data = TelemetryData {
             node_id: self.node_id_key.public_key().into(),
-            block_count: self.ledger.block_count(),
-            cemented_count: self.ledger.confirmed_count(),
+            block_count: self.ledger.block_count() as u64,
+            cemented_count: self.ledger.confirmed_count() as u64,
             bandwidth_cap,
             protocol_version,
             uptime: self.startup_time.elapsed(self.clock.now()).as_secs(),
             unchecked_count: self.unchecked.len() as u64,
             genesis_block: self.ledger.genesis().hash(),
             peer_count,
-            account_count: self.ledger.account_count(),
+            account_count: self.ledger.account_count() as u64,
             major_version: version.major as u8,
             minor_version: version.minor as u8,
             patch_version: version.patch as u8,
             pre_release_version: get_pre_release_version(&version),
             maker: TelemetryMaker::RsNano as u8,
-            timestamp: SystemTime::now(),
+            timestamp: rsnano_core::utils::UnixMillisTimestamp::now(),
             active_difficulty: self.ledger.work_thresholds().threshold_base(),
             unknown_data: Vec::new(),
             signature: Signature::default(),

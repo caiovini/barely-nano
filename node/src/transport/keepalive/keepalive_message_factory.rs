@@ -1,9 +1,10 @@
+use core::net::{Ipv6Addr, SocketAddrV6};
+use alloc::sync::Arc;
 use rsnano_core::utils::{Peer, NULL_ENDPOINT};
 use rsnano_messages::{Keepalive, Message};
 use rsnano_network::Network;
-use alloc::sync::{ Arc };
 use spin::{ RwLock };
-// // // // // // use std::{   net::Ipv6Addr, net::SocketAddrV6   }; // TODO: fix this
+// // // // // // // use std::{    net::Ipv6Addr, net::SocketAddrV6    }; // TODO: fix this
 
 #[derive(Clone)]
 pub struct KeepaliveMessageFactory {
@@ -21,7 +22,7 @@ impl KeepaliveMessageFactory {
 
     pub fn create_keepalive_self(&self) -> Message {
         let mut result = Keepalive::default();
-        let network = self.network.read().unwrap();
+        let network = self.network.read();
         network.random_fill_realtime(&mut result.peers);
         // We will clobber values in index 0 and 1 and if there are only 2 nodes in the system, these are the only positions occupied
         // Move these items to index 2 and 3 so they propagate
@@ -29,15 +30,17 @@ impl KeepaliveMessageFactory {
         result.peers[3] = result.peers[1];
         // Replace part of message with node external address or listening port
         result.peers[1] = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0); // For node v19 (response channels)
-        if self.external_addr.address != Ipv6Addr::UNSPECIFIED.to_string()
+        if self.external_addr.address != "::"
             && self.external_addr.port != 0
         {
-            result.peers[0] = SocketAddrV6::new(
-                self.external_addr.address.parse().unwrap(),
-                self.external_addr.port,
-                0,
-                0,
-            );
+            // result.peers[0] = SocketAddrV6::new(
+            //     self.external_addr.address.parse().unwrap(),
+            //     self.external_addr.port,
+            //     0,
+            //     0,
+            // );
+            // TODO: implement Ipv6Addr parsing in no_std
+            result.peers[0] = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, self.external_addr.port, 0, 0);
         } else {
             // TODO Read external address from port_mapping!
             //let external_address  node.port_mapping.external_address ());
@@ -58,7 +61,6 @@ impl KeepaliveMessageFactory {
         let mut peers = [NULL_ENDPOINT; 8];
         self.network
             .read()
-            .unwrap()
             .random_fill_realtime(&mut peers);
 
         Message::Keepalive(Keepalive { peers })

@@ -1,5 +1,6 @@
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use hashbrown::{ HashMap };
-use alloc::collections::{ VecDeque };
 
 use crate::utils::BoundedVecDeque;
 use rsnano_core::{

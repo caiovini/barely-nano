@@ -1,3 +1,4 @@
+use alloc::string::String;
 use crate::config::websocket_config::WebsocketConfig;
 use serde::{Deserialize, Serialize};
 

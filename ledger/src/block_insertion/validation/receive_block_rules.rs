@@ -10,7 +10,7 @@ impl<'a> BlockValidator<'a> {
     }
 
     fn ensure_source_block_exists(&self) -> Result<(), BlockError> {
-        if self.is_receive() && !self.source_block_exists {
+        if self.is_receive() && !self.source_block_exists && !self.is_genesis {
             Err(BlockError::GapSource)
         } else {
             Ok(())
@@ -18,7 +18,7 @@ impl<'a> BlockValidator<'a> {
     }
 
     fn ensure_receive_block_receives_pending_amount(&self) -> Result<(), BlockError> {
-        if self.is_receive() {
+        if self.is_receive() && !self.is_genesis {
             match &self.pending_receive_info {
                 Some(pending) => {
                     if self.amount_received() != pending.amount {
@@ -35,6 +35,9 @@ impl<'a> BlockValidator<'a> {
     }
 
     fn ensure_legacy_source_is_epoch_0(&self) -> Result<(), BlockError> {
+        if self.is_genesis {
+            return Ok(());
+        }
         let is_legacy_receive =
             matches!(self.block, Block::LegacyReceive(_) | Block::LegacyOpen(_));
 

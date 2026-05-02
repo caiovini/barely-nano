@@ -1,3 +1,8 @@
+use core::time::Duration;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use crate::config::toml::lmdb_toml::LmdbToml;
 use super::{fork_cache_toml::ForkCacheToml, *};
 use crate::config::NodeConfig;
 use bounded_backlog_toml::BoundedBacklogToml;
@@ -82,18 +87,7 @@ impl NodeConfig {
         if let Some(backup_before_upgrade) = toml.backup_before_upgrade {
             self.backup_before_upgrade = backup_before_upgrade;
         }
-        if let Some(limit) = toml.bandwidth_limit {
-            self.network.limiter.generic_limit = limit;
-        }
-        if let Some(ratio) = toml.bandwidth_limit_burst_ratio {
-            self.network.limiter.generic_burst_ratio = ratio;
-        }
-        if let Some(limit) = toml.bootstrap_bandwidth_limit {
-            self.network.limiter.bootstrap_limit = limit;
-        }
-        if let Some(ratio) = toml.bootstrap_bandwidth_burst_ratio {
-            self.network.limiter.bootstrap_burst_ratio = ratio;
-        }
+        // Bandwidth limiting is currently not supported in no_std
         if let Some(bootstrap_fraction_numerator) = toml.bootstrap_fraction_numerator {
             self.bootstrap_fraction_numerator = bootstrap_fraction_numerator;
         }
@@ -197,7 +191,7 @@ impl NodeConfig {
         if let Some(work_peers) = &toml.work_peers {
             self.work_peers = work_peers
                 .iter()
-                .map(|string| Peer::from_str(&string).expect("Invalid work peer"))
+                .map(|string| string.parse::<Peer>().expect("Invalid work peer"))
                 .collect();
         }
         if let Some(work_threads) = toml.work_threads {
@@ -367,26 +361,11 @@ impl NodeConfig {
         }
 
         if let Some(network) = &toml.network {
-            if let Some(i) = network.peer_reachout {
-                self.network.peer_reachout = Duration::from_millis(i as u64);
-            }
-            if let Some(i) = network.cached_peer_reachout {
-                self.network.cached_peer_reachout = Duration::from_millis(i as u64);
-            }
-            if let Some(i) = network.max_peers_per_ip {
-                self.network.max_peers_per_ip = i;
-            }
-            if let Some(i) = network.max_peers_per_subnetwork {
-                self.network.max_peers_per_subnetwork = i;
-            }
             if let Some(i) = network.duplicate_filter_size {
                 self.network_duplicate_filter_size = i;
             }
             if let Some(i) = network.duplicate_filter_cutoff {
                 self.network_duplicate_filter_cutoff = i as u64;
-            }
-            if let Some(i) = network.minimum_fanout {
-                self.network.minimum_fanout = i;
             }
         }
 
@@ -433,10 +412,10 @@ impl From<&NodeConfig> for NodeToml {
             allow_local_peers: Some(config.allow_local_peers),
             background_threads: Some(config.background_threads),
             backup_before_upgrade: Some(config.backup_before_upgrade),
-            bandwidth_limit: Some(config.network.limiter.generic_limit),
-            bandwidth_limit_burst_ratio: Some(config.network.limiter.generic_burst_ratio),
-            bootstrap_bandwidth_limit: Some(config.network.limiter.bootstrap_limit),
-            bootstrap_bandwidth_burst_ratio: Some(config.network.limiter.bootstrap_burst_ratio),
+            bandwidth_limit: None,
+            bandwidth_limit_burst_ratio: None,
+            bootstrap_bandwidth_limit: None,
+            bootstrap_bandwidth_burst_ratio: None,
             bootstrap_fraction_numerator: Some(config.bootstrap_fraction_numerator),
             bootstrap_initiator_threads: Some(config.bootstrap_initiator_threads),
             bootstrap_serving_threads: Some(config.bootstrap_serving_threads),

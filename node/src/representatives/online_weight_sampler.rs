@@ -49,6 +49,7 @@ impl OnlineWeightSampler {
             .store
             .online_weight
             .iter()
+            .into_iter()
             .map(|(_, amount)| amount)
             .collect()
     }
@@ -92,6 +93,7 @@ impl OnlineWeightSampler {
             .store
             .online_weight
             .iter()
+            .into_iter()
             .map(|(ts, _)| ts)
             .take_while(move |ts| *ts < timestamp_cutoff)
             .collect()
@@ -103,6 +105,7 @@ impl OnlineWeightSampler {
             .store
             .online_weight
             .iter_rev()
+            .into_iter()
             .map(|(ts, _)| ts)
             .take_while(move |ts| *ts > timestamp_now)
             .collect()

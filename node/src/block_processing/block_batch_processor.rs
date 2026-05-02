@@ -1,4 +1,9 @@
-// // // // // // use std::{   collections::VecDeque, time::Duration, time::Instant   }; // TODO: fix this
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::time::Duration;
+use rsnano_nullable_clock::{SteadyClock, Timestamp as Instant};
 
 use strum::{EnumCount, IntoEnumIterator};
 use tracing::{debug, warn};
@@ -18,6 +23,7 @@ pub(crate) struct BlockBatchProcessor {
     pub unchecked: Arc<UncheckedMap>,
     pub stats: Arc<BlockBatchProcessorStats>,
     pub event_publisher: BackpressureSender<LedgerEvent>,
+    pub clock: Arc<SteadyClock>,
 }
 
 impl BlockBatchProcessor {
@@ -28,11 +34,12 @@ impl BlockBatchProcessor {
             unchecked: Arc::new(UncheckedMap::default()),
             stats: Arc::new(BlockBatchProcessorStats::default()),
             event_publisher: backpressure_channel(0).0,
+            clock: Arc::new(SteadyClock::new_null()),
         }
     }
 
     pub(crate) fn process_blocks(&self, mut batch: VecDeque<Arc<BlockContext>>) {
-        let timer = Instant::now();
+        let timer = Instant::new_test_instance();
 
         self.roll_back_competitor_blocks(&batch);
 
@@ -59,11 +66,11 @@ impl BlockBatchProcessor {
             }
         }
 
-        if result.processed.len() > 0 && timer.elapsed() > Duration::from_millis(100) {
+        if result.processed.len() > 0 && timer.elapsed(self.clock.now()) > Duration::from_millis(100) {
             debug!(
                 "Processed {} blocks in {} ms",
                 result.processed.len(),
-                timer.elapsed().as_millis(),
+                timer.elapsed(self.clock.now()).as_millis(),
             );
         }
 
@@ -74,7 +81,7 @@ impl BlockBatchProcessor {
             .zip(batch.drain(..))
             .map(|((status, saved_block), block_ctx)| {
                 if saved_block.is_some() {
-                    *block_ctx.saved_block.lock().unwrap() = saved_block;
+                    *block_ctx.saved_block.lock() = saved_block;
                 }
 
                 (status, block_ctx)
@@ -95,7 +102,7 @@ impl BlockBatchProcessor {
 
             let hash = &block_ctx.block.hash();
             let block = &block_ctx.block;
-            let saved_block = block_ctx.saved_block.lock().unwrap().clone();
+            let saved_block = block_ctx.saved_block.lock().clone();
 
             match status {
                 Ok(()) => {
@@ -106,7 +113,12 @@ impl BlockBatchProcessor {
                      * For state blocks check only send subtype and only if block epoch is not last epoch.
                      * If epoch is last, then pending entry shouldn't trigger same epoch open block for destination account.
                      * */
-                    let block = saved_block.unwrap();
+                    let block = if let Some(b) = saved_block {
+                        b
+                    } else {
+                        warn!("Saved block was missing after Ok process result");
+                        continue;
+                    };
                     if block.block_type() == BlockType::LegacySend
                         || block.block_type() == BlockType::State
                             && block.is_send()

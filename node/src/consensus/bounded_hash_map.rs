@@ -1,6 +1,7 @@
-use alloc::collections::{ VecDeque };
+use core::hash::Hash;
+use alloc::collections::VecDeque;
 use hashbrown::{ HashMap };
-// // // // // // use std::{   hash::Hash   }; // TODO: fix this
+// // // // // // // use std::{    hash::Hash    }; // TODO: fix this
 
 pub(crate) struct BoundedHashMap<K, V>
 where

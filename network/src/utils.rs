@@ -8,19 +8,19 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 pub fn into_core_addr(addr: rsnano_core::utils::SocketAddrV6) -> SocketAddrV6 {
-    SocketAddrV6::new(into_core_ipv6(addr.ip()), addr.port(), 0, 0)
+    addr
 }
 
 pub fn into_core_ipv6(addr: rsnano_core::utils::Ipv6Addr) -> Ipv6Addr {
-    Ipv6Addr::from(addr.octets())
+    addr
 }
 
 pub fn from_core_addr(addr: SocketAddrV6) -> rsnano_core::utils::SocketAddrV6 {
-    rsnano_core::utils::SocketAddrV6::new(from_core_ipv6(*addr.ip()), addr.port(), 0, 0)
+    addr
 }
 
 pub fn from_core_ipv6(addr: Ipv6Addr) -> rsnano_core::utils::Ipv6Addr {
-    rsnano_core::utils::Ipv6Addr::new_from_octets(addr.octets())
+    addr
 }
 
 pub fn is_ipv4_mapped(input: &Ipv6Addr) -> bool {

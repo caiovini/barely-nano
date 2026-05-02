@@ -1,6 +1,10 @@
-use alloc::sync::{ Arc };
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use spin::{ Mutex, RwLock };
-// // // // // // use std::{   cmp::min, sync::Condvar, thread::JoinHandle, time::Duration   }; // TODO: fix this
+use crate::utils::{JoinHandle, Condvar};
+use core::time::Duration;
+use core::cmp::min;
 
 use tracing::warn;
 
@@ -88,46 +92,46 @@ impl BoundedBacklog {
     }
 
     pub fn start(&self) {
-        debug_assert!(self.thread.lock().unwrap().is_none());
+        debug_assert!(self.thread.lock().is_none());
 
-        let backlog_impl = self.backlog_impl.clone();
-        let handle = std::thread::Builder::new()
-            .name("Bounded backlog".to_owned())
-            .spawn(move || backlog_impl.run())
-            .unwrap();
-        *self.thread.lock().unwrap() = Some(handle);
+        // let backlog_impl = self.backlog_impl.clone();
+        // let handle = std::thread::Builder::new()
+        //     .name("Bounded backlog".to_owned())
+        //     .spawn(move || backlog_impl.run())
+        //     .unwrap();
+        // *self.thread.lock() = Some(handle);
 
-        let backlog_impl = self.backlog_impl.clone();
-        let handle = std::thread::Builder::new()
-            .name("Bounded b scan".to_owned())
-            .spawn(move || backlog_impl.run_scan())
-            .unwrap();
-        *self.scan_thread.lock().unwrap() = Some(handle);
+        // let backlog_impl = self.backlog_impl.clone();
+        // let handle = std::thread::Builder::new()
+        //     .name("Bounded b scan".to_owned())
+        //     .spawn(move || backlog_impl.run_scan())
+        //     .unwrap();
+        // *self.scan_thread.lock() = Some(handle);
     }
 
     pub fn stop(&self) {
-        self.backlog_impl.mutex.lock().unwrap().stopped = true;
+        self.backlog_impl.mutex.lock().stopped = true;
         self.backlog_impl.condition.notify_all();
 
-        let handle = self.thread.lock().unwrap().take();
+        let handle = self.thread.lock().take();
         if let Some(handle) = handle {
             handle.join().unwrap();
         }
 
-        let handle = self.scan_thread.lock().unwrap().take();
+        let handle = self.scan_thread.lock().take();
         if let Some(handle) = handle {
             handle.join().unwrap();
         }
-        drop(self.backlog_impl.publish_event.lock().unwrap().take());
+        drop(self.backlog_impl.publish_event.lock().take());
     }
 
     // Give other components a chance to veto a rollback
     pub fn can_roll_back(&self, f: impl Fn(&BlockHash) -> bool + Send + Sync + 'static) {
-        *self.backlog_impl.can_roll_back.write().unwrap() = Box::new(f);
+        *self.backlog_impl.can_roll_back.write() = Box::new(f);
     }
 
     pub fn set_cooldown(&self, cool_down: bool) {
-        self.backlog_impl.mutex.lock().unwrap().cool_down = cool_down;
+        self.backlog_impl.mutex.lock().cool_down = cool_down;
         self.backlog_impl.condition.notify_all();
     }
 
@@ -151,21 +155,21 @@ impl BoundedBacklog {
     }
 
     pub fn erase_accounts(&self, accounts: &[Account]) {
-        let mut guard = self.backlog_impl.mutex.lock().unwrap();
+        let mut guard = self.backlog_impl.mutex.lock();
         for account in accounts {
             guard.index.erase_account(account);
         }
     }
 
     pub fn erase_hashes(&self, accounts: impl IntoIterator<Item = BlockHash>) {
-        let mut guard = self.backlog_impl.mutex.lock().unwrap();
+        let mut guard = self.backlog_impl.mutex.lock();
         for account in accounts.into_iter() {
             guard.index.erase_hash(&account);
         }
     }
 
     fn contains(&self, hash: &BlockHash) -> bool {
-        let guard = self.backlog_impl.mutex.lock().unwrap();
+        let guard = self.backlog_impl.mutex.lock();
         guard.index.contains(hash)
     }
 
@@ -214,7 +218,6 @@ impl BoundedBacklog {
         self.backlog_impl
             .mutex
             .lock()
-            .unwrap()
             .index
             .insert(BacklogEntry {
                 hash: block.hash(),
@@ -233,14 +236,14 @@ impl BoundedBacklog {
 impl Drop for BoundedBacklog {
     fn drop(&mut self) {
         // Thread must be stopped before destruction
-        debug_assert!(self.thread.lock().unwrap().is_none());
-        debug_assert!(self.scan_thread.lock().unwrap().is_none());
+        debug_assert!(self.thread.lock().is_none());
+        debug_assert!(self.scan_thread.lock().is_none());
     }
 }
 
 impl ContainerInfoProvider for BoundedBacklog {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.backlog_impl.mutex.lock().unwrap();
+        let guard = self.backlog_impl.mutex.lock();
         ContainerInfo::builder()
             .leaf("backlog", guard.index.len(), 0)
             .node("index", guard.index.container_info())
@@ -261,15 +264,13 @@ struct BoundedBacklogImpl {
 
 impl BoundedBacklogImpl {
     fn run(&self) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         while !guard.stopped {
-            guard = self
-                .condition
+            guard = self.condition
                 .wait_timeout_while(guard, Duration::from_secs(1), |i| {
                     !i.stopped && !i.predicate()
                 })
-                .unwrap()
-                .0;
+                .unwrap().0;
 
             if guard.stopped {
                 return;
@@ -278,15 +279,15 @@ impl BoundedBacklogImpl {
             self.stats.inc(StatType::BoundedBacklog, DetailType::Loop);
 
             // Calculate the number of targets to rollback
-            let backlog = self.ledger.backlog_count();
+            let backlog = self.ledger.backlog_count() as u64;
 
             let target_count = if backlog > self.config.max_backlog {
-                backlog - self.config.max_backlog
+                backlog - self.config.max_backlog as u64
             } else {
                 0
             };
 
-            let can_roll_back = self.can_roll_back.read().unwrap();
+            let can_roll_back = self.can_roll_back.read();
             let targets = guard.gather_targets(
                 min(target_count as usize, self.config.batch_size),
                 &*can_roll_back,
@@ -301,7 +302,7 @@ impl BoundedBacklogImpl {
                 );
 
                 let processed = self.roll_back(&targets, target_count as usize, &*can_roll_back);
-                guard = self.mutex.lock().unwrap();
+                guard = self.mutex.lock();
 
                 // Erase rolled back blocks from the index
                 for hash in &processed {
@@ -314,8 +315,7 @@ impl BoundedBacklogImpl {
                 guard = self
                     .condition
                     .wait_timeout_while(guard, Duration::from_millis(100), |i| !i.stopped)
-                    .unwrap()
-                    .0;
+                    .unwrap().0;
             }
         }
     }
@@ -344,7 +344,6 @@ impl BoundedBacklogImpl {
         if let Err(e) = self
             .publish_event
             .lock()
-            .unwrap()
             .as_ref()
             .unwrap()
             .send(LedgerEvent::BlocksRolledBack(results))
@@ -356,7 +355,7 @@ impl BoundedBacklogImpl {
     }
 
     fn run_scan(&self) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         while !guard.stopped {
             let mut last = BlockHash::zero();
             while !guard.stopped {
@@ -364,14 +363,12 @@ impl BoundedBacklogImpl {
                 while !guard
                     .scan_limiter
                     .lock()
-                    .unwrap()
                     .try_consume(self.config.batch_size, self.clock.now())
                 {
                     guard = self
                         .condition
                         .wait_timeout(guard, Duration::from_millis(100))
-                        .unwrap()
-                        .0;
+                        .unwrap().0;
                     if guard.stopped {
                         return;
                     }
@@ -396,7 +393,7 @@ impl BoundedBacklogImpl {
                         last = hash;
                     }
                 }
-                guard = self.mutex.lock().unwrap();
+                guard = self.mutex.lock();
             }
         }
     }
@@ -404,7 +401,7 @@ impl BoundedBacklogImpl {
     fn update(&self, unconfirmed: &impl LedgerSet, hash: &BlockHash) {
         // Erase if the block is either confirmed or missing
         if !unconfirmed.block_exists(hash) {
-            self.mutex.lock().unwrap().index.erase_hash(hash);
+            self.mutex.lock().index.erase_hash(hash);
         }
     }
 }
@@ -426,7 +423,7 @@ impl BacklogData {
         }
 
         // Both ledger and tracked backlog must be over the threshold
-        self.ledger.backlog_count() > self.config.max_backlog
+        self.ledger.backlog_count() as u64 > self.config.max_backlog
             && self.index.len() > self.config.max_backlog as usize
     }
 

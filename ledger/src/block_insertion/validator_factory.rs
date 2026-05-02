@@ -38,6 +38,8 @@ impl<'a> BlockValidatorFactory<'a> {
                 .get_pending(&PendingKey::new(account, source_block))
         };
 
+        let is_genesis = self.block.hash() == self.constants.genesis_block.hash();
+
         BlockValidator {
             block: self.block,
             epochs: &self.constants.epochs,
@@ -48,6 +50,7 @@ impl<'a> BlockValidatorFactory<'a> {
             pending_receive_info,
             any_pending_exists: self.any.receivable_exists(account),
             source_block_exists,
+            is_genesis,
             previous_block,
             now: UnixMillisTimestamp::now(),
         }

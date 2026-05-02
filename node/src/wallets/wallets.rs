@@ -119,6 +119,24 @@ impl Wallets {
     pub fn compute_reps(&self) {}
 
     pub fn reload(&self) {}
+    
+    pub fn new_null() -> Self {
+        let node_config = NodeConfig::default();
+        let ledger = Arc::new(Ledger::new_null());
+        Self::new(
+            ledger.clone(),
+            &node_config,
+            WorkThresholds::publish_dev().clone(),
+            Arc::new(WorkFactory::new_null()),
+            NetworkParams::new(rsnano_core::Networks::NanoDevNetwork),
+            Arc::new(ThreadPoolImpl::create(1, "null")),
+            Arc::new(BlockProcessorQueue::new_null()),
+            Arc::new(Mutex::new(OnlineReps::new_test_instance())),
+            Arc::new(ConfirmingSet::new_null()),
+            MessageFlooder::new_null(),
+            rsnano_core::Networks::NanoDevNetwork,
+        )
+    }
 }
 
 impl ContainerInfoProvider for Wallets {

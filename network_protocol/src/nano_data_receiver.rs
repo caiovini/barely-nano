@@ -150,14 +150,14 @@ impl NanoDataReceiver {
             self.stats
                 .inc(StatType::TcpChannels, DetailType::ChannelAccepted);
 
-            debug!(
+            tracing::info!(
                 "Switched to realtime mode (addr: {}, node_id: {})",
                 self.channel.peer_addr(),
                 node_id
             );
             true
         } else {
-            debug!(
+            tracing::info!(
                 channel_id = ?self.channel.channel_id(),
                 peer = %self.channel.peer_addr(),
                 %node_id,
@@ -181,25 +181,13 @@ impl NanoDataReceiver {
                         .handshakes_received
                         .fetch_add(1, Ordering::Relaxed);
 
-                    match self
-                        .handshake_process
-                        .process_handshake(payload)
-                    {
-                        Ok(_) => {
-                            self.handshake_stats
-                                .response_ok
-                                .fetch_add(1, Ordering::Relaxed);
-
-                            // TODO: extract node ID from handshake
-                            (HandshakeStatus::Realtime(NodeId::ZERO), None)
-                        }
-                        Err(_e) => {
-                            self.handshake_stats
-                                .handshake_error
-                                .fetch_add(1, Ordering::Relaxed);
-                            (HandshakeStatus::Abort, None)
-                        }
+                    let (status, response) = self.handshake_process.process_handshake(payload);
+                    if response.is_some() {
+                         self.handshake_stats
+                            .response_ok
+                            .fetch_add(1, Ordering::Relaxed);
                     }
+                    (status, response)
                 }
 
                 _ => (HandshakeStatus::Abort, None),
@@ -258,6 +246,7 @@ impl DataReceiver for NanoDataReceiver {
                             .set_protocol_version(msg.protocol.version_using);
                         self.first_message = false;
                     }
+                    tracing::info!("[node] Deserialized message: {:?} from {}", msg.message.message_type(), self.channel.peer_addr());
                     self.process_message(msg.message)
                 }
                 Err(ParseMessageError::DuplicatePublishMessage) => {
@@ -291,15 +280,25 @@ impl DataReceiver for NanoDataReceiver {
         ReceiveResult::Continue
     }
 
+    fn ensure_handshake(&mut self) {
+        if self.channel.direction() == ChannelDirection::Outbound {
+            let _ = self.handshake_process.initiate_handshake(&self.channel.peer_addr());
+        }
+    }
+
     fn try_unpause(&self) -> ReceiveResult {
         let mode = self.channel.mode();
         match mode {
             ChannelMode::Undefined => {
-                if self.channel.queue_len() > 0 {
+                let q_len = self.channel.queue_len();
+                if q_len > 0 {
+                    tracing::info!("[node] try_unpause: still paused (queue_len: {})", q_len);
                     return ReceiveResult::Pause;
                 }
 
+                tracing::info!("[node] try_unpause: upgrading to realtime...");
                 if !self.to_realtime_connection(&self.node_id) {
+                    tracing::info!("[node] try_unpause: upgrade failed!");
                     return ReceiveResult::Abort;
                 }
 

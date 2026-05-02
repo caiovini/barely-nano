@@ -107,6 +107,10 @@ impl TokenBucket {
         self.current_size
     }
 
+    pub fn limit(&self) -> usize {
+        self.refill_rate
+    }
+
     fn refill(&mut self, now: Timestamp) {
         let Some(last_refill) = self.last_refill else {
             self.last_refill = Some(now);

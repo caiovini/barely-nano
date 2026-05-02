@@ -1,7 +1,9 @@
+use core::cmp::Ordering;
+use alloc::vec::Vec;
 use rsnano_core::{utils::BlockPriority, BlockHash, SavedBlock};
 use alloc::collections::{ BTreeSet };
 use hashbrown::{ HashSet };
-// // // // // // use std::{   cmp::Ordering   }; // TODO: fix this
+// // // // // // // use std::{    cmp::Ordering    }; // TODO: fix this
 
 #[derive(Debug, Eq)]
 pub(super) struct BlockEntry {

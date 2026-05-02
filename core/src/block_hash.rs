@@ -1,7 +1,6 @@
 use super::Account;
 use crate::serialize_32_byte_string;
 use crate::u256_struct;
-use tools::blake2b::Blake2bHasher;
 use rsnano_nullable_random::NullableRng;
 use rand::Rng;
 
@@ -29,32 +28,33 @@ impl From<Account> for Blake2Hash {
     }
 }
 
+use blake2::digest::{Update, VariableOutput};
+ 
 pub struct Blake2HashBuilder {
-    hasher: Blake2bHasher,
+    hasher: blake2::Blake2bVar,
 }
-
+ 
 impl Default for Blake2HashBuilder {
     fn default() -> Self {
         Self {
-            hasher: Blake2bHasher::new(32),
+            hasher: blake2::Blake2bVar::new(32).expect("invalid hash length"),
         }
     }
 }
-
+ 
 impl Blake2HashBuilder {
     pub fn new() -> Self {
         Default::default()
     }
-
+ 
     pub fn update(mut self, data: impl AsRef<[u8]>) -> Self {
         self.hasher.update(data.as_ref());
         self
     }
-
+ 
     pub fn build(self) -> Blake2Hash {
-        let full = self.hasher.finalize();
         let mut buffer = [0; 32];
-        buffer.copy_from_slice(&full[..32]);
+        self.hasher.finalize_variable(&mut buffer).expect("hashing failed");
         BlockHash::from_bytes(buffer)
     }
 }

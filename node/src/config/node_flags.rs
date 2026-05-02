@@ -1,3 +1,5 @@
+use alloc::string::String;
+use alloc::vec::Vec;
 use rsnano_ledger::GenerateCacheFlags;
 
 #[derive(Clone)]

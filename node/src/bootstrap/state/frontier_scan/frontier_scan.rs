@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use super::{heads_container::HeadsContainer, FrontierScanConfig};
 use primitive_types::U512;
 use rsnano_core::{utils::ContainerInfo, Account, Frontier};
@@ -106,8 +107,8 @@ pub struct FrontierHeadInfo {
 impl FrontierHeadInfo {
     /// Returns how far the current frontier is in the range [0, 1]
     pub fn done_normalized(&self) -> f32 {
-        let total: U512 = (self.end.number() - self.start.number()).into();
-        let mut progress: U512 = (self.current.number() - self.start.number()).into();
+        let total: U512 = U512::from_big_endian(&(self.end.number() - self.start.number()).to_big_endian());
+        let mut progress: U512 = U512::from_big_endian(&(self.current.number() - self.start.number()).to_big_endian());
         progress *= 1000;
         (progress / total).as_u64() as f32 / 1000.0
     }

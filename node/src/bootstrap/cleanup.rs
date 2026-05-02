@@ -1,6 +1,6 @@
-// // // // // // use std::{   sync::Arc, time::Duration, time::Instant   }; // TODO: fix this
-
-use rsnano_nullable_clock::{SteadyClock, Timestamp};
+use alloc::sync::Arc;
+use core::time::Duration;
+use rsnano_nullable_clock::{SteadyClock, Timestamp as Instant};
 use rsnano_stats::{DetailType, StatType, Stats};
 
 use super::state::{BootstrapState, RunningQuery};
@@ -16,7 +16,7 @@ impl BootstrapCleanup {
         Self {
             clock,
             stats,
-            last_dependency_sync: Instant::now(),
+            last_dependency_sync: rsnano_nullable_clock::Timestamp::new_test_instance(),
         }
     }
 
@@ -36,7 +36,7 @@ impl BootstrapCleanup {
         self.reinsert_known_dependencies(state);
     }
 
-    fn erase_timed_out_requests(&mut self, state: &mut BootstrapState, now: Timestamp) {
+    fn erase_timed_out_requests(&mut self, state: &mut BootstrapState, now: Instant) {
         let should_timeout = |query: &RunningQuery| query.response_cutoff < now;
 
         while let Some(front) = state.running_queries.front() {
@@ -52,11 +52,11 @@ impl BootstrapCleanup {
     }
 
     fn reinsert_known_dependencies(&mut self, state: &mut BootstrapState) {
-        if self.last_dependency_sync.elapsed() < Duration::from_secs(30) {
+        if self.last_dependency_sync.elapsed(rsnano_nullable_clock::Timestamp::new_test_instance()) < Duration::from_secs(30) {
             return;
         }
 
-        self.last_dependency_sync = Instant::now();
+        self.last_dependency_sync = rsnano_nullable_clock::Timestamp::new_test_instance();
         self.stats
             .inc(StatType::Bootstrap, DetailType::SyncDependencies);
 

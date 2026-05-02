@@ -1,5 +1,5 @@
+use alloc::collections::VecDeque;
 use hashbrown::{ HashMap };
-use alloc::collections::{ VecDeque };
 
 use rsnano_core::{utils::ContainerInfo, BlockHash, QualifiedRoot};
 

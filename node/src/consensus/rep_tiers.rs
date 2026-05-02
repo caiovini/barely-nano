@@ -1,6 +1,11 @@
-use alloc::sync::{ Arc };
+use crate::utils::JoinHandle;
+use core::ops::Deref;
+use hashbrown::HashSet;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use spin::{ Mutex };
-// // // // // // use std::{   collections::HashSet, mem::size_of, ops::Deref, thread::JoinHandle   }; // TODO: fix this
+// // // // // // // use std::{    collections::HashSet, mem::size_of, ops::Deref, thread::JoinHandle    }; // TODO: fix this
 
 use strum_macros::{EnumCount, EnumIter};
 use tracing::debug;
@@ -83,7 +88,7 @@ impl CurrentRepTiers {
 
 impl RepTiersConsumer for CurrentRepTiers {
     fn update_rep_tiers(&self, new_tiers: RepTiers) {
-        *self.0.lock().unwrap() = new_tiers;
+        *self.0.lock() = new_tiers;
     }
 }
 
@@ -97,7 +102,7 @@ impl Deref for CurrentRepTiers {
 
 impl ContainerInfoProvider for CurrentRepTiers {
     fn container_info(&self) -> ContainerInfo {
-        let tiers = self.lock().unwrap();
+        let tiers = self.lock();
         [
             ("tier_1", tiers.tier1.len(), size_of::<PublicKey>()),
             ("tier_2", tiers.tier2.len(), size_of::<PublicKey>()),
@@ -149,7 +154,7 @@ impl RepTiersCalculator {
 
     fn calculate_tiers(&mut self) {
         self.stats.inc(StatType::RepTiers, DetailType::Loop);
-        let trended = self.online_reps.lock().unwrap().trended_or_minimum_weight();
+        let trended = self.online_reps.lock().trended_or_minimum_weight();
         let mut new_tier1 = HashSet::new();
         let mut new_tier2 = HashSet::new();
         let mut new_tier3 = HashSet::new();
@@ -215,7 +220,7 @@ impl RepTiersCalculator {
 impl Drop for RepTiersCalculator {
     fn drop(&mut self) {
         // Thread must be stopped before destruction
-        debug_assert!(self.thread.lock().unwrap().is_none());
+        debug_assert!(self.thread.lock().is_none());
     }
 }
 

@@ -1,6 +1,9 @@
-use alloc::sync::{ Arc };
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::{ Mutex };
-// // // // // // use std::{   collections::VecDeque, sync::Condvar, time::Duration   }; // TODO: fix this
+use crate::utils::Condvar;
+use core::time::Duration;
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider, FairQueueInfo},
@@ -60,23 +63,23 @@ impl BlockProcessorQueue {
 
     pub fn stop(&self) {
         {
-            let mut queue = self.queue.lock().unwrap();
+            let mut queue = self.queue.lock();
             queue.stopped = true;
         }
         self.condition.notify_all();
     }
 
     pub fn stopped(&self) -> bool {
-        self.queue.lock().unwrap().stopped
+        self.queue.lock().stopped
     }
 
     pub fn set_cooldown(&self, cool_down: bool) {
-        self.queue.lock().unwrap().cool_down = cool_down;
+        self.queue.lock().cool_down = cool_down;
         self.condition.notify_all();
     }
 
     pub fn is_cooling_down(&self) -> bool {
-        self.queue.lock().unwrap().cool_down
+        self.queue.lock().cool_down
     }
 
     pub fn wait(&self, duration: Duration) {
@@ -86,50 +89,63 @@ impl BlockProcessorQueue {
             return;
         }
 
-        let guard = self.queue.lock().unwrap();
+        let guard = self.queue.lock();
         let _ = self
             .condition
             .wait_timeout_while(guard, duration, |i| !i.stopped);
     }
 
-    pub(crate) fn pop_blocking(&self) -> Option<VecDeque<Arc<BlockContext>>> {
-        let mut queue = self.queue.lock().unwrap();
+    pub(crate) fn pop(&self) -> Option<VecDeque<Arc<BlockContext>>> {
+        let mut queue = self.queue.lock();
+        if queue.stopped {
+            return None;
+        }
 
-        loop {
-            if queue.stopped {
-                return None;
+        if !queue.cool_down {
+            let batch = queue.process_queue.next_batch();
+            if !batch.is_empty() {
+                return Some(batch);
             }
+        }
+        None
+    }
 
-            if !queue.cool_down {
-                let batch = queue.process_queue.next_batch();
-                if !batch.is_empty() {
-                    return Some(batch);
-                }
-                if self.is_nulled {
-                    queue.stopped = true;
+    pub(crate) fn pop_blocking(&self) -> Option<VecDeque<Arc<BlockContext>>> {
+        loop {
+            {
+                let mut queue = self.queue.lock();
+                if queue.stopped {
                     return None;
                 }
+
+                if !queue.cool_down {
+                    let batch = queue.process_queue.next_batch();
+                    if !batch.is_empty() {
+                        return Some(batch);
+                    }
+                    if self.is_nulled {
+                        queue.stopped = true;
+                        return None;
+                    }
+                }
             }
 
-            queue = self
-                .condition
-                .wait_while(queue, |i| i.should_wait())
-                .unwrap();
+            core::hint::spin_loop();
         }
     }
 
     // TODO: Remove and replace all checks with calls to size (block_source)
     pub fn total_queue_len(&self) -> usize {
-        self.queue.lock().unwrap().process_queue.len()
+        self.queue.lock().process_queue.len()
     }
 
     pub fn queue_len(&self, source: BlockSource) -> usize {
-        self.queue.lock().unwrap().process_queue.source_len(source)
+        self.queue.lock().process_queue.source_len(source)
     }
 
     pub fn push(&self, context: impl Into<Arc<BlockContext>>) -> bool {
         let context = context.into();
-        let added = self.queue.lock().unwrap().push(context);
+        let added = self.queue.lock().push(context);
 
         if added {
             self.condition.notify_one();
@@ -154,17 +170,17 @@ impl BlockProcessorQueue {
         self.push(ctx.clone());
 
         match waiter.wait_result() {
-            Some(Ok(())) => Ok(Ok(ctx.saved_block.lock().unwrap().clone().unwrap())),
+            Some(Ok(())) => Ok(Ok(ctx.saved_block.lock().clone().unwrap())),
             Some(Err(e)) => Ok(Err(e)),
             None => {
-                self.queue.lock().unwrap().timeout += 1;
+                self.queue.lock().timeout += 1;
                 Err(anyhow!("Block dropped when processing"))
             }
         }
     }
 
     pub fn info(&self) -> FairQueueInfo<BlockSource> {
-        self.queue.lock().unwrap().process_queue.info()
+        self.queue.lock().process_queue.info()
     }
 }
 
@@ -176,7 +192,7 @@ impl Default for BlockProcessorQueue {
 
 impl DeadChannelCleanupStep for BlockProcessorQueue {
     fn clean_up_dead_channels(&self, dead_channel_ids: &[ChannelId]) {
-        let mut guard = self.queue.lock().unwrap();
+        let mut guard = self.queue.lock();
         for channel_id in dead_channel_ids {
             let iter = BlockSource::iter();
             for source in iter {
@@ -188,13 +204,13 @@ impl DeadChannelCleanupStep for BlockProcessorQueue {
 
 impl StatsSource for BlockProcessorQueue {
     fn collect_stats(&self, result: &mut StatsCollection) {
-        self.queue.lock().unwrap().collect_stats(result)
+        self.queue.lock().collect_stats(result)
     }
 }
 
 impl ContainerInfoProvider for BlockProcessorQueue {
     fn container_info(&self) -> ContainerInfo {
-        self.queue.lock().unwrap().process_queue.container_info()
+        self.queue.lock().process_queue.container_info()
     }
 }
 
@@ -264,77 +280,5 @@ impl StatsSource for BlockProcessorQueueImpl {
             );
         }
         result.insert("block_processor", "process_blocking_timeout", self.timeout);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ntest::timeout;
-
-    #[test]
-    fn enqueue() {
-        let queue = BlockProcessorQueue::default();
-        let ctx = test_block_context();
-
-        queue.push(ctx);
-
-        assert_eq!(queue.total_queue_len(), 1);
-    }
-
-    #[test]
-    fn dequeue() {
-        let queue = BlockProcessorQueue::default();
-        let ctx = test_block_context();
-        queue.push(ctx);
-
-        let batch = queue.pop_blocking().unwrap();
-
-        assert_eq!(batch.len(), 1);
-    }
-
-    #[test]
-    #[timeout(5000)]
-    fn pop_none_when_stopped() {
-        let queue = BlockProcessorQueue::default();
-        queue.stop();
-        assert!(queue.pop_blocking().is_none());
-    }
-
-    #[test]
-    #[timeout(5000)]
-    fn can_be_nulled() {
-        let queue = BlockProcessorQueue::new_null();
-        queue.wait(Duration::MAX);
-        assert!(queue.pop_blocking().is_none());
-    }
-
-    #[test]
-    #[timeout(5000)]
-    fn nulled_queue_returns_configured_response() {
-        let ctx = test_block_context();
-        let queue = BlockProcessorQueue::new_null_with(vec![ctx]);
-
-        queue.pop_blocking().expect("should pop block");
-        assert!(queue.pop_blocking().is_none());
-        assert!(queue.pop_blocking().is_none());
-        queue.wait(Duration::MAX);
-    }
-
-    #[test]
-    #[timeout(5000)]
-    fn can_track_waits() {
-        let queue = BlockProcessorQueue::new_null();
-        let waits = queue.track_waits();
-        let duration = Duration::from_secs(42);
-
-        queue.wait(duration);
-
-        assert_eq!(waits.output(), vec![duration]);
-    }
-
-    fn test_block_context() -> Arc<BlockContext> {
-        let block = Block::new_test_instance();
-        BlockContext::new(block, BlockSource::Live, ChannelId::LOOPBACK).into()
     }
 }

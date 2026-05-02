@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use rsnano_core::{Account, Amount, Networks};
 use rsnano_ledger::{BootstrapWeights, RepWeightCache, RepWeights};
 use tracing::info;
@@ -20,6 +21,10 @@ fn deserialize_bootstrap_weights(buffer: &str) -> BootstrapWeights {
     let mut first_line = true;
     let mut max_blocks = 0;
     for line in buffer.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
         if first_line {
             max_blocks = line.parse().unwrap();
             first_line = false;
@@ -27,8 +32,21 @@ fn deserialize_bootstrap_weights(buffer: &str) -> BootstrapWeights {
         }
 
         let mut it = line.split(':');
-        let account = Account::decode_account(it.next().unwrap()).unwrap();
-        let weight = Amount::decode_dec(it.next().unwrap()).unwrap();
+        let account_str = it.next().unwrap_or("");
+        let weight_str = it.next().unwrap_or("");
+        
+        if account_str.is_empty() || weight_str.is_empty() {
+            continue;
+        }
+
+        let account = match Account::decode_account(account_str) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let weight = match Amount::decode_dec(weight_str) {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
         weights.insert(account.into(), weight);
     }
 

@@ -1,3 +1,7 @@
+use core::cmp::max;
+use core::time::Duration;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 mod builder;
 mod cleanup;
 mod online_container;
@@ -146,6 +150,7 @@ impl OnlineReps {
 
     /// Returns the quorum required for confirmation
     pub fn quorum_delta(&self) -> Amount {
+        tracing::info!("[node] OnlineReps::quorum_delta");
         let weight = max(self.online_weight(), self.trended_or_minimum_weight());
 
         // Using a larger container to ensure maximum precision
@@ -256,6 +261,7 @@ impl OnlineReps {
     }
 
     pub fn calculate_online_weight(&mut self) {
+        tracing::info!("[node] OnlineReps::calculate_online_weight");
         let mut current = Amount::zero();
         let rep_weights = self.rep_weights.read();
         for account in self.online_reps.iter() {

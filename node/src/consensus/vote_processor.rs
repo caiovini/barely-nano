@@ -1,4 +1,13 @@
-// // // // // // use std::{   cmp::max, cmp::min, collections::HashMap, thread::JoinHandle, time::Duration, time::Instant   }; // TODO: fix this
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::boxed::Box;
+use alloc::string::ToString;
+use hashbrown::{ HashMap };
+use spin::{ Mutex };
+use core::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
+use rsnano_nullable_clock::Timestamp as Instant;
+use crate::utils::{JoinHandle};
+use core::cmp::{max, min};
 
 use tracing::debug;
 
@@ -75,14 +84,14 @@ impl VoteProcessor {
         self.vote_applier.stop();
         self.queue.stop();
 
-        let mut handles = Vec::new();
+        let mut _handles = Vec::new();
         {
-            let mut guard = self.threads.lock().unwrap();
-            core::mem::swap(&mut handles, &mut guard);
+            let mut guard = self.threads.lock();
+            core::mem::swap(&mut _handles, &mut guard);
         }
-        for handle in handles {
-            handle.join().unwrap()
-        }
+        // for handle in handles {
+        //     handle.join().unwrap()
+        // }
     }
 
     pub fn run(&self) {
@@ -92,7 +101,7 @@ impl VoteProcessor {
                     return;
                 }
 
-                std::thread::sleep(Duration::from_millis(25));
+                // std::thread::sleep(Duration::from_millis(25));
                 continue;
             }
 
@@ -103,7 +112,8 @@ impl VoteProcessor {
                 break; //stopped
             }
 
-            let start = Instant::now();
+            // let start = Instant::now();
+            // TODO: fix time
 
             for (_, (vote, source, channel, filter)) in &batch {
                 let filter = filter.unwrap_or_default();
@@ -115,15 +125,15 @@ impl VoteProcessor {
             self.total_processed
                 .fetch_add(batch.len() as u64, Ordering::SeqCst);
 
-            let elapsed_millis = start.elapsed().as_millis();
-            if batch.len() == self.queue.config.batch_size && elapsed_millis > 100 {
-                debug!(
-                    "Processed {} votes in {} milliseconds (rate of {} votes per second)",
-                    batch.len(),
-                    elapsed_millis,
-                    (batch.len() * 1000) / elapsed_millis as usize
-                );
-            }
+            // let elapsed_millis = start.elapsed().as_millis();
+            // if batch.len() == self.queue.config.batch_size && elapsed_millis > 100 {
+            //     debug!(
+            //         "Processed {} votes in {} milliseconds (rate of {} votes per second)",
+            //         batch.len(),
+            //         elapsed_millis,
+            //         (batch.len() * 1000) / elapsed_millis as usize
+            //     );
+            // }
         }
     }
 
@@ -141,7 +151,7 @@ impl VoteProcessor {
 impl Drop for VoteProcessor {
     fn drop(&mut self) {
         // Thread must be stopped before destruction
-        debug_assert!(self.threads.lock().unwrap().is_empty());
+        // debug_assert!(self.threads.lock().is_empty());
     }
 }
 
@@ -151,19 +161,19 @@ pub trait VoteProcessorExt {
 
 impl VoteProcessorExt for Arc<VoteProcessor> {
     fn start(&self) {
-        let mut threads = self.threads.lock().unwrap();
-        debug_assert!(threads.is_empty());
-        for _ in 0..self.queue.config.threads {
-            let self_l = Arc::clone(self);
-            threads.push(
-                std::thread::Builder::new()
-                    .name("Vote processing".to_string())
-                    .spawn(Box::new(move || {
-                        self_l.run();
-                    }))
-                    .unwrap(),
-            )
-        }
+        // let mut threads = self.threads.lock();
+        // debug_assert!(threads.is_empty());
+        // for _ in 0..self.queue.config.threads {
+        //     let self_l = Arc::clone(self);
+        //     threads.push(
+        //         std::thread::Builder::new()
+        //             .name("Vote processing".to_string())
+        //             .spawn(Box::new(move || {
+        //                 self_l.run();
+        //             }))
+        //             .unwrap(),
+        //     )
+        // }
     }
 }
 

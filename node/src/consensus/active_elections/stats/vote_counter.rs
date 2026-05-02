@@ -6,7 +6,7 @@ use rsnano_core::VoteSource;
 #[derive(Default)]
 pub(crate) struct VoteCounter {
     votes: u64,
-    by_source: [u64; VoteSource::COUNT],
+    by_source: [u64; 3], // VoteSource::COUNT
 }
 
 impl VoteCounter {
@@ -29,7 +29,7 @@ impl VoteCounter {
 impl StatsSource for VoteCounter {
     fn collect_stats(&self, result: &mut StatsCollection) {
         result.insert("election", "vote", self.votes);
-        for source in VoteSource::iter() {
+        for source in <VoteSource as IntoEnumIterator>::iter() {
             result.insert(
                 "election_vote",
                 source.as_str(),

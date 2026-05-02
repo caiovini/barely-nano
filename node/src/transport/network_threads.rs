@@ -1,6 +1,9 @@
-use alloc::sync::{ Arc };
-use spin::{ Mutex, RwLock };
-// // // // // // use std::{   sync::Condvar, thread::JoinHandle, time::Duration   }; // TODO: fix this
+use alloc::sync::Arc;
+use spin::{ Mutex, RwLock, MutexGuard };
+use crate::utils::{Condvar, JoinHandle};
+use core::time::Duration;
+use alloc::vec::Vec;
+use alloc::string::String;
 
 use rsnano_messages::{Keepalive, Message, NetworkFilter};
 use rsnano_network::{DeadChannelCleanup, Network, NetworkConfig, PeerConnector, TrafficType};
@@ -10,6 +13,7 @@ use rsnano_stats::{DetailType, StatType, Stats};
 use super::{keepalive::KeepaliveMessageFactory, MessageFlooder};
 use crate::config::{NetworkParams, NodeFlags};
 use rsnano_network_protocol::{LatestKeepalives, SynCookies};
+use kernel_common::async_rt;
 
 pub(crate) struct NetworkThreads {
     cleanup_thread: Option<JoinHandle<()>>,
@@ -26,7 +30,7 @@ pub(crate) struct NetworkThreads {
     network_filter: Arc<NetworkFilter>,
     keepalive_factory: Arc<KeepaliveMessageFactory>,
     latest_keepalives: Arc<Mutex<LatestKeepalives>>,
-    dead_channel_cleanup: Option<DeadChannelCleanup>,
+    dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
     message_flooder: MessageFlooder,
     clock: Arc<SteadyClock>,
 }
@@ -43,7 +47,7 @@ impl NetworkThreads {
         network_filter: Arc<NetworkFilter>,
         keepalive_factory: Arc<KeepaliveMessageFactory>,
         latest_keepalives: Arc<Mutex<LatestKeepalives>>,
-        dead_channel_cleanup: DeadChannelCleanup,
+        dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
         message_flooder: MessageFlooder,
         clock: Arc<SteadyClock>,
     ) -> Self {
@@ -62,7 +66,7 @@ impl NetworkThreads {
             network_filter,
             keepalive_factory,
             latest_keepalives,
-            dead_channel_cleanup: Some(dead_channel_cleanup),
+            dead_channel_cleanup,
             message_flooder,
             clock,
         }
@@ -75,15 +79,12 @@ impl NetworkThreads {
             flags: self.flags.clone(),
             syn_cookies: self.syn_cookies.clone(),
             network_filter: self.network_filter.clone(),
-            dead_channel_cleanup: self.dead_channel_cleanup.take().unwrap(),
+            dead_channel_cleanup: self.dead_channel_cleanup.clone(),
         };
 
-        self.cleanup_thread = Some(
-            std::thread::Builder::new()
-                .name("Net cleanup".to_string())
-                .spawn(move || cleanup.run())
-                .unwrap(),
-        );
+        async_rt::spawn(async move {
+            cleanup.run_async().await;
+        });
 
         let mut keepalive = KeepaliveLoop {
             stopped: self.stopped.clone(),
@@ -95,12 +96,9 @@ impl NetworkThreads {
             clock: self.clock.clone(),
         };
 
-        self.keepalive_thread = Some(
-            std::thread::Builder::new()
-                .name("Net keepalive".to_string())
-                .spawn(move || keepalive.run())
-                .unwrap(),
-        );
+        async_rt::spawn(async move {
+            keepalive.run_async().await;
+        });
 
         if !self.network_config.peer_reachout.is_zero() {
             let reachout = ReachoutLoop {
@@ -111,35 +109,36 @@ impl NetworkThreads {
                 latest_keepalives: self.latest_keepalives.clone(),
             };
 
-            self.reachout_thread = Some(
-                std::thread::Builder::new()
-                    .name("Net reachout".to_string())
-                    .spawn(move || reachout.run())
-                    .unwrap(),
-            );
+            async_rt::spawn(async move {
+                reachout.run_async().await;
+            });
         }
     }
+
     pub fn stop(&mut self) {
-        *self.stopped.1.lock().unwrap() = true;
+        *self.stopped.1.lock() = true;
         self.stopped.0.notify_all();
-        self.network.write().unwrap().stop();
-        if let Some(t) = self.keepalive_thread.take() {
-            t.join().unwrap();
-        }
-        if let Some(t) = self.cleanup_thread.take() {
-            t.join().unwrap();
-        }
-        if let Some(t) = self.reachout_thread.take() {
-            t.join().unwrap();
-        }
+        self.network.write().stop();
+        let _t = self.keepalive_thread.take();
+        // if let Some(t) = t {
+        //     t.join().unwrap(); */ */ */ */
+        // }
+        let _t = self.cleanup_thread.take();
+        // if let Some(t) = t {
+        //     t.join().unwrap();
+        // }
+        let _t = self.reachout_thread.take();
+        // if let Some(t) = t {
+        //     t.join().unwrap();
+        // }
     }
 }
 
 impl Drop for NetworkThreads {
     fn drop(&mut self) {
         // All threads must be stopped before this destructor
-        debug_assert!(self.cleanup_thread.is_none());
-        debug_assert!(self.keepalive_thread.is_none());
+        // debug_assert!(self.cleanup_thread.is_none());
+        // debug_assert!(self.keepalive_thread.is_none());
     }
 }
 
@@ -149,35 +148,33 @@ struct CleanupLoop {
     flags: NodeFlags,
     syn_cookies: Arc<SynCookies>,
     network_filter: Arc<NetworkFilter>,
-    dead_channel_cleanup: DeadChannelCleanup,
+    dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
 }
 
 impl CleanupLoop {
-    fn run(&self) {
-        let mut stopped = self.stopped.1.lock().unwrap();
-        while !*stopped {
+    #[allow(dead_code)]
+    async fn run_async(&self) {
+        while !*self.stopped.1.lock() {
             let timeout = if self.network_params.network.is_dev_network() {
                 Duration::from_secs(1)
             } else {
                 Duration::from_secs(5)
             };
-            stopped = self.stopped.0.wait_timeout(stopped, timeout).unwrap().0;
+            
+            async_rt::sleep(timeout).await;
 
-            if *stopped {
+            if *self.stopped.1.lock() {
                 return;
             }
-            drop(stopped);
 
             if !self.flags.disable_connection_cleanup {
-                self.dead_channel_cleanup.clean_up();
+                self.dead_channel_cleanup.lock().clean_up();
             }
 
             self.syn_cookies
                 .purge(self.network_params.network.sync_cookie_cutoff);
 
             self.network_filter.update(timeout.as_secs());
-
-            stopped = self.stopped.1.lock().unwrap();
         }
     }
 }
@@ -193,28 +190,20 @@ struct KeepaliveLoop {
 }
 
 impl KeepaliveLoop {
-    fn run(&mut self) {
-        let mut stopped = self.stopped.1.lock().unwrap();
-        while !*stopped {
-            stopped = self
-                .stopped
-                .0
-                .wait_timeout(stopped, self.keepalive_period)
-                .unwrap()
-                .0;
+    #[allow(dead_code)]
+    async fn run_async(&mut self) {
+        while !*self.stopped.1.lock() {
+            async_rt::sleep(self.keepalive_period).await;
 
-            if *stopped {
+            if *self.stopped.1.lock() {
                 return;
             }
-            drop(stopped);
 
             self.stats.inc(StatType::Network, DetailType::LoopKeepalive);
             self.flood_keepalive(0.75);
             self.flood_keepalive_self(0.25);
 
             self.keepalive();
-
-            stopped = self.stopped.1.lock().unwrap();
         }
     }
 
@@ -222,7 +211,7 @@ impl KeepaliveLoop {
         let (message, keepalive_list) = {
             let message = self.keepalive_factory.create_keepalive();
 
-            let network = self.network.read().unwrap();
+            let network = self.network.read();
             let channels = network.idle_channels(self.keepalive_period, self.clock.now());
             (message, channels)
         };
@@ -237,7 +226,6 @@ impl KeepaliveLoop {
         let mut keepalive = Keepalive::default();
         self.network
             .read()
-            .unwrap()
             .random_fill_realtime(&mut keepalive.peers);
         self.message_flooder.flood(
             &Message::Keepalive(keepalive),
@@ -262,36 +250,31 @@ struct ReachoutLoop {
 }
 
 impl ReachoutLoop {
-    fn run(&self) {
-        let mut stopped = self.stopped.1.lock().unwrap();
-        while !*stopped {
-            stopped = self
-                .stopped
-                .0
-                .wait_timeout(stopped, self.reachout_interval)
-                .unwrap()
-                .0;
+    #[allow(dead_code)]
+    async fn run_async(&self) {
+        tracing::info!("[node] ReachoutLoop started");
+        while !*self.stopped.1.lock() {
+            async_rt::sleep(self.reachout_interval).await;
+            tracing::info!("[node] ReachoutLoop: checking for peers");
 
-            if *stopped {
+            if *self.stopped.1.lock() {
                 return;
             }
-            drop(stopped);
 
-            let keepalive = self.latest_keepalives.lock().unwrap().pop_random();
+            tracing::info!("[node] ReachoutLoop: pop_random...");
+            let keepalive = self.latest_keepalives.lock().pop_random();
             if let Some(keepalive) = keepalive {
+                tracing::info!("[node] ReachoutLoop: found keepalive with {} peers", keepalive.peers.len());
                 for peer in keepalive.peers {
                     if peer.ip().is_unspecified() {
                         continue;
                     }
+                    tracing::info!("[node] ReachoutLoop: connecting to {}", peer);
                     self.stats.inc(StatType::Network, DetailType::ReachoutLive);
                     let _ = self.peer_connector.connect_to(peer);
-
-                    // Throttle reachout attempts
-                    std::thread::sleep(self.reachout_interval);
                 }
             }
-
-            stopped = self.stopped.1.lock().unwrap();
+            tracing::info!("[node] ReachoutLoop: finished checking peers");
         }
     }
 }

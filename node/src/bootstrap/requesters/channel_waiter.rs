@@ -1,9 +1,10 @@
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use crate::bootstrap::{state::BootstrapState, BootstrapPromise, PollResult};
 use rsnano_network::{token_bucket::TokenBucket, Channel, ChannelId, Network, TrafficType};
 use rsnano_nullable_clock::Timestamp;
 use rsnano_stats::StatsCollection;
 use spin::{ Mutex, RwLock };
-use alloc::sync::{ Arc };
 use core::sync::atomic::{ AtomicU64, Ordering };
 
 /// Waits until a channel becomes available
@@ -45,7 +46,8 @@ impl ChannelWaiter {
 
     fn candidate_channels(network: &Network) -> Vec<ChannelId> {
         network
-            .available_channels(TrafficType::BootstrapRequests)
+            .available_channels()
+            .into_iter()
             .map(|c| c.channel_id())
             .collect()
     }
@@ -72,7 +74,7 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
             }
             ChannelWaitState::WaitLimiter => {
                 // Wait until more requests can be sent
-                if self.limiter.lock().unwrap().try_consume(1, now) {
+                if self.limiter.lock().try_consume(1, now) {
                     self.state = ChannelWaitState::WaitChannel;
                     return PollResult::Progress;
                 }
@@ -80,7 +82,7 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
             }
             ChannelWaitState::WaitChannel => {
                 // Wait until a channel is available
-                let network = self.network.read().unwrap();
+                let network = self.network.read();
                 let channel_ids = Self::candidate_channels(&network);
 
                 if let Some(channel_id) = boot_state.scoring.channel(channel_ids) {
@@ -140,7 +142,7 @@ mod tests {
     #[test]
     fn happy_path_no_waiting() {
         let network = test_network();
-        let channel = network.write().unwrap().add_test_channel();
+        let channel = network.write().add_test_channel();
         let limiter = Arc::new(Mutex::new(TokenBucket::new(TEST_RATE_LIMIT)));
         let mut waiter = ChannelWaiter::new(network, limiter, MAX_TEST_REQUESTS);
         let mut state = BootstrapState::default();
@@ -187,7 +189,7 @@ mod tests {
         let network = test_network();
         let limiter = Arc::new(Mutex::new(TokenBucket::new(TEST_RATE_LIMIT)));
         let now = Timestamp::new_test_instance();
-        limiter.lock().unwrap().try_consume(TEST_RATE_LIMIT, now);
+        limiter.lock().try_consume(TEST_RATE_LIMIT, now);
         let mut waiter = ChannelWaiter::new(network, limiter.clone(), MAX_TEST_REQUESTS);
         let mut state = BootstrapState::default();
 
@@ -201,7 +203,7 @@ mod tests {
         let result = waiter.poll(&mut state, now);
         assert!(matches!(result, PollResult::Wait));
 
-        limiter.lock().unwrap().reset();
+        limiter.lock().reset();
         let result = waiter.poll(&mut state, now);
         assert!(matches!(result, PollResult::Progress));
         assert!(matches!(waiter.state, ChannelWaitState::WaitChannel));

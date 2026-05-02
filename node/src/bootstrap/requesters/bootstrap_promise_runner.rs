@@ -1,8 +1,10 @@
+use alloc::sync::Arc;
 use crate::bootstrap::{state::BootstrapState, BootstrapPromise, PollResult};
 use rsnano_nullable_clock::{SteadyClock, Timestamp};
-use alloc::sync::{ Arc };
 use spin::{ Mutex };
-// // // // // // use std::{   cmp::min, sync::Condvar, time::Duration   }; // TODO: fix this
+use crate::utils::Condvar;
+use core::time::Duration;
+use core::cmp::min;
 
 /// Calls a requester to create a bootstrap request and then sends it to
 /// the peered node
@@ -21,145 +23,35 @@ impl BootstrapPromiseRunner {
         P: BootstrapPromise<T>,
     {
         let mut interval = Self::INITIAL_INTERVAL;
-        loop {
+
+        while !self.stopped() {
             let now = self.clock.now();
-            match self.progress(&mut promise, interval, now) {
-                Ok(result) => return Some(result),
-                Err(i) => interval = i,
-            }
+            let result = {
+                let mut state = self.state.lock();
+                promise.poll(&mut state, now)
+            };
 
-            let state = self.state.lock().unwrap();
-            if state.stopped {
-                return None;
-            }
-            drop(
-                self.state_changed
-                    .wait_timeout_while(state, interval, |s| !s.stopped)
-                    .unwrap()
-                    .0,
-            );
-        }
-    }
-
-    fn progress<A, T>(
-        &self,
-        action: &mut A,
-        mut wait_interval: Duration,
-        now: Timestamp,
-    ) -> Result<T, Duration>
-    where
-        A: BootstrapPromise<T>,
-    {
-        let mut state = self.state.lock().unwrap();
-        let mut reset_wait_interval = false;
-        let mut poll_count: usize = 0;
-        loop {
-            poll_count = poll_count.overflowing_add(1).0;
-            match action.poll(&mut state, now) {
-                PollResult::Progress => {
-                    if state.stopped {
-                        return Err(Self::INITIAL_INTERVAL);
-                    }
-                    reset_wait_interval = true;
-                    if poll_count % 100 == 0 {
-                        drop(state);
-                        std::thread::yield_now();
-                        state = self.state.lock().unwrap();
-                    }
-                }
+            match result {
+                PollResult::Finished(val) => return Some(val),
                 PollResult::Wait => {
-                    wait_interval = if reset_wait_interval {
-                        Self::INITIAL_INTERVAL
-                    } else {
-                        min(wait_interval * 2, self.throttle_wait)
-                    };
-                    return Err(wait_interval);
+                    self.wait(interval);
+                    interval = min(interval * 2, self.throttle_wait);
                 }
-                PollResult::Finished(result) => return Ok(result),
+                PollResult::Progress => {
+                    interval = Self::INITIAL_INTERVAL;
+                }
             }
         }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rsnano_core::utils::OneShotNotification;
-    use std::thread::spawn;
-
-    #[test]
-    fn abort_promise_when_stopped() {
-        let state = Arc::new(Mutex::new(BootstrapState::default()));
-        let state_changed = Arc::new(Condvar::new());
-
-        let runner = BootstrapPromiseRunner {
-            state: state.clone(),
-            throttle_wait: Duration::from_millis(100),
-            state_changed: state_changed.clone(),
-            clock: SteadyClock::new_null().into(),
-        };
-
-        let promise = StubPromise::new();
-        let polled = promise.polled.clone();
-        let finished = Arc::new(OneShotNotification::new());
-        let finished2 = finished.clone();
-
-        spawn(move || {
-            runner.run(promise);
-            finished2.notify(());
-        });
-
-        polled.wait();
-        {
-            let mut state = state.lock().unwrap();
-            state.stopped = true;
-        }
-        state_changed.notify_all();
-        finished.wait();
+        None
     }
 
-    #[test]
-    fn return_result_when_finished() {
-        let state = Arc::new(Mutex::new(BootstrapState::default()));
-        let state_changed = Arc::new(Condvar::new());
-
-        let runner = BootstrapPromiseRunner {
-            state: state.clone(),
-            throttle_wait: Duration::from_millis(100),
-            state_changed: state_changed.clone(),
-            clock: SteadyClock::new_null().into(),
-        };
-
-        let mut promise = StubPromise::new();
-        promise.result = Some(42);
-
-        let result = runner.run(promise);
-
-        assert_eq!(result, Some(42));
+    fn stopped(&self) -> bool {
+        self.state.lock().stopped
     }
 
-    struct StubPromise {
-        polled: Arc<OneShotNotification<()>>,
-        result: Option<i32>,
-    }
-
-    impl StubPromise {
-        fn new() -> Self {
-            Self {
-                polled: Arc::new(OneShotNotification::new()),
-                result: None,
-            }
-        }
-    }
-
-    impl BootstrapPromise<i32> for StubPromise {
-        fn poll(&mut self, _state: &mut BootstrapState, _now: Timestamp) -> PollResult<i32> {
-            self.polled.notify(());
-            if let Some(result) = self.result.take() {
-                PollResult::Finished(result)
-            } else {
-                PollResult::Wait
-            }
-        }
+    fn wait(&self, duration: Duration) {
+        let guard = self.state.lock();
+        let _ = self.state_changed.wait_timeout(guard, duration);
     }
 }

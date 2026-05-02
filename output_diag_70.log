@@ -1,0 +1,1960 @@
+/home/cvini/.asdf/shims/cargo build -p hello-bare --release --target riscv64gc-unknown-none-elf
+warning: unstable feature specified for `-Ctarget-feature`: `v`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: unstable feature specified for `-Ctarget-feature`: `zvkb`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: unstable feature specified for `-Ctarget-feature`: `zicbom`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: unused variable: `k_scalar`
+   --> tools/sha/src/ed25519.rs:190:9
+    |
+190 |     let k_scalar = Scalar::from_bytes_wide(&k_hash);
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_k_scalar`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `compress_vector` is never used
+  --> tools/sha/src/blake2b.rs:82:4
+   |
+82 | fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
+   |    ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `L` is never used
+   --> tools/sha/src/ed25519.rs:140:7
+    |
+140 | const L: [u64; 4] = [
+    |       ^
+
+warning: `rsnano_sha` (lib) generated 6 warnings (run `cargo fix --lib -p rsnano_sha` to apply 1 suggestion)
+warning: `rsnano_output_tracker` (lib) generated 3 warnings (3 duplicates)
+warning: unused variable: `capacity`
+  --> common/src/storage/mod.rs:52:33
+   |
+52 | ...                   let capacity = driver.capacity();
+   |                           ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_capacity`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MTIME_ADDR` is never used
+ --> common/src/clint.rs:3:7
+  |
+3 | const MTIME_ADDR: usize = CLINT_BASE + 0x0000_BFF8;
+  |       ^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kernel-common` (lib) generated 5 warnings (3 duplicates) (run `cargo fix --lib -p kernel-common` to apply 1 suggestion)
+warning: `rsnano_nullable_random` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_nullable_clock` (lib) generated 3 warnings (3 duplicates)
+warning: unused import: `alloc::borrow::ToOwned`
+ --> core/src/node_id.rs:6:5
+  |
+6 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `hash as blake2b_hash`
+  --> core/src/lib.rs:33:37
+   |
+33 | use tools::blake2b::{Blake2bHasher, hash as blake2b_hash};
+   |                                     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec`
+ --> core/src/utils/peer.rs:5:5
+  |
+5 | use alloc::vec;
+  |     ^^^^^^^^^^
+
+warning: unused import: `alloc::format`
+  --> core/src/utils/mod.rs:25:5
+   |
+25 | use alloc::format;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+  --> core/src/utils/mod.rs:26:5
+   |
+26 | use alloc::borrow::ToOwned;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `r`
+  --> core/src/public_key.rs:32:13
+   |
+32 |         let r = CompressedEdwardsY(r_bytes_32)
+   |             ^ help: if this is intentional, prefix it with an underscore: `_r`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> core/src/raw_key.rs:20:13
+   |
+20 |         let mut buf = self.0;
+   |             ----^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rsnano_core` (lib) generated 10 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_core` to apply 7 suggestions)
+   Compiling rsnano_stats v0.1.0 (/home/cvini/rust-workspace/hello-riscv/stats)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> work/src/work_queue.rs:120:28
+    |
+120 |     pub fn lock_work_queue(&self) -> MutexGuard<WorkQueue> {
+    |                            ^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                            |
+    |                            the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+120 |     pub fn lock_work_queue(&self) -> MutexGuard<'_, WorkQueue> {
+    |                                                 +++
+
+warning: `rsnano_work` (lib) generated 4 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_work` to apply 1 suggestion)
+warning: `rsnano_nullable_tcp` (lib) generated 3 warnings (3 duplicates)
+warning: unused `#[macro_use]` import
+ --> ledger_store/src/lib.rs:5:1
+  |
+5 | #[macro_use]
+  | ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `kernel_common::storage::DB`
+ --> ledger_store/src/version_store.rs:1:5
+  |
+1 | use kernel_common::storage::DB;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Serialize`
+ --> ledger_store/src/block_store.rs:2:58
+  |
+2 |     utils::{BufferReader, Deserialize, MutStreamAdapter, Serialize},
+  |                                                          ^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> ledger_store/src/online_weight_store.rs:37:13
+   |
+37 |         let mut result = Vec::new();
+   |             ----^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `db`
+  --> ledger_store/src/online_weight_store.rs:39:21
+   |
+39 |         if let Some(db) = lock.as_mut() {
+   |                     ^^ help: if this is intentional, prefix it with an underscore: `_db`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> ledger_store/src/peer_store.rs:21:13
+   |
+21 |         let mut value = [0u8; 256];
+   |             ----^^^^^
+   |             |
+   |             help: remove this `mut`
+
+warning: unused variable: `timestamp`
+  --> ledger_store/src/peer_store.rs:19:47
+   |
+19 |     pub fn put(&self, endpoint: SocketAddrV6, timestamp: SystemTime) {
+   |                                               ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timestamp`
+
+warning: variable does not need to be mutable
+  --> ledger_store/src/peer_store.rs:49:13
+   |
+49 |         let mut result = Vec::new();
+   |             ----^^^^^^
+   |             |
+   |             help: remove this `mut`
+
+warning: `rsnano_ledger_store` (lib) generated 11 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_ledger_store` to apply 6 suggestions)
+warning: `rsnano_websocket_messages` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_nullable_fs` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_nullable_http_client` (lib) generated 3 warnings (3 duplicates)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> stats/src/stats_collector.rs:123:20
+    |
+123 |     pub fn collect(&self) -> MutexGuard<StatsCollection> {
+    |                    ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                    |
+    |                    the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+123 |     pub fn collect(&self) -> MutexGuard<'_, StatsCollection> {
+    |                                         +++
+
+   Compiling rsnano_messages v0.1.0 (/home/cvini/rust-workspace/hello-riscv/messages)
+   Compiling rsnano_network v0.1.0 (/home/cvini/rust-workspace/hello-riscv/network)
+   Compiling rsnano_ledger v0.1.0 (/home/cvini/rust-workspace/hello-riscv/ledger)
+warning: unused imports: `BorrowingAnySet` and `BorrowingConfirmedSet`
+ --> ledger/src/ledger.rs:5:37
+  |
+5 |     AnySet, BlockRollbackPerformer, BorrowingAnySet, BorrowingConfirmedSet, ConfirmedSet,
+  |                                     ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ContainerInfoProvider`, `ContainerInfo`, and `UnixTimestamp`
+  --> ledger/src/ledger.rs:10:13
+   |
+10 |     utils::{ContainerInfo, ContainerInfoProvider, UnixTimestamp, SocketAddrV6},
+   |             ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused import: `LedgerCache`
+  --> ledger/src/ledger.rs:16:17
+   |
+16 |     BtreeStore, LedgerCache,
+   |                 ^^^^^^^^^^^
+
+warning: unused import: `rsnano_work::WorkThresholds`
+  --> ledger/src/ledger.rs:18:5
+   |
+18 | use rsnano_work::WorkThresholds;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `hashbrown::HashMap`
+  --> ledger/src/ledger.rs:24:5
+   |
+24 | use hashbrown::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DerefMut` and `Deref`
+  --> ledger/src/ledger.rs:26:11
+   |
+26 |     ops::{Deref, DerefMut},
+   |           ^^^^^  ^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> ledger/src/ledger_sets/confirmed.rs:6:5
+  |
+6 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+  --> network/src/channel.rs:20:5
+   |
+20 | use alloc::vec::Vec;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `map_address_to_subnetwork`
+ --> network/src/network.rs:3:29
+  |
+3 |     utils::{into_core_addr, map_address_to_subnetwork}, Channel, ChannelDirection, ChannelId, ChannelMode,
+  |                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `AtomicBool` and `Ipv6Addr`
+  --> network/src/network.rs:10:11
+   |
+10 |     net::{Ipv6Addr, SocketAddrV6},
+   |           ^^^^^^^^
+11 |     sync::atomic::{AtomicBool, Ordering},
+   |                    ^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> network/src/peer_connector.rs:7:5
+  |
+7 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `HashSet`
+ --> network/src/peer_exclusion.rs:4:26
+  |
+4 | use hashbrown::{HashMap, HashSet};
+  |                          ^^^^^^^
+
+warning: unused imports: `future::poll_fn`, `task::Poll`, and `time::Duration`
+  --> network/src/tcp_channel_adapter.rs:11:5
+   |
+11 |     time::Duration,
+   |     ^^^^^^^^^^^^^^
+12 |     future::poll_fn,
+   |     ^^^^^^^^^^^^^^^
+13 |     task::Poll,
+   |     ^^^^^^^^^^
+
+warning: unused import: `core::future::pending`
+ --> network/src/tcp_listener.rs:2:5
+  |
+2 | use core::future::pending;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing::debug`
+ --> network/src/tcp_listener.rs:5:5
+  |
+5 | use tracing::debug;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `Timestamp`
+ --> network/src/tcp_network_adapter.rs:6:42
+  |
+6 | use rsnano_nullable_clock::{SteadyClock, Timestamp};
+  |                                          ^^^^^^^^^
+
+warning: unused import: `debug`
+  --> network/src/tcp_network_adapter.rs:17:15
+   |
+17 | use tracing::{debug, warn};
+   |               ^^^^^
+
+warning: unused import: `ConfirmedSet`
+ --> ledger/src/ledger.rs:5:77
+  |
+5 |     AnySet, BlockRollbackPerformer, BorrowingAnySet, BorrowingConfirmedSet, ConfirmedSet,
+  |                                                                             ^^^^^^^^^^^^
+
+warning: unused variable: `batch_size`
+   --> ledger/src/ledger.rs:356:48
+    |
+356 |     fn pruning_action(&self, hash: &BlockHash, batch_size: u64) -> u64 {
+    |                                                ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> network/src/network.rs:257:13
+    |
+257 |         let mut result: Vec<_> = self.channels.values().cloned().collect();
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rsnano_stats` (lib) generated 4 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_stats` to apply 1 suggestion)
+warning: function `get_dev_genesis_block` is never used
+  --> ledger/src/ledger_constants.rs:44:8
+   |
+44 | pub fn get_dev_genesis_block() -> SavedBlock {
+   |        ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> ledger/src/block_rollback/rollback_performer.rs:91:12
+   |
+91 |     fn any(&self) -> BorrowingAnySet {
+   |            ^^^^^     ^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |            |
+   |            the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+91 |     fn any(&self) -> BorrowingAnySet<'_> {
+   |                                     ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> ledger/src/ledger.rs:236:16
+    |
+236 |     pub fn any(&self) -> OwningAnySet {
+    |                ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                |
+    |                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+236 |     pub fn any(&self) -> OwningAnySet<'_> {
+    |                                      ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> ledger/src/ledger_inserter.rs:18:20
+   |
+18 |     pub fn genesis(&self) -> LedgerBlockInserter {
+   |                    ^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                    |
+   |                    the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+18 |     pub fn genesis(&self) -> LedgerBlockInserter<'_> {
+   |                                                 ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> ledger/src/ledger_sets/any.rs:19:18
+   |
+19 |     fn confirmed(&self) -> BorrowingConfirmedSet;
+   |                  ^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                  |
+   |                  the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+19 |     fn confirmed(&self) -> BorrowingConfirmedSet<'_>;
+   |                                                 ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> ledger/src/ledger_sets/any.rs:168:18
+    |
+168 |     fn confirmed(&self) -> BorrowingConfirmedSet {
+    |                  ^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+168 |     fn confirmed(&self) -> BorrowingConfirmedSet<'_> {
+    |                                                 ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> ledger/src/ledger_sets/any.rs:338:18
+    |
+338 |     fn confirmed(&self) -> BorrowingConfirmedSet {
+    |                  ^^^^^     ^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+338 |     fn confirmed(&self) -> BorrowingConfirmedSet<'_> {
+    |                                                 ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> ledger/src/rep_weight_cache.rs:80:17
+   |
+80 |     pub fn read(&self) -> RwLockReadGuard<RepWeights> {
+   |                 ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                 |
+   |                 the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+80 |     pub fn read(&self) -> RwLockReadGuard<'_, RepWeights> {
+   |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> ledger/src/test_helpers/saved_block_lattice_builder.rs:64:20
+   |
+64 |     pub fn genesis(&mut self) -> SavedAccountChainBuilder {
+   |                    ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                    |
+   |                    the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+64 |     pub fn genesis(&mut self) -> SavedAccountChainBuilder<'_> {
+   |                                                          ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> ledger/src/test_helpers/unsaved_block_lattice_builder.rs:17:20
+   |
+17 |     pub fn genesis(&mut self) -> UnsavedAccountChainBuilder {
+   |                    ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                    |
+   |                    the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+17 |     pub fn genesis(&mut self) -> UnsavedAccountChainBuilder<'_> {
+   |                                                            ++++
+
+warning: variable `total_bytes` is assigned to, but never used
+   --> network/src/tcp_network_adapter.rs:104:17
+    |
+104 |             let mut total_bytes = 0usize;
+    |                 ^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_total_bytes` instead
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `total_bytes` is never read
+   --> network/src/tcp_network_adapter.rs:130:29
+    |
+130 | ...                   total_bytes += n;
+    |                       ^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `ChannelStats` is more private than the item `network::Network::new`
+  --> network/src/network.rs:36:5
+   |
+36 | /     pub fn new(
+37 | |         clock: Arc<SteadyClock>,
+38 | |         limiter: Arc<BandwidthLimiter>,
+39 | |         stats: Arc<ChannelStats>,
+40 | |         data_receiver_factory: Box<dyn DataReceiverFactory>,
+41 | |     ) -> Self {
+   | |_____________^ associated function `network::Network::new` is reachable at visibility `pub`
+   |
+note: but type `ChannelStats` is only usable at visibility `pub(crate)`
+  --> network/src/channel_stats.rs:7:1
+   |
+ 7 | pub(crate) struct ChannelStats {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: field `clock` is never read
+  --> network/src/network.rs:25:5
+   |
+21 | pub struct Network {
+   |            ------- field in this struct
+...
+25 |     clock: Arc<SteadyClock>,
+   |     ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `NetworkStats` is never constructed
+ --> network/src/network_stats.rs:9:19
+  |
+9 | pub(crate) struct NetworkStats {
+  |                   ^^^^^^^^^^^^
+
+warning: methods `accepted` and `error` are never used
+  --> network/src/network_stats.rs:42:12
+   |
+41 | impl NetworkStats {
+   | ----------------- methods in this implementation
+42 |     pub fn accepted(&self, peer: &SocketAddrV6, direction: ChannelDirection) {
+   |            ^^^^^^^^
+...
+51 |     pub fn error(&self, error: NetworkError, peer: &SocketAddrV6, direction: ChannelDirection) {
+   |            ^^^^^
+
+warning: struct `ErrorStats` is never constructed
+   --> network/src/network_stats.rs:122:8
+    |
+122 | struct ErrorStats {
+    |        ^^^^^^^^^^
+
+warning: associated items `new` and `error` are never used
+   --> network/src/network_stats.rs:133:8
+    |
+132 | impl ErrorStats {
+    | --------------- associated items in this implementation
+133 |     fn new(dir: Direction) -> Self {
+    |        ^^^
+...
+145 |     fn error(&self, error: NetworkError, peer: &SocketAddrV6) {
+    |        ^^^^^
+
+warning: field `connect_timeout` is never read
+  --> network/src/peer_connector.rs:16:5
+   |
+15 | pub struct PeerConnector {
+   |            ------------- field in this struct
+16 |     connect_timeout: Duration,
+   |     ^^^^^^^^^^^^^^^
+
+warning: use of `async fn` in public traits is discouraged as auto trait bounds cannot be specified
+   --> network/src/lib.rs:120:5
+    |
+120 |     async fn read(&self, buffer: &mut [u8], count: usize) -> anyhow::Result<()>;
+    |     ^^^^^
+    |
+    = note: you can suppress this lint if you plan to use the trait only in your own code, or do not care about auto traits like `Send` on the `Future`
+    = note: `#[warn(async_fn_in_trait)]` on by default
+help: you can alternatively desugar to a normal `fn` that returns `impl Future` and add any desired bounds such as `Send`, but these cannot be relaxed without a breaking API change
+    |
+120 -     async fn read(&self, buffer: &mut [u8], count: usize) -> anyhow::Result<()>;
+120 +     fn read(&self, buffer: &mut [u8], count: usize) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    |
+
+warning: unused `Result` that must be used
+  --> network/src/tcp_listener.rs:48:21
+   |
+48 |                     network_adapter.add(stream, crate::ChannelDirection::Inbound);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+   = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+   |
+48 |                     let _ = network_adapter.add(stream, crate::ChannelDirection::Inbound);
+   |                     +++++++
+
+   Compiling rsnano_network_protocol v0.1.0 (/home/cvini/rust-workspace/hello-riscv/network_protocol)
+warning: unused `#[macro_use]` import
+ --> network_protocol/src/lib.rs:5:1
+  |
+5 | #[macro_use]
+  | ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `#[macro_use]` import
+ --> network_protocol/src/lib.rs:8:1
+  |
+8 | #[macro_use]
+  | ^^^^^^^^^^^^
+
+warning: unused import: `SocketAddrV4`
+ --> network_protocol/src/handshake_process.rs:1:27
+  |
+1 | use core::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
+  |                           ^^^^^^^^^^^^
+
+warning: unused import: `Ordering`
+ --> network_protocol/src/handshake_stats.rs:1:39
+  |
+1 | use core::sync::atomic::{AtomicUsize, Ordering};
+  |                                       ^^^^^^^^
+
+warning: unused import: `rsnano_messages::MessageType`
+ --> network_protocol/src/handshake_stats.rs:2:5
+  |
+2 | use rsnano_messages::MessageType;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `strum::IntoEnumIterator`
+ --> network_protocol/src/handshake_stats.rs:3:5
+  |
+3 | use strum::IntoEnumIterator;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rand::seq::IteratorRandom`
+ --> network_protocol/src/latest_keepalives.rs:1:5
+  |
+1 | use rand::seq::IteratorRandom;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> network_protocol/src/nano_data_receiver.rs:4:5
+  |
+4 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NodeId`
+ --> network_protocol/src/nano_data_receiver_factory.rs:4:30
+  |
+4 | use rsnano_core::{BlockHash, NodeId, PrivateKey, ProtocolInfo};
+  |                              ^^^^^^
+
+warning: unused import: `MessageCallback`
+  --> network_protocol/src/nano_data_receiver_factory.rs:10:57
+   |
+10 |     HandshakeProcess, HandshakeStats, LatestKeepalives, MessageCallback, NanoDataReceiver,
+   |                                                         ^^^^^^^^^^^^^^^
+
+warning: unused import: `Rng`
+ --> network_protocol/src/syn_cookies.rs:8:12
+  |
+8 | use rand::{Rng, RngCore};
+  |            ^^^
+
+warning: unused variable: `signature`
+  --> network_protocol/src/handshake_process.rs:78:17
+   |
+78 |             let signature = self.node_id_key.sign(&query.cookie);
+   |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_signature`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling rsnano_node v2.0.0 (/home/cvini/rust-workspace/hello-riscv/node)
+warning: `rsnano_network` (lib) generated 25 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_network` to apply 11 suggestions)
+warning: `rsnano_messages` (lib) generated 3 warnings (3 duplicates)
+warning: unused `#[macro_use]` import
+ --> node/src/lib.rs:4:1
+  |
+4 | #[macro_use]
+  | ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AtomicBool`
+ --> node/src/block_processing/backlog_scan.rs:6:27
+  |
+6 | use core::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
+  |                           ^^^^^^^^^^
+
+warning: unused import: `core::net::SocketAddrV6`
+  --> node/src/block_processing/local_block_broadcaster.rs:11:5
+   |
+11 | use core::net::SocketAddrV6;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> node/src/bootstrap/bootstrapper.rs:2:5
+  |
+2 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Timestamp`
+ --> node/src/bootstrap/requesters/bootstrap_promise_runner.rs:3:42
+  |
+3 | use rsnano_nullable_clock::{SteadyClock, Timestamp};
+  |                                          ^^^^^^^^^
+
+warning: unused import: `TrafficType`
+ --> node/src/bootstrap/requesters/channel_waiter.rs:4:78
+  |
+4 | use rsnano_network::{token_bucket::TokenBucket, Channel, ChannelId, Network, TrafficType};
+  |                                                                              ^^^^^^^^^^^
+
+warning: unused import: `rand::RngCore`
+ --> node/src/bootstrap/requesters/query_sender.rs:5:5
+  |
+5 | use rand::RngCore;
+  |     ^^^^^^^^^^^^^
+
+warning: unused import: `max`
+ --> node/src/bootstrap/state/candidate_accounts/candidate_accounts.rs:1:22
+  |
+1 | use core::cmp::{min, max};
+  |                      ^^^
+
+warning: unused import: `rand::seq::SliceRandom`
+ --> node/src/bootstrap/state/peer_scoring/peer_scoring.rs:3:5
+  |
+3 | use rand::seq::SliceRandom;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> node/src/bootstrap/state/running_query.rs:1:5
+  |
+1 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> node/src/config/toml/daemon_toml.rs:1:5
+  |
+1 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `daemon_toml::*`
+  --> node/src/config/toml/mod.rs:34:9
+   |
+34 | pub use daemon_toml::*;
+   |         ^^^^^^^^^^^^^^
+
+warning: unused import: `lmdb_toml::*`
+  --> node/src/config/toml/mod.rs:38:9
+   |
+38 | pub use lmdb_toml::*;
+   |         ^^^^^^^^^^^^
+
+warning: unused import: `EnumCount`
+ --> node/src/consensus/active_elections/stats/vote_counter.rs:2:13
+  |
+2 | use strum::{EnumCount, IntoEnumIterator};
+  |             ^^^^^^^^^
+
+warning: unused import: `rsnano_nullable_clock::Timestamp as SystemTime`
+ --> node/src/consensus/election/election.rs:1:5
+  |
+1 | use rsnano_nullable_clock::Timestamp as SystemTime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> node/src/consensus/election_schedulers/hinted_scheduler.rs:4:5
+  |
+4 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> node/src/consensus/election_schedulers/manual_scheduler.rs:3:5
+  |
+3 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> node/src/consensus/election_schedulers/optimistic_scheduler.rs:3:5
+  |
+3 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::time::Duration`
+ --> node/src/consensus/election_schedulers/optimistic_scheduler.rs:7:5
+  |
+7 | use core::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> node/src/consensus/election_schedulers/priority/bucket.rs:1:5
+  |
+1 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> node/src/consensus/election_schedulers/priority/ordered_blocks.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> node/src/consensus/election_schedulers/priority/priority_scheduler.rs:4:5
+  |
+4 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> node/src/consensus/fork_cache.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `spin::Mutex`
+ --> node/src/consensus/vote_cache.rs:3:5
+  |
+3 | use spin::Mutex;
+  |     ^^^^^^^^^^^
+
+warning: unused import: `alloc::collections::BTreeMap`
+ --> node/src/consensus/vote_cache.rs:4:5
+  |
+4 | use alloc::collections::BTreeMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::cmp::Ordering`
+ --> node/src/consensus/vote_cache.rs:6:5
+  |
+6 | use core::cmp::Ordering;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::mem::size_of`
+ --> node/src/consensus/vote_cache.rs:8:5
+  |
+8 | use core::mem::size_of;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DescTallyKey` and `PublicKey`
+  --> node/src/consensus/vote_cache.rs:15:24
+   |
+15 |     Amount, BlockHash, DescTallyKey, PublicKey, Vote, VoteError,
+   |                        ^^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused imports: `DetailType` and `StatType`
+  --> node/src/consensus/vote_cache.rs:17:20
+   |
+17 | use rsnano_stats::{DetailType, StatType, Stats};
+   |                    ^^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> node/src/consensus/vote_generation/request_aggregator.rs:3:5
+  |
+3 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> node/src/consensus/vote_generation/vote_generator.rs:5:5
+  |
+5 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> node/src/consensus/vote_processor.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rsnano_nullable_clock::Timestamp as Instant`
+ --> node/src/consensus/vote_processor.rs:8:5
+  |
+8 | use rsnano_nullable_clock::Timestamp as Instant;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing::debug`
+  --> node/src/consensus/vote_processor.rs:12:5
+   |
+12 | use tracing::debug;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> node/src/consensus/vote_rebroadcast/rebroadcast_processor.rs:5:5
+  |
+5 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `rsnano_nullable_fs::NullableFilesystem`
+  --> node/src/node.rs:34:5
+   |
+34 | use rsnano_nullable_fs::NullableFilesystem;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `log_bootstrap_weights`, `rsnano_build_info`, and `rsnano_version_string`
+  --> node/src/node.rs:55:32
+   |
+55 |         get_bootstrap_weights, log_bootstrap_weights, ActiveElectionsContainer, AecTicker,
+   |                                ^^^^^^^^^^^^^^^^^^^^^
+...
+73 |         rsnano_build_info, rsnano_version_string, TelementryConfig, TelementryExt, Telemetry,
+   |         ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> node/src/node.rs:318:17
+    |
+318 |         let _ = (run_loopback_channel_adapter(
+    |                 ^
+...
+323 |         ));
+    |          ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+318 ~         let _ = run_loopback_channel_adapter(
+319 |             network.loopback().clone(),
+...
+322 |             inbound_message_queue.clone(),
+323 ~         ) ;
+    |
+
+warning: unused import: `NodeEvent`
+  --> node/src/node_builder.rs:13:39
+   |
+13 |     working_path_for, Node, NodeArgs, NodeEvent,
+   |                                       ^^^^^^^^^
+
+warning: unused import: `alloc::collections::VecDeque`
+ --> node/src/representatives/rep_crawler.rs:3:5
+  |
+3 | use alloc::collections::VecDeque;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> node/src/representatives/rep_crawler.rs:7:5
+  |
+7 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> node/src/telemetry/mod.rs:2:5
+  |
+2 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rsnano_nullable_clock::Timestamp as SystemTime`
+ --> node/src/telemetry/telemetry_factory.rs:1:5
+  |
+1 | use rsnano_nullable_clock::Timestamp as SystemTime;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::time::Duration`
+  --> node/src/telemetry/mod.rs:11:5
+   |
+11 | use core::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::cmp::min`
+  --> node/src/telemetry/mod.rs:13:5
+   |
+13 | use core::cmp::min;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `PublicKey`
+  --> node/src/telemetry/mod.rs:18:16
+   |
+18 |     BlockHash, PublicKey,
+   |                ^^^^^^^^^
+
+warning: unused import: `Message`
+  --> node/src/telemetry/mod.rs:20:23
+   |
+20 | use rsnano_messages::{Message, TelemetryAck, TelemetryData};
+   |                       ^^^^^^^
+
+warning: unused import: `TrafficType`
+  --> node/src/telemetry/mod.rs:21:75
+   |
+21 | use rsnano_network::{Channel, ChannelId, DeadChannelCleanupStep, Network, TrafficType};
+   |                                                                           ^^^^^^^^^^^
+
+warning: unused imports: `DetailType`, `StatType`, `StatsCollection`, and `StatsSource`
+  --> node/src/telemetry/mod.rs:24:20
+   |
+24 | use rsnano_stats::{DetailType, StatType, Stats, StatsCollection, StatsSource};
+   |                    ^^^^^^^^^^  ^^^^^^^^         ^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `core::time::Duration`
+ --> node/src/transport/loopback_channel_adapter.rs:2:5
+  |
+2 | use core::time::Duration;
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rsnano_nullable_clock::Timestamp as Instant`
+ --> node/src/transport/message_processor.rs:7:5
+  |
+7 | use rsnano_nullable_clock::Timestamp as Instant;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing::debug`
+ --> node/src/transport/message_processor.rs:9:5
+  |
+9 | use tracing::debug;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `MutexGuard`
+ --> node/src/transport/network_threads.rs:2:28
+  |
+2 | use spin::{ Mutex, RwLock, MutexGuard };
+  |                            ^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> node/src/transport/network_threads.rs:5:5
+  |
+5 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> node/src/transport/network_threads.rs:6:5
+  |
+6 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing::trace`
+ --> node/src/transport/realtime_message_handler.rs:6:5
+  |
+6 | use tracing::trace;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> node/src/transport/vec_buffer_reader.rs:1:5
+  |
+1 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Mutex`
+ --> node/src/utils/timer.rs:3:13
+  |
+3 | use spin::{ Mutex};
+  |             ^^^^^
+
+warning: unused import: `Timestamp as Instant`
+  --> node/src/utils/timer_thread.rs:10:42
+   |
+10 | use rsnano_nullable_clock::{SteadyClock, Timestamp as Instant};
+   |                                          ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::net::Ipv6Addr`
+  --> node/src/utils/mod.rs:11:5
+   |
+11 | use core::net::Ipv6Addr;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `rsnano_core::HardenedConstants`
+  --> node/src/utils/mod.rs:18:5
+   |
+18 | use rsnano_core::HardenedConstants;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `anyhow::Context`
+ --> node/src/wallets/wallet.rs:5:5
+  |
+5 | use anyhow::Context;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused imports: `KeyDerivationFunction` and `PrivateKey`
+ --> node/src/wallets/wallet.rs:8:19
+  |
+8 | use rsnano_core::{KeyDerivationFunction, PrivateKey, PublicKey, Root, WorkNonce};
+  |                   ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `spin::Mutex`
+ --> node/src/wallets/wallet_action_thread.rs:4:5
+  |
+4 | use spin::Mutex;
+  |     ^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> node/src/wallets/wallet_action_thread.rs:5:5
+  |
+5 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `HashSet`
+ --> node/src/wallets/wallets.rs:3:26
+  |
+3 | use hashbrown::{HashMap, HashSet};
+  |                          ^^^^^^^
+
+warning: unused import: `warn`
+ --> node/src/wallets/wallets.rs:7:21
+  |
+7 | use tracing::{info, warn};
+  |                     ^^^^
+
+warning: unused imports: `Amount` and `BlockHash`
+  --> node/src/wallets/wallets.rs:11:14
+   |
+11 |     Account, Amount, BlockHash, KeyDerivationFunction, Networks,
+   |              ^^^^^^  ^^^^^^^^^
+
+warning: unused import: `Root`
+ --> node/src/work/distributed_work_client.rs:2:19
+  |
+2 | use rsnano_core::{Root, WorkNonce};
+  |                   ^^^^
+
+warning: unused import: `AtomicUsize`
+ --> node/src/work/work_factory.rs:4:38
+  |
+4 | use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+  |                                      ^^^^^^^^^^^
+
+warning: unused import: `tracing::warn`
+ --> node/src/work/work_factory.rs:7:5
+  |
+7 | use tracing::warn;
+  |     ^^^^^^^^^^^^^
+
+warning: unused import: `Difficulty`
+  --> node/src/work/work_factory.rs:11:5
+   |
+11 |     Difficulty, Root, WorkNonce,
+   |     ^^^^^^^^^^
+
+warning: unused import: `OutputListenerMt`
+  --> node/src/work/work_factory.rs:13:29
+   |
+13 | use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
+   |                             ^^^^^^^^^^^^^^^^
+
+warning: `rsnano_ledger` (lib) generated 22 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_ledger` to apply 17 suggestions)
+warning: `rsnano_network_protocol` (lib) generated 15 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_network_protocol` to apply 10 suggestions)
+warning: variable does not need to be mutable
+  --> node/src/bootstrap/state/peer_scoring/peer_scoring.rs:34:31
+   |
+34 |     pub fn channel(&mut self, mut candidates: Vec<ChannelId>) -> Option<ChannelId> {
+   |                               ----^^^^^^^^^^
+   |                               |
+   |                               help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> node/src/node_builder.rs:143:21
+    |
+143 |                 let mut daemon_config = DaemonConfig::new(&network_params, cpu_count);
+    |                     ----^^^^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> node/src/pruning.rs:102:13
+    |
+102 |         let mut tx = self.ledger.store.tx_begin_read();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `in_progress`
+   --> node/src/representatives/rep_crawler.rs:218:21
+    |
+218 |                 let in_progress = Arc::new(&self.keepalive_in_progress);
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_in_progress`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scale`
+  --> node/src/transport/message_flooder.rs:70:9
+   |
+70 |         scale: f32,
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_scale`
+
+warning: unused variable: `batch_size`
+   --> node/src/transport/message_processor.rs:120:13
+    |
+120 |         let batch_size = batch.len();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: variable does not need to be mutable
+  --> node/src/utils/timer_thread.rs:94:13
+   |
+94 |         let mut timer_loop = TimerLoop {
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+
+warning: unused variable: `timer_loop`
+  --> node/src/utils/timer_thread.rs:94:13
+   |
+94 |         let mut timer_loop = TimerLoop {
+   |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_timer_loop`
+
+warning: type `aec_voter::AecVoter` is more private than the item `node::Node::aec_voter`
+   --> node/src/node.rs:156:5
+    |
+156 |     pub aec_voter: Arc<AecVoter>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `node::Node::aec_voter` is reachable at visibility `pub`
+    |
+note: but type `aec_voter::AecVoter` is only usable at visibility `pub(crate)`
+   --> node/src/consensus/vote_generation/aec_voter.rs:17:1
+    |
+ 17 | pub(crate) struct AecVoter {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `node::NodeArgs` is more private than the item `node::Node::new_with_args`
+   --> node/src/node.rs:204:5
+    |
+204 |     pub fn new_with_args(args: NodeArgs) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `node::Node::new_with_args` is reachable at visibility `pub`
+    |
+note: but type `node::NodeArgs` is only usable at visibility `pub(crate)`
+   --> node/src/node.rs:160:1
+    |
+160 | pub(crate) struct NodeArgs {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DistributedWorkClient` is more private than the item `work_factory::WorkFactory::new`
+  --> node/src/work/work_factory.rs:45:5
+   |
+45 | /     pub fn new(
+46 | |         work_pool: WorkPool,
+47 | |         _work_client: DistributedWorkClient,
+48 | |         work_peers: Vec<Peer>,
+49 | |         _timeout: Duration,
+50 | |     ) -> Self {
+   | |_____________^ associated function `work_factory::WorkFactory::new` is reachable at visibility `pub`
+   |
+note: but type `DistributedWorkClient` is only usable at visibility `pub(crate)`
+  --> node/src/work/distributed_work_client.rs:5:1
+   |
+ 5 | pub(crate) struct DistributedWorkClient {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `add` is never used
+   --> node/src/aec_event_processor.rs:165:12
+    |
+164 | impl AecEventProcessor {
+    | ---------------------- method in this implementation
+165 |     pub fn add(&mut self, handler: impl AecEventHandler + Send + 'static) {
+    |            ^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `top`, `next`, and `len_of_bucket` are never used
+   --> node/src/block_processing/backlog_index.rs:111:12
+    |
+ 37 | impl BacklogIndex {
+    | ----------------- methods in this implementation
+...
+111 |     pub fn top(
+    |            ^^^
+...
+126 |     pub fn next(&self, last: &BlockHash, count: usize) -> Vec<BlockHash> {
+    |            ^^^^
+...
+145 |     pub fn len_of_bucket(&self, bucket_index: usize) -> usize {
+    |            ^^^^^^^^^^^^^
+
+warning: method `should_wait` is never used
+   --> node/src/block_processing/block_processor_queue.rs:240:12
+    |
+227 | impl BlockProcessorQueueImpl {
+    | ---------------------------- method in this implementation
+...
+240 |     pub fn should_wait(&self) -> bool {
+    |            ^^^^^^^^^^^
+
+warning: fields `config`, `stats`, and `clock` are never read
+   --> node/src/block_processing/bounded_backlog.rs:257:5
+    |
+254 | struct BoundedBacklogImpl {
+    |        ------------------ fields in this struct
+...
+257 |     config: BoundedBacklogConfig,
+    |     ^^^^^^
+258 |     stats: Arc<Stats>,
+    |     ^^^^^
+...
+261 |     clock: Arc<SteadyClock>,
+    |     ^^^^^
+
+warning: methods `run`, `roll_back`, `run_scan`, and `update` are never used
+   --> node/src/block_processing/bounded_backlog.rs:266:8
+    |
+265 | impl BoundedBacklogImpl {
+    | ----------------------- methods in this implementation
+266 |     fn run(&self) {
+    |        ^^^
+...
+323 |     fn roll_back(
+    |        ^^^^^^^^^
+...
+357 |     fn run_scan(&self) {
+    |        ^^^^^^^^
+...
+401 |     fn update(&self, unconfirmed: &impl LedgerSet, hash: &BlockHash) {
+    |        ^^^^^^
+
+warning: fields `ledger`, `config`, `bucket_count`, and `scan_limiter` are never read
+   --> node/src/block_processing/bounded_backlog.rs:413:5
+    |
+409 | struct BacklogData {
+    |        ----------- fields in this struct
+...
+413 |     ledger: Arc<Ledger>,
+    |     ^^^^^^
+414 |     config: BoundedBacklogConfig,
+    |     ^^^^^^
+415 |     bucket_count: usize,
+    |     ^^^^^^^^^^^^
+416 |     scan_limiter: Mutex<TokenBucket>,
+    |     ^^^^^^^^^^^^
+
+warning: methods `predicate`, `gather_targets`, and `bucket_threshold` are never used
+   --> node/src/block_processing/bounded_backlog.rs:420:8
+    |
+419 | impl BacklogData {
+    | ---------------- methods in this implementation
+420 |     fn predicate(&self) -> bool {
+    |        ^^^^^^^^^
+...
+430 |     fn gather_targets(
+    |        ^^^^^^^^^^^^^^
+...
+452 |     fn bucket_threshold(&self) -> usize {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: field `thread` is never read
+  --> node/src/block_processing/unchecked_map.rs:19:5
+   |
+17 | pub struct UncheckedMap {
+   |            ------------ field in this struct
+18 |     join_handle: Mutex<Option<JoinHandle<()>>>,
+19 |     thread: Arc<UncheckedMapThread>,
+   |     ^^^^^^
+
+warning: field `config` is never read
+  --> node/src/bootstrap/bootstrap_server.rs:45:5
+   |
+44 | pub struct BootstrapServer {
+   |            --------------- field in this struct
+45 |     config: BootstrapServerConfig,
+   |     ^^^^^^
+
+warning: method `run_timeouts` is never used
+   --> node/src/bootstrap/bootstrapper.rs:214:8
+    |
+103 | impl Bootstrapper {
+    | ----------------- method in this implementation
+...
+214 |     fn run_timeouts(&self) {
+    |        ^^^^^^^^^^^^
+
+warning: struct `BootstrapCleanup` is never constructed
+ --> node/src/bootstrap/cleanup.rs:8:19
+  |
+8 | pub(super) struct BootstrapCleanup {
+  |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `cleanup`, `erase_timed_out_requests`, and `reinsert_known_dependencies` are never used
+  --> node/src/bootstrap/cleanup.rs:15:19
+   |
+14 | impl BootstrapCleanup {
+   | --------------------- associated items in this implementation
+15 |     pub(super) fn new(clock: Arc<SteadyClock>, stats: Arc<Stats>) -> Self {
+   |                   ^^^
+...
+23 |     pub fn cleanup(&mut self, state: &mut BootstrapState) {
+   |            ^^^^^^^
+...
+39 |     fn erase_timed_out_requests(&mut self, state: &mut BootstrapState, now: Instant) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+54 |     fn reinsert_known_dependencies(&mut self, state: &mut BootstrapState) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `throttle_wait` and `state_changed` are never read
+  --> node/src/bootstrap/requesters/bootstrap_promise_runner.rs:13:9
+   |
+11 | pub(crate) struct BootstrapPromiseRunner {
+   |                   ---------------------- fields in this struct
+12 |     pub state: Arc<Mutex<BootstrapState>>,
+13 |     pub throttle_wait: Duration,
+   |         ^^^^^^^^^^^^^
+14 |     pub state_changed: Arc<Condvar>,
+   |         ^^^^^^^^^^^^^
+
+warning: associated items `INITIAL_INTERVAL`, `run`, `stopped`, and `wait` are never used
+  --> node/src/bootstrap/requesters/bootstrap_promise_runner.rs:19:11
+   |
+18 | impl BootstrapPromiseRunner {
+   | --------------------------- associated items in this implementation
+19 |     const INITIAL_INTERVAL: Duration = Duration::from_millis(5);
+   |           ^^^^^^^^^^^^^^^^
+20 |
+21 |     pub fn run<P, T>(&self, mut promise: P) -> Option<T>
+   |            ^^^
+...
+49 |     fn stopped(&self) -> bool {
+   |        ^^^^^^^
+...
+53 |     fn wait(&self, duration: Duration) {
+   |        ^^^^
+
+warning: method `set_request_timeout` is never used
+  --> node/src/bootstrap/requesters/query_sender.rs:54:12
+   |
+30 | impl QuerySender {
+   | ---------------- method in this implementation
+...
+54 |     pub fn set_request_timeout(&mut self, timeout: Duration) {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `decay` is never used
+  --> node/src/bootstrap/state/peer_scoring/peer_score.rs:21:12
+   |
+11 | impl PeerScore {
+   | -------------- method in this implementation
+...
+21 |     pub fn decay(&mut self) {
+   |            ^^^^^
+
+warning: method `modify_all` is never used
+  --> node/src/bootstrap/state/peer_scoring/peer_score_container.rs:34:12
+   |
+11 | impl PeerScoreContainer {
+   | ----------------------- method in this implementation
+...
+34 |     pub fn modify_all(&mut self, mut f: impl FnMut(&mut PeerScore)) {
+   |            ^^^^^^^^^^
+
+warning: method `decay` is never used
+  --> node/src/bootstrap/state/peer_scoring/peer_scoring.rs:68:12
+   |
+13 | impl PeerScoring {
+   | ---------------- method in this implementation
+...
+68 |     pub fn decay(&mut self) {
+   |            ^^^^^
+
+warning: methods `front` and `pop_front` are never used
+  --> node/src/bootstrap/state/running_query_container.rs:66:12
+   |
+18 | impl RunningQueryContainer {
+   | -------------------------- methods in this implementation
+...
+66 |     pub fn front(&self) -> Option<&RunningQuery> {
+   |            ^^^^^
+...
+70 |     pub fn pop_front(&mut self) -> Option<RunningQuery> {
+   |            ^^^^^^^^^
+
+warning: function `log_bootstrap_weights` is never used
+  --> node/src/consensus/bootstrap_weights.rs:59:15
+   |
+59 | pub(crate) fn log_bootstrap_weights(weight_cache: &RepWeightCache) {
+   |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `FxHashMap` is never used
+  --> node/src/consensus/vote_cache.rs:19:6
+   |
+19 | type FxHashMap<K, V> = HashMap<K, V>;
+   |      ^^^^^^^^^
+
+warning: type alias `FxHashSet` is never used
+  --> node/src/consensus/vote_cache.rs:20:6
+   |
+20 | type FxHashSet<T> = HashSet<T>;
+   |      ^^^^^^^^^
+
+warning: fields `config`, `cache`, `next_id`, `last_cleanup`, and `stats` are never read
+  --> node/src/consensus/vote_cache.rs:40:5
+   |
+39 | pub struct VoteCache {
+   |            --------- fields in this struct
+40 |     config: VoteCacheConfig,
+   |     ^^^^^^
+41 |     cache: CacheEntryCollection,
+   |     ^^^^^
+42 |     next_id: usize,
+   |     ^^^^^^^
+43 |     last_cleanup: Instant,
+   |     ^^^^^^^^^^^^
+44 |     stats: Arc<Stats>,
+   |     ^^^^^
+
+warning: multiple methods are never used
+  --> node/src/consensus/vote_cache.rs:60:12
+   |
+59 | impl CacheEntryCollection {
+   | ------------------------- methods in this implementation
+60 |     pub fn contains(&self, _hash: &BlockHash) -> bool { false }
+   |            ^^^^^^^^
+61 |     pub fn insert(&mut self, _entry: CacheEntry) {}
+   |            ^^^^^^
+62 |     pub fn modify_by_hash<F>(&mut self, _hash: &BlockHash, _f: F) -> bool { false }
+   |            ^^^^^^^^^^^^^^
+63 |     pub fn len(&self) -> usize { 0 }
+   |            ^^^
+64 |     pub fn pop_front(&mut self) -> Option<CacheEntry> { None }
+   |            ^^^^^^^^^
+65 |     pub fn get_by_hash(&self, _hash: &BlockHash) -> Option<&CacheEntry> { None }
+   |            ^^^^^^^^^^^
+66 |     pub fn remove_by_hash(&mut self, _hash: &BlockHash) -> Option<CacheEntry> { None }
+   |            ^^^^^^^^^^^^^^
+67 |     pub fn clear(&mut self) {}
+   |            ^^^^^
+68 |     pub fn iter(&self) -> impl Iterator<Item = &CacheEntry> { core::iter::empty() }
+   |            ^^^^
+69 |     pub fn iter_by_tally_desc(&self) -> impl Iterator<Item = &CacheEntry> { core::iter::empty() }
+   |            ^^^^^^^^^^^^^^^^^^
+70 |     pub fn is_empty(&self) -> bool { true }
+   |            ^^^^^^^^
+
+warning: fields `vote_cache` and `vote_queue` are never read
+  --> node/src/consensus/vote_cache_processor.rs:19:5
+   |
+15 | pub(crate) struct VoteCacheProcessor {
+   |                   ------------------ fields in this struct
+...
+19 |     vote_cache: Arc<Mutex<VoteCache>>,
+   |     ^^^^^^^^^^
+20 |     vote_queue: Arc<VoteProcessorQueue>,
+   |     ^^^^^^^^^^
+
+warning: fields `config`, `vote_generators`, and `ledger` are never read
+  --> node/src/consensus/vote_generation/request_aggregator.rs:48:5
+   |
+47 | pub struct RequestAggregator {
+   |            ----------------- fields in this struct
+48 |     config: RequestAggregatorConfig,
+   |     ^^^^^^
+49 |     stats: Arc<Stats>,
+50 |     vote_generators: Arc<VoteGenerators>,
+   |     ^^^^^^^^^^^^^^^
+51 |     ledger: Arc<Ledger>,
+   |     ^^^^^^
+
+warning: field `block_when_empty` is never read
+  --> node/src/consensus/vote_rebroadcast/queue.rs:63:5
+   |
+58 | pub(crate) struct VoteRebroadcastQueue {
+   |                   -------------------- field in this struct
+...
+63 |     block_when_empty: bool,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: method `dequeue_blocking` is never used
+   --> node/src/consensus/vote_rebroadcast/queue.rs:124:12
+    |
+ 66 | impl VoteRebroadcastQueue {
+    | ------------------------- method in this implementation
+...
+124 |     pub fn dequeue_blocking(&self) -> Option<(RepTier, Arc<Vote>)> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: method `dequeue` is never used
+   --> node/src/consensus/vote_rebroadcast/queue.rs:255:8
+    |
+195 | impl QueueImpl {
+    | -------------- method in this implementation
+...
+255 |     fn dequeue(&mut self) -> Option<(RepTier, Arc<Vote>)> {
+    |        ^^^^^^^
+
+warning: fields `message_flooder`, `history`, `rep_weights`, `clock`, `stats`, and `last_rep_weight_update` are never read
+  --> node/src/consensus/vote_rebroadcast/rebroadcast_processor.rs:21:5
+   |
+20 | pub(super) struct RebroadcastProcessor {
+   |                   -------------------- fields in this struct
+21 |     message_flooder: MessageFlooder,
+   |     ^^^^^^^^^^^^^^^
+22 |     history: RebroadcastHistory,
+   |     ^^^^^^^
+23 |     rep_weights: Arc<RepWeightCache>,
+   |     ^^^^^^^^^^^
+24 |     clock: Arc<SteadyClock>,
+   |     ^^^^^
+25 |     stats: Arc<RebroadcastStats>,
+   |     ^^^^^
+26 |     last_rep_weight_update: Timestamp,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `rebroadcast`, `create_ack_message`, and `update_stats` are never used
+  --> node/src/consensus/vote_rebroadcast/rebroadcast_processor.rs:47:12
+   |
+29 | impl RebroadcastProcessor {
+   | ------------------------- methods in this implementation
+...
+47 |     pub fn rebroadcast(&mut self, tier: RepTier, vote: &Vote) -> bool {
+   |            ^^^^^^^^^^^
+...
+94 |     fn create_ack_message(&self, vote: &Vote) -> Message {
+   |        ^^^^^^^^^^^^^^^^^^
+...
+98 |     fn update_stats(&self, vote: &Vote, tier: RepTier) {
+   |        ^^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> node/src/telemetry/mod.rs:30:5
+   |
+28 | pub struct Telemetry {
+   |            --------- fields in this struct
+29 |     telemetry_factory: TelemetryFactory,
+30 |     config: TelementryConfig,
+   |     ^^^^^^
+31 |     stats: Arc<Stats>,
+   |     ^^^^^
+32 |     mutex: Mutex<TelemetryImpl>,
+33 |     network_params: NetworkParams,
+   |     ^^^^^^^^^^^^^^
+34 |     network: Arc<RwLock<Network>>,
+   |     ^^^^^^^
+35 |     message_sender: Mutex<MessageSender>,
+   |     ^^^^^^^^^^^^^^
+36 |     pub startup_time: Instant,
+37 |     clock: Arc<SteadyClock>,
+   |     ^^^^^
+38 |     genesis_hash: BlockHash,
+   |     ^^^^^^^^^^^^
+
+warning: associated constant `MAX_SIZE` is never used
+  --> node/src/telemetry/mod.rs:42:11
+   |
+41 | impl Telemetry {
+   | -------------- associated constant in this implementation
+42 |     const MAX_SIZE: usize = 1024;
+   |           ^^^^^^^^
+
+warning: field `last_broadcast` is never read
+   --> node/src/telemetry/mod.rs:128:5
+    |
+125 | struct TelemetryImpl {
+    |        ------------- field in this struct
+...
+128 |     last_broadcast: Option<Instant>,
+    |     ^^^^^^^^^^^^^^
+
+warning: associated items `ELEMENT_SIZE` and `len` are never used
+   --> node/src/telemetry/mod.rs:143:15
+    |
+142 | impl OrderedTelemetries {
+    | ----------------------- associated items in this implementation
+143 |     pub const ELEMENT_SIZE: usize = size_of::<Entry>() + size_of::<SocketAddrV6>() * 2;
+    |               ^^^^^^^^^^^^
+144 |     fn len(&self) -> usize {
+    |        ^^^
+
+warning: fields `channel_id`, `data`, and `last_updated` are never read
+   --> node/src/telemetry/mod.rs:156:5
+    |
+155 | struct Entry {
+    |        ----- fields in this struct
+156 |     channel_id: ChannelId,
+    |     ^^^^^^^^^^
+157 |     endpoint: SocketAddrV6,
+158 |     data: TelemetryData,
+    |     ^^^^
+159 |     last_updated: Instant,
+    |     ^^^^^^^^^^^^
+
+warning: fields `config` and `processing_threads` are never read
+  --> node/src/transport/message_processor.rs:35:5
+   |
+34 | pub struct MessageProcessor {
+   |            ---------------- fields in this struct
+35 |     config: NodeConfig,
+   |     ^^^^^^
+36 |     processing_threads: Vec<JoinHandle<()>>,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: fields `interval`, `start_type`, `cancel_token`, `task`, `next_wait_duration`, and `clock` are never read
+   --> node/src/utils/timer_thread.rs:121:5
+    |
+120 | struct TimerLoop<T: Tickable> {
+    |        --------- fields in this struct
+121 |     interval: Duration,
+    |     ^^^^^^^^
+122 |     start_type: TimerStartType,
+    |     ^^^^^^^^^^
+123 |     cancel_token: CancellationToken,
+    |     ^^^^^^^^^^^^
+124 |     task: T,
+    |     ^^^^
+125 |     next_wait_duration: Duration,
+    |     ^^^^^^^^^^^^^^^^^^
+126 |     clock: Arc<SteadyClock>,
+    |     ^^^^^
+
+warning: methods `run` and `run_one` are never used
+   --> node/src/utils/timer_thread.rs:130:8
+    |
+129 | impl<T: Tickable> TimerLoop<T> {
+    | ------------------------------ methods in this implementation
+130 |     fn run(&mut self) {
+    |        ^^^
+...
+146 |     fn run_one(&mut self) {
+    |        ^^^^^^^
+
+warning: field `work_thresholds` is never read
+  --> node/src/wallets/wallet.rs:15:5
+   |
+12 | pub struct Wallet {
+   |            ------ field in this struct
+...
+15 |     work_thresholds: WorkThresholds,
+   |     ^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> node/src/wallets/wallets.rs:31:5
+   |
+28 | pub struct Wallets {
+   |            ------- fields in this struct
+...
+31 |     ledger: Arc<Ledger>,
+   |     ^^^^^^
+32 |     work_factory: Arc<WorkFactory>,
+   |     ^^^^^^^^^^^^
+33 |     work_thresholds: WorkThresholds,
+   |     ^^^^^^^^^^^^^^^
+34 |     network_params: NetworkParams,
+   |     ^^^^^^^^^^^^^^
+35 |     pub delayed_work: Mutex<HashMap<Account, Root>>,
+36 |     workers: Arc<dyn ThreadPool>,
+   |     ^^^^^^^
+37 |     block_processor_queue: Arc<BlockProcessorQueue>,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+38 |     pub wallet_reps: Arc<Mutex<WalletRepresentatives>>,
+39 |     online_reps: Arc<Mutex<OnlineReps>>,
+   |     ^^^^^^^^^^^
+40 |     kdf: KeyDerivationFunction,
+   |     ^^^
+41 |     confirming_set: Arc<ConfirmingSet>,
+   |     ^^^^^^^^^^^^^^
+
+warning: method `generate_work` is never used
+ --> node/src/work/distributed_work_client.rs:8:18
+  |
+7 | impl DistributedWorkClient {
+  | -------------------------- method in this implementation
+8 |     pub async fn generate_work(
+  |                  ^^^^^^^^^^^^^
+
+warning: field `work_peers` is never read
+  --> node/src/work/work_factory.rs:40:5
+   |
+38 | pub struct WorkFactory {
+   |            ----------- field in this struct
+39 |     pub local_work_pool: WorkPool,
+40 |     work_peers: Mutex<Vec<Peer>>,
+   |     ^^^^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> node/src/bootstrap/bootstrapper.rs:203:18
+    |
+203 |     pub fn state(&self) -> MutexGuard<BootstrapState> {
+    |                  ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+203 |     pub fn state(&self) -> MutexGuard<'_, BootstrapState> {
+    |                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> node/src/node.rs:1398:18
+     |
+1398 |     pub fn stats(&self) -> MutexGuard<StatsCollection> {
+     |                  ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+     |                  |
+     |                  the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1398 |     pub fn stats(&self) -> MutexGuard<'_, StatsCollection> {
+     |                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> node/src/utils/timer_thread.rs:48:17
+   |
+48 |     pub fn task(&self) -> spin::MutexGuard<Option<T>> {
+   |                 ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                 |
+   |                 the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+48 |     pub fn task(&self) -> spin::MutexGuard<'_, Option<T>> {
+   |                                            +++
+
+warning: `rsnano_node` (lib) generated 133 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_node` to apply 83 suggestions)
+   Compiling hello-bare v0.1.0 (/home/cvini/rust-workspace/hello-riscv/main)
+warning: unused import: `linked_list_allocator::LockedHeap`
+  --> main/src/bin.rs:18:5
+   |
+18 | use linked_list_allocator::LockedHeap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `core::panic::PanicInfo::<'a>::payload`: this never returns anything useful
+   --> main/src/bin.rs:259:27
+    |
+259 |     if let Some(s) = info.payload().downcast_ref::<&str>() {
+    |                           ^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: field `0` is never read
+  --> main/src/bin.rs:39:20
+   |
+39 | struct NodeWrapper(Arc<Node>);
+   |        ----------- ^^^^^^^^^
+   |        |
+   |        field in this struct
+   |
+   = help: consider removing this field
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `handle_rpc_server` is never used
+   --> main/src/bin.rs:189:4
+    |
+189 | fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: &Node) {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: `hello-bare` (bin "hello-bare") generated 7 warnings (3 duplicates) (run `cargo fix --bin "hello-bare" -p hello-bare` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 6.50s
+qemu-system-riscv64 \
+  -machine virt \
+  -smp 1 \
+  -m 512M \
+  -cpu rv64,v=true,zvkb=true,zbb=true,zicbom=true \
+  -nographic \
+  -kernel target/riscv64gc-unknown-none-elf/release/hello-bare \
+  -netdev user,id=n0,hostfwd=tcp::7076-:7076,hostfwd=tcp::7075-:7075 \
+  -device virtio-net-device,netdev=n0 \
+  -drive file=disk.img,if=none,format=raw,id=hd0 \
+  -device virtio-blk-device,drive=hd0,queue-size=128
+
+OpenSBI v1.7
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : riscv-virtio,qemu
+Platform Features           : medeleg
+Platform HART Count         : 1
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 10000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : syscon-reboot
+Platform Shutdown Device    : syscon-poweroff
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 317 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 61 KB
+Firmware Heap Offset        : 0x46000
+Firmware Heap Size          : 37 KB (total), 2 KB (reserved), 11 KB (used), 23 KB (free)
+Firmware Scratch Size       : 4096 B (total), 1400 B (used), 2696 B (free)
+Runtime SBI Version         : 3.0
+Standard SBI Extensions     : time,rfnc,ipi,base,hsm,srst,pmu,dbcn,fwft,legacy,dbtr,sse
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 0
+Domain0 HARTs               : 0*
+Domain0 Region00            : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region01            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region02            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region03            : 0x0000000080040000-0x000000008004ffff M: (R,W) S/U: ()
+Domain0 Region04            : 0x0000000080000000-0x000000008003ffff M: (R,X) S/U: ()
+Domain0 Region05            : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06            : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x000000009fe00000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 0
+Boot HART Domain            : root
+Boot HART Priv Version      : v1.12
+Boot HART Base ISA          : rv64imafdcvh
+Boot HART ISA Extensions    : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count         : 16
+Boot HART PMP Granularity   : 2 bits
+Boot HART PMP Address Bits  : 54
+Boot HART MHPM Info         : 16 (0x0007fff8)
+Boot HART Debug Triggers    : 2 triggers
+Boot HART MIDELEG           : 0x0000000000001666
+Boot HART MEDELEG           : 0x0000000000f4b509
+[boot] RS-Nano Bare Metal Node starting (Hart 0)
+[node] [node] --- DYNAMIC NODE START ---
+[node] Generated Node ID private key starting with: 83 75
+[node] --- DYNAMIC NODE START ---
+[node] Node ID: node_1kbxs7w7unshcgxyu9bakqbns1677nha4iom1rxrh6j1qbxsn65s9p5t1po6
+[node] Node started
+[node] Version: 27.1
+[node] Network: live
+[node] Data path: .
+[node] Genesis block: 991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948
+[node] Genesis account: nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3
+[node] Loading ledger, this may take a while...
+[node] Database backend: B-tree
+[node] Block count: 1
+[node] Confirmed count: 0
+[node] Account count: 1
+[node] Unlimited confirmations per second (CPS)!
+[node] Initializing RepCrawler with 2 preconfigured peers
+[node] Bounded backlog enabled: max backlog=100000, batch_size=32, scan_rate=64
+[node] Outbound bandwidth limit: disabled (bare-metal)
+[node] Starting bootstrap requesters...
+[node] Spawning bootstrap requester: Bootstrap front
+[node] Spawning bootstrap requester: Bootstrap
+[node] Spawning bootstrap requester: Bootstrap walker
+[node] [node] ReachoutLoop started
+[node] [node] OnlineReps::quorum_delta
+[node] [rep_crawler] Insufficient weight, calling keepalive
+[node] [rep_crawler] Spawning keepalive task
+[node] [node] OnlineReps::quorum_delta
+[node] Adding cached initial peers: 0
+[node] [node] Keepalive task started
+[node] Running keepalive for 2 preconfigured peers
+[node] Resolving preconfigured peer: 192.168.0.245:7075
+[node] [node] Attempting to connect to peer: [::ffff:192.168.0.245]:7075
+[node] Resolving preconfigured peer: 37.120.187.138:7075
+[node] [node] Attempting to connect to peer: [::ffff:37.120.187.138]:7075
+[node] [node] Keepalive task finished
+>>.>>.>[node] [node] HandshakeProcess::initiate_handshake
+[node] [node] SynCookies: assigned new cookie
+[node] [node] Sending handshake with cookie: 336790228A7AA9F3EA29EBC3D9DE5C883ADAA7EFB9E71BDB16ACD29B2184EDA9 to [::ffff:192.168.0.245]:7075
+[node] [node] Connection established! Peer: [::ffff:192.168.0.245]:7075, Direction: Outbound
+[node] [node] Spawning receiver task...
+[node] [node] Receiver task started for [::ffff:192.168.0.245]:7075
+>...>[node] [node] HandshakeProcess::initiate_handshake
+[node] [node] SynCookies: assigned new cookie
+[node] [node] Sending handshake with cookie: CCBE54E076B1075508EFB1940743393CD972D50C0199A1DC9E8F103D395B726D to [::ffff:37.120.187.138]:7075
+[node] [node] Connection established! Peer: [::ffff:37.120.187.138]:7075, Direction: Outbound
+[node] [node] Spawning receiver task...
+[node] [node] Receiver task started for [::ffff:37.120.187.138]:7075
+>..[TRAP] unexpected xcause=0x5 sepc=0x802d1fc6 stval=0x96 sp=0x813572d0
+make: *** [Makefile:35: run-smode] Killed

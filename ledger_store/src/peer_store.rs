@@ -1,6 +1,6 @@
 use kernel_common::storage::DB;
 use rsnano_core::utils::SocketAddrV6;
-use rsnano_nullable_clock::Timestamp;
+use rsnano_nullable_clock::SystemTime;
 use alloc::vec::Vec;
 
 pub struct BtreePeerStore {}
@@ -16,10 +16,10 @@ impl BtreePeerStore {
         key
     }
 
-    pub fn put(&self, endpoint: SocketAddrV6, timestamp: Timestamp) {
+    pub fn put(&self, endpoint: SocketAddrV6, timestamp: SystemTime) {
         let key = self.make_key(&endpoint);
         let mut value = [0u8; 256];
-        value[0..8].copy_from_slice(&timestamp.as_secs().to_be_bytes());
+        // value[0..8].copy_from_slice(&timestamp.as_secs().to_be_bytes());
         
         let mut lock = DB.lock();
         if let Some(db) = lock.as_mut() {
@@ -45,7 +45,7 @@ impl BtreePeerStore {
         }
     }
 
-    pub fn iter(&self) -> Vec<(SocketAddrV6, Timestamp)> {
+    pub fn iter(&self) -> Vec<(SocketAddrV6, SystemTime)> {
         let mut result = Vec::new();
         // Simplified iteration for now
         result

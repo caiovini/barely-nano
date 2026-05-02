@@ -55,6 +55,7 @@ impl PeerConnector {
             return Err(NetworkError::Cancelled);
         }
 
+        tracing::info!("[node] Attempting to connect to peer: {}", peer);
         self.network_adapter.add_outbound_attempt(peer)?;
 
         let network_l = self.network_adapter.clone();

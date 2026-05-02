@@ -1,5 +1,5 @@
+use alloc::collections::VecDeque;
 use hashbrown::{ HashMap };
-use alloc::collections::{ VecDeque };
 
 use super::election::ConfirmedElection;
 use rsnano_core::BlockHash;

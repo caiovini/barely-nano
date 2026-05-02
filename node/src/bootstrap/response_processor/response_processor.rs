@@ -1,6 +1,7 @@
-use alloc::sync::{ Arc };
+use core::time::Duration;
+use alloc::sync::Arc;
 use spin::{ Mutex };
-// // // // // // use std::{   time::Duration   }; // TODO: fix this
+// // // // // // // use std::{    time::Duration    }; // TODO: fix this
 
 use rsnano_ledger::Ledger;
 use rsnano_messages::{AscPullAck, AscPullAckType};
@@ -79,7 +80,7 @@ impl ResponseProcessor {
     }
 
     fn take_running_query_for(&self, response: &AscPullAck) -> Result<RunningQuery, ProcessError> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
 
         // Only process messages that have a known running query
         let Some(query) = guard.running_queries.remove(response.id) else {
@@ -96,7 +97,6 @@ impl ResponseProcessor {
     fn update_peer_scoring(&self, channel_id: ChannelId) {
         self.state
             .lock()
-            .unwrap()
             .scoring
             .received_message(channel_id);
     }

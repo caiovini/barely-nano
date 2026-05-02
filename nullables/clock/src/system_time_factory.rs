@@ -1,5 +1,5 @@
 use core::time::Duration;
-use core::ops::{Add, AddAssign, Sub, SubAssign};
+use core::ops::{Add, Sub};
 
 /// A bare-metal compatible replacement for `std::time::SystemTime`
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -9,12 +9,10 @@ impl SystemTime {
     pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::from_secs(0));
 
     pub fn now() -> Self {
-        // We don't have a real-time clock (RTC) driver yet, so we just return
-        // the uptime since the device booted based on the CLINT timer.
-        // For real network synchronization, an NTP client or RTC driver is required.
         let ticks = kernel_common::clint::mtime();
-        let nanos = ticks * 100;
-        SystemTime(Duration::from_nanos(nanos))
+        let uptime_nanos = ticks * 100;
+        let offset_nanos = kernel_common::clint::get_time_offset_ns();
+        SystemTime(Duration::from_nanos(uptime_nanos + offset_nanos))
     }
 
     pub fn duration_since(&self, earlier: SystemTime) -> Result<Duration, ()> {

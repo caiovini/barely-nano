@@ -1,9 +1,15 @@
+use core::any::Any;
+use spin::RwLock;
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::time::Duration;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use super::{election::Election, ActiveElectionsContainer, AecTickerPlugin};
 use crate::bootstrap::Bootstrapper;
 use rsnano_core::Account;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{StatsCollection, StatsSource};
-// // // // // // use std::{   any::Any, time::Duration   }; // TODO: fix this
+// // // // // // // use std::{    any::Any, time::Duration    }; // TODO: fix this
 
 /// If an election isn't confirmed within "stale_threshold", then try to bootstrap
 /// the election account, so that missing dependencies will be pulled
@@ -58,7 +64,6 @@ impl AecTickerPlugin for BootstrapStaleElections {
         self.stale_accounts.clear();
         self.stale_accounts.extend(
             aec.read()
-                .unwrap()
                 .iter_round_robin()
                 .filter(is_stale)
                 .map(|e| e.account())
@@ -119,7 +124,7 @@ mod tests {
             AecInsertRequest::new_priority(block, prio),
             clock.now() - BootstrapStaleElections::DEFAULT_STALE_THRESHOLD,
         )
-        .unwrap();
+        .expect("could not insert");
 
         let mut plugin = BootstrapStaleElections::new(bootstrapper.clone(), clock);
         plugin.run(&RwLock::new(aec));

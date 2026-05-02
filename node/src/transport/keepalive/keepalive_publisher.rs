@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use super::KeepaliveMessageFactory;
 use crate::transport::MessageSender;
 use rsnano_core::utils::Peer;
@@ -5,10 +6,9 @@ use rsnano_network::{
     utils::into_ipv6_socket_address, Channel, Network, PeerConnector, TrafficType,
 };
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
-use alloc::sync::{ Arc };
+use alloc::string::String;
 use spin::{ Mutex, RwLock };
-// // // // // // use std::{   net::SocketAddr   }; // TODO: fix this
-use tracing::error;
+use core::net::SocketAddr;
 
 /// Connects to a peer if we don't have a connection
 /// or it sends a keepalive message if we are already connected
@@ -18,6 +18,7 @@ pub struct KeepalivePublisher {
     peer_connector: Arc<PeerConnector>,
     message_sender: Mutex<MessageSender>,
     message_factory: Arc<KeepaliveMessageFactory>,
+    resolver: Arc<dyn rsnano_network::AsyncDnsResolver>,
 }
 
 impl KeepalivePublisher {
@@ -26,6 +27,7 @@ impl KeepalivePublisher {
         peer_connector: Arc<PeerConnector>,
         message_sender: MessageSender,
         message_factory: Arc<KeepaliveMessageFactory>,
+        resolver: Arc<dyn rsnano_network::AsyncDnsResolver>,
     ) -> Self {
         Self {
             keepalive_listener: OutputListenerMt::new(),
@@ -33,6 +35,7 @@ impl KeepalivePublisher {
             peer_connector,
             message_sender: Mutex::new(message_sender),
             message_factory,
+            resolver,
         }
     }
 
@@ -43,14 +46,15 @@ impl KeepalivePublisher {
     pub async fn keepalive_or_connect(&self, address: String, port: u16) {
         self.keepalive_listener
             .emit(Peer::new(address.clone(), port));
-        match tokio::net::lookup_host((address.as_str(), port)).await {
+        
+        match self.resolver.resolve(&address).await {
             Ok(addresses) => {
                 for addr in addresses {
-                    self.keepalive_or_connect_socket(addr);
+                    self.keepalive_or_connect_socket(SocketAddr::new(addr, port));
                 }
             }
             Err(e) => {
-                error!(
+                tracing::error!(
                     "Error resolving address for keepalive: {}:{} ({})",
                     address, port, e
                 )
@@ -58,15 +62,14 @@ impl KeepalivePublisher {
         }
     }
 
+    #[allow(dead_code)]
     fn keepalive_or_connect_socket(&self, peer: SocketAddr) {
         let peer_v6 = into_ipv6_socket_address(peer);
 
         let channel = self
             .network
             .read()
-            .unwrap()
-            .find_realtime_channel_by_peering_addr(&peer_v6)
-            .cloned();
+            .find_realtime_channel_by_peering_addr(&peer_v6);
 
         match channel {
             Some(channel) => {
@@ -83,7 +86,6 @@ impl KeepalivePublisher {
 
         self.message_sender
             .lock()
-            .unwrap()
             .try_send(channel, &keepalive, TrafficType::Keepalive);
     }
 }

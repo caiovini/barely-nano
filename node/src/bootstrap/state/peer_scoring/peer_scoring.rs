@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use super::{peer_score::PeerScore, peer_score_container::PeerScoreContainer};
 use rand::seq::SliceRandom;
 use rsnano_core::utils::ContainerInfo;
@@ -31,7 +32,7 @@ impl PeerScoring {
     }
 
     pub fn channel(&mut self, mut candidates: Vec<ChannelId>) -> Option<ChannelId> {
-        candidates.shuffle(&mut rand::rng());
+        
         candidates
             .iter()
             .find(|channel_id| {

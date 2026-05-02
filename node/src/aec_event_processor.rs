@@ -1,5 +1,8 @@
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use spin::{ Mutex, RwLock };
-use alloc::sync::{ Arc };
+use crate::utils::SyncSender;
 
 use tracing::debug;
 
@@ -56,7 +59,6 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
     fn cool_down(&mut self) {
         self.active_elections
             .write()
-            .unwrap()
             .set_cooldown(true, AecCooldownReason::AecEventQueueFull);
         self.vote_processor.cool_down();
     }
@@ -64,7 +66,6 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
     fn recovered(&mut self) {
         self.active_elections
             .write()
-            .unwrap()
             .set_cooldown(false, AecCooldownReason::AecEventQueueFull);
         self.vote_processor.recovered();
     }
@@ -80,7 +81,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
                 self.bootstrap_election_activator.election_started(hash);
                 self.vote_cache_processor.trigger(hash);
                 if let Some(tx) = &self.node_observer {
-                    tx.send(NodeEvent::ElectionStarted(hash)).unwrap();
+                    let _ = tx.send(NodeEvent::ElectionStarted(hash));
                 }
             }
             AecEvent::ElectionConfirmed(election) => {
@@ -88,7 +89,6 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
                 // Ensure election winner is broadcasted
                 self.winner_block_broadcaster
                     .lock()
-                    .unwrap()
                     .try_broadcast_winner(&election.winner, &election.votes);
             }
             AecEvent::ElectionEnded(election) => {
@@ -107,7 +107,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
                     // Notify observers about dropped elections & blocks lost confirmed elections
                     if !election.is_confirmed() || *hash != election.winner().hash() {
                         if let Some(tx) = &self.node_observer {
-                            tx.send(NodeEvent::ElectionStopped(*hash)).unwrap();
+                            let _ = tx.send(NodeEvent::ElectionStopped(*hash));
                         }
                     }
 
@@ -137,7 +137,6 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
                 if vote.source != VoteSource::Cache {
                     self.vote_cache
                         .lock()
-                        .unwrap()
                         .insert(&vote.vote, voter_weight, &results);
                 }
 
@@ -148,14 +147,12 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
                 self.try_update_online_reps(&vote, result);
 
                 if let Some(tx) = &self.node_observer {
-                    tx.send(NodeEvent::VoteProcessed(vote.vote, result))
-                        .unwrap();
+                    let _ = tx.send(NodeEvent::VoteProcessed(vote.vote, result));
                 }
             }
             AecEvent::BlockConfirmed(block, election) => {
                 if let Some(tx) = &self.node_observer {
-                    tx.send(NodeEvent::BlockConfirmed(block, election.clone()))
-                        .unwrap();
+                    let _ = tx.send(NodeEvent::BlockConfirmed(block, election.clone()));
                 }
                 self.recently_cemented_inserter.insert(election);
             }
@@ -191,7 +188,6 @@ impl AecEventProcessor {
             // Representative is defined as online if replying to live votes or rep_crawler queries
             self.online_reps
                 .lock()
-                .unwrap()
                 .vote_observed(vote.voter, self.clock.now());
         }
     }

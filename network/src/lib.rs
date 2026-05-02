@@ -1,6 +1,7 @@
 #![no_std]
 
 extern crate alloc;
+extern crate kernel_common;
 
 pub mod attempt_container;
 pub mod bandwidth_limiter;
@@ -119,6 +120,19 @@ pub trait AsyncBufferReader {
     async fn read(&self, buffer: &mut [u8], count: usize) -> anyhow::Result<()>;
 }
 
+pub trait AsyncDnsResolver: Send + Sync {
+    fn resolve(
+        &self,
+        name: &str,
+    ) -> core::pin::Pin<
+        alloc::boxed::Box<
+            dyn core::future::Future<
+                    Output = anyhow::Result<alloc::vec::Vec<core::net::IpAddr>>,
+                > + Send,
+        >,
+    >;
+}
+
 pub trait DataReceiverFactory: Send + Sync {
     fn create_receiver_for(&self, channel: Arc<Channel>) -> Box<dyn DataReceiver + Send>;
 }
@@ -133,6 +147,7 @@ pub trait DataReceiver: Send {
     fn receive(&mut self, data: &[u8]) -> ReceiveResult;
     /// after receive returns Pause this has to be called until it returns true
     fn try_unpause(&self) -> ReceiveResult;
+    fn ensure_handshake(&mut self) {}
 }
 
 pub struct NullDataReceiverFactory;
@@ -201,6 +216,8 @@ pub struct NetworkConfig {
     pub listening_port: u16,
     pub max_inbound_connections: usize,
     pub max_outbound_connections: usize,
+    pub peer_reachout: core::time::Duration,
+    pub cached_peer_reachout: core::time::Duration,
 }
 
 impl NetworkConfig {
@@ -209,6 +226,25 @@ impl NetworkConfig {
             listening_port: 0,
             max_inbound_connections: 128,
             max_outbound_connections: 128,
+            peer_reachout: core::time::Duration::from_secs(1),
+            cached_peer_reachout: core::time::Duration::from_secs(1),
         }
+    }
+}
+
+pub struct NullDnsResolver;
+
+impl AsyncDnsResolver for NullDnsResolver {
+    fn resolve(
+        &self,
+        _name: &str,
+    ) -> core::pin::Pin<
+        alloc::boxed::Box<
+            dyn core::future::Future<
+                    Output = anyhow::Result<alloc::vec::Vec<core::net::IpAddr>>,
+                > + Send,
+        >,
+    > {
+        alloc::boxed::Box::pin(async { Ok(alloc::vec::Vec::new()) })
     }
 }

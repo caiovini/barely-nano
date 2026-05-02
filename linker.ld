@@ -23,13 +23,13 @@ SECTIONS
     _bss_end = .;
   } > RAM
 
-  /* Stack: 512KB, grows downward */
+  /* Stack: 8MB (1MB per Hart) */
   . = ALIGN(16);
-  _stack_top = . + 0x80000;
-  . = _stack_top;
+  . = . + 0x800000;
+  _stack_top = .;
 
-  /* Heap: 4MB */
+  /* Heap: 64MB */
   _heap_start = .;
-  . = . + 0x400000;
+  . = . + 0x4000000;
   _heap_end = .;
 }

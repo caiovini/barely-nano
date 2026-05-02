@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use crate::bootstrap::AscPullQuerySpec;
 use rsnano_core::{Account, BlockHash, Frontier, HashOrAccount};
 use rsnano_messages::{AscPullAck, AscPullAckType, AscPullReqType, BlocksAckPayload, HashType};
@@ -404,7 +405,6 @@ mod tests {
     }
 
     mod verify_frontiers {
-        use super::*;
 
         #[test]
         fn empty_frontiers() {
@@ -435,7 +435,6 @@ mod tests {
         }
 
         mod error_cases {
-            use super::*;
 
             #[test]
             fn invalid_query_type() {
@@ -490,7 +489,6 @@ mod tests {
 
         use rsnano_core::{Block, TestBlockBuilder};
 
-        use super::*;
 
         #[test]
         fn happy_path_by_hash() {

@@ -51,7 +51,7 @@ impl PriorityRequester {
             stats,
             channel_waiter,
             query_factory,
-            block_processor_threshold: 1000,
+            block_processor_threshold: 32,
             clock,
         }
     }
@@ -151,11 +151,9 @@ impl StatsSource for PriorityRequesterStats {
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
 use spin::{ Mutex, RwLock};
 
     use rsnano_core::Account;
-    use rsnano_ledger::Ledger;
     use rsnano_network::{token_bucket::TokenBucket, Network};
     use rsnano_nullable_clock::SteadyClock;
 
@@ -179,7 +177,7 @@ use spin::{ Mutex, RwLock};
         state.candidate_accounts.priority_up(&account);
 
         let (mut requester, network) = create_requester();
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
         let PollResult::Finished(result) = progress(&mut requester, &mut state) else {
             panic!("Finished expected");
         };
@@ -215,7 +213,7 @@ use spin::{ Mutex, RwLock};
     fn wait_priority() {
         let mut state = BootstrapState::default();
         let (mut requester, network) = create_requester();
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
 
         let result = progress(&mut requester, &mut state);
 

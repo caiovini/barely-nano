@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use alloc::sync::Arc;
 use spin::{ RwLock};
 
@@ -28,7 +29,6 @@ impl DependentElectionsConfirmer {
 
         self.active_elections
             .write()
-            .unwrap()
             .confirm_dependent_elections(blocks_plus_election, now);
     }
 

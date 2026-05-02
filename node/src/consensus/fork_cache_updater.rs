@@ -18,7 +18,7 @@ impl ForkCacheUpdater {
     pub fn update(&self, results: &[ProcessedResult]) {
         for result in results {
             if result.status == Err(BlockError::Fork) {
-                self.cache.write().unwrap().add(result.block.clone());
+                self.cache.write().add(result.block.clone());
             }
         }
     }

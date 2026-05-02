@@ -1,8 +1,14 @@
-use alloc::sync::{ Arc };
 use alloc::collections::{ BTreeMap, VecDeque };
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::{ Mutex };
 use hashbrown::{ HashMap, HashSet };
-// // // // // // use std::{   cmp::min, mem::size_of, sync::Condvar, sync::MutexGuard, thread::JoinHandle, time::Duration, time::Instant   }; // TODO: fix this
+use crate::utils::{Condvar, JoinHandle};
+use core::time::Duration;
+use rsnano_nullable_clock::Timestamp as Instant;
+use core::mem::size_of;
+use core::cmp::min;
+use core::net::SocketAddrV6;
 
 use tracing::debug;
 
@@ -62,8 +68,6 @@ impl Default for LocalBlockBroadcasterConfig {
     }
 }
 
-///  Broadcasts blocks to the network
-/// Tracks local blocks for more aggressive propagation
 pub struct LocalBlockBroadcaster {
     config: LocalBlockBroadcasterConfig,
     stats: Arc<Stats>,
@@ -102,7 +106,7 @@ impl LocalBlockBroadcaster {
             mutex: Mutex::new(LocalBlockBroadcasterData {
                 stopped: false,
                 local_blocks: Default::default(),
-                cleanup_interval: Instant::now(),
+                cleanup_interval: clock.now(),
             }),
             condition: Condvar::new(),
             message_flooder: Mutex::new(message_flooder),
@@ -130,28 +134,29 @@ impl LocalBlockBroadcaster {
     }
 
     pub fn stop(&self) {
-        self.mutex.lock().unwrap().stopped = true;
+        self.mutex.lock().stopped = true;
         self.condition.notify_all();
-        let handle = self.thread.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.join().unwrap();
-        }
+        let _handle = self.thread.lock().take();
+        // if let Some(handle) = handle {
+        //     handle.join().unwrap();
+        // }
     }
 
     pub fn len(&self) -> usize {
-        self.mutex.lock().unwrap().local_blocks.len()
+        self.mutex.lock().local_blocks.len()
     }
 
     pub fn contains(&self, hash: &BlockHash) -> bool {
-        self.mutex.lock().unwrap().local_blocks.contains(hash)
+        self.mutex.lock().local_blocks.contains(hash)
     }
 
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         while !guard.stopped {
             guard = self
                 .condition
-                .wait_timeout(guard, Duration::from_secs(1))
+                .wait_timeout_while(guard, Duration::from_secs(1), |g| !g.stopped)
                 .unwrap()
                 .0;
 
@@ -159,8 +164,8 @@ impl LocalBlockBroadcaster {
                 self.stats
                     .inc(StatType::LocalBlockBroadcaster, DetailType::Loop);
 
-                if guard.cleanup_interval.elapsed() >= self.config.cleanup_interval {
-                    guard.cleanup_interval = Instant::now();
+                if guard.cleanup_interval.elapsed(self.clock.now()) >= self.config.cleanup_interval {
+                    guard.cleanup_interval = self.clock.now();
                     guard = self.cleanup(guard);
                 }
 
@@ -178,12 +183,12 @@ impl LocalBlockBroadcaster {
 
     fn run_broadcasts<'a>(
         &'a self,
-        mut guard: MutexGuard<'a, LocalBlockBroadcasterData>,
-    ) -> MutexGuard<'a, LocalBlockBroadcasterData> {
+        mut guard: spin::MutexGuard<'a, LocalBlockBroadcasterData>,
+    ) -> spin::MutexGuard<'a, LocalBlockBroadcasterData> {
         let mut to_broadcast = Vec::new();
 
         // Iterate blocks with next_broadcast <= now
-        for entry in guard.local_blocks.iter_by_next_broadcast(Instant::now()) {
+        for entry in guard.local_blocks.iter_by_next_broadcast(self.clock.now()) {
             to_broadcast.push(entry.clone());
         }
 
@@ -191,7 +196,7 @@ impl LocalBlockBroadcaster {
         for entry in &to_broadcast {
             guard.local_blocks.modify_entry(&entry.block.hash(), |i| {
                 i.rebroadcasts += 1;
-                let now = Instant::now();
+                let now = self.clock.now();
                 i.last_broadcast = Some(now);
                 i.next_broadcast = now + self.rebroadcast_interval(i.rebroadcasts);
             });
@@ -203,10 +208,9 @@ impl LocalBlockBroadcaster {
             while !self
                 .limiter
                 .lock()
-                .unwrap()
                 .try_consume(1, self.clock.now())
             {
-                guard = self.mutex.lock().unwrap();
+                guard = self.mutex.lock();
                 guard = self
                     .condition
                     .wait_timeout_while(guard, Duration::from_millis(100), |g| !g.stopped)
@@ -232,13 +236,13 @@ impl LocalBlockBroadcaster {
             self.flood_block_initial((*entry.block).clone());
         }
 
-        self.mutex.lock().unwrap()
+        self.mutex.lock()
     }
 
     fn cleanup<'a>(
         &'a self,
-        mut data: MutexGuard<'a, LocalBlockBroadcasterData>,
-    ) -> MutexGuard<'a, LocalBlockBroadcasterData> {
+        mut data: spin::MutexGuard<'a, LocalBlockBroadcasterData>,
+    ) -> spin::MutexGuard<'a, LocalBlockBroadcasterData> {
         // Copy the local blocks to avoid holding the mutex during IO
         let local_blocks_copy = data.local_blocks.all_entries();
         drop(data);
@@ -263,7 +267,7 @@ impl LocalBlockBroadcaster {
             }
         }
 
-        data = self.mutex.lock().unwrap();
+        data = self.mutex.lock();
         // Erase blocks that have been confirmed
 
         data.local_blocks
@@ -275,12 +279,12 @@ impl LocalBlockBroadcaster {
     /// Flood block to all PRs and a random selection of non-PRs
     pub fn flood_block_initial(&self, block: Block) {
         let message = Message::Publish(Publish::new_from_originator(block));
-        let mut publisher = self.message_flooder.lock().unwrap();
+        let mut publisher = self.message_flooder.lock();
         publisher.flood_prs_and_some_non_prs(&message, TrafficType::BlockBroadcastInitial, 1.0);
     }
 
     pub fn confirmed(&self, confirmed: impl IntoIterator<Item = BlockHash>) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         for block in confirmed {
             if guard.local_blocks.remove(&block) {
                 self.stats
@@ -290,7 +294,7 @@ impl LocalBlockBroadcaster {
     }
 
     pub fn rolled_back(&self, blocks: impl IntoIterator<Item = BlockHash>) {
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         for block in blocks {
             if guard.local_blocks.remove(&block) {
                 self.stats.inc_dir(
@@ -303,6 +307,7 @@ impl LocalBlockBroadcaster {
     }
 
     pub fn blocks_processed(&self, batch: &[ProcessedResult]) {
+        tracing::info!("[node] LocalBlockBroadcaster::blocks_processed, batch size: {}", batch.len());
         if !self.enabled {
             return;
         }
@@ -311,11 +316,11 @@ impl LocalBlockBroadcaster {
         for result in batch {
             // Only rebroadcast local blocks that were successfully processed (no forks or gaps)
             if result.status.is_ok() && result.source == BlockSource::Local {
-                let mut guard = self.mutex.lock().unwrap();
+                let mut guard = self.mutex.lock();
                 guard.local_blocks.push_back(LocalEntry {
                     block: Arc::new(result.block.clone()),
                     last_broadcast: None,
-                    next_broadcast: Instant::now(),
+                    next_broadcast: self.clock.now(),
                     rebroadcasts: 0,
                 });
                 self.stats
@@ -340,13 +345,13 @@ impl LocalBlockBroadcaster {
 impl Drop for LocalBlockBroadcaster {
     fn drop(&mut self) {
         // Thread must be stopped before destruction
-        debug_assert!(self.thread.lock().unwrap().is_none())
+        // debug_assert!(self.thread.lock().is_none())
     }
 }
 
 impl ContainerInfoProvider for LocalBlockBroadcaster {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.mutex.lock().unwrap();
+        let guard = self.mutex.lock();
         [(
             "local",
             guard.local_blocks.len(),
@@ -362,18 +367,18 @@ pub trait LocalBlockBroadcasterExt {
 
 impl LocalBlockBroadcasterExt for Arc<LocalBlockBroadcaster> {
     fn start(&self) {
-        if !self.enabled {
-            return;
-        }
-
-        debug_assert!(self.thread.lock().unwrap().is_none());
-        let self_l = Arc::clone(self);
-        *self.thread.lock().unwrap() = Some(
-            std::thread::Builder::new()
-                .name("Local broadcast".to_string())
-                .spawn(move || self_l.run())
-                .unwrap(),
-        );
+        // if !self.enabled {
+        //     return;
+        // }
+        //
+        // debug_assert!(self.thread.lock().is_none());
+        // let self_l = Arc::clone(self);
+        // *self.thread.lock() = Some(
+        //     /* std::/* /* /* thread::Builder::new()
+        //         .name("Local broadcast".to_string())
+        //         .spawn(move || self_l.run())
+        //         .unwrap(),
+        // );
     }
 }
 
@@ -484,11 +489,11 @@ fn remove_by_next_broadcast(
     next: Instant,
     hash: &BlockHash,
 ) {
-    let mut hashes = map.remove(&next).unwrap();
-
-    if hashes.len() > 1 {
-        hashes.retain(|i| i != hash);
-        map.insert(next, hashes);
+    if let Some(mut hashes) = map.remove(&next) {
+        if hashes.len() > 1 {
+            hashes.retain(|i| i != hash);
+            map.insert(next, hashes);
+        }
     }
 }
 

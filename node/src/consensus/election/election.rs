@@ -1,4 +1,7 @@
-// // // // // // use std::{   collections::HashMap, fmt::Debug, time::Duration, time::SystemTime   }; // TODO: fix this
+use rsnano_nullable_clock::Timestamp as SystemTime;
+use core::time::Duration;
+use hashbrown::HashMap;
+// // // // // // // use std::{    collections::HashMap, fmt::Debug, time::Duration, time::SystemTime    }; // TODO: fix this
 
 use super::{block_tallies::BlockTallies, ConfirmationType, ConfirmedElection, ElectionState};
 use rsnano_core::{
@@ -390,7 +393,12 @@ impl Election {
     }
 
     fn change_winner_to(&mut self, new_winner: &BlockHash) {
-        self.winner = self.candidate_blocks().get(&new_winner).unwrap().clone();
+        self.winner = self
+            .candidate_blocks
+            .values()
+            .find(|b| b.hash() == *new_winner)
+            .expect("winner block not found")
+            .clone();
     }
 
     fn update_winner_tally(&mut self) {
@@ -448,7 +456,7 @@ impl Election {
             block_count: self.block_count() as u32,
             voter_count: self.votes().len() as u32,
             election_duration: self.start().elapsed(now),
-            election_end: SystemTime::now(),
+            election_end: now,
             confirmation_type: result,
             votes,
         }

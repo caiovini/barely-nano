@@ -1,6 +1,7 @@
-use alloc::sync::{ Arc };
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::{ Mutex };
-// // // // // // use std::{   thread::JoinHandle   }; // TODO: fix this
+use crate::utils::JoinHandle;
 
 use rsnano_core::utils::BackpressureSender;
 use rsnano_ledger::Ledger;
@@ -41,20 +42,30 @@ impl BlockProcessor {
         }
     }
 
-    pub fn start(&self, thread_count: usize) {
-        debug_assert!(self.threads.lock().unwrap().is_empty());
-        for _ in 0..thread_count {
-            let mut processor_loop = self.create_loop();
+    pub fn start(&self, _thread_count: usize) {
+        // debug_assert!(self.threads.lock().is_empty());
+        // for _ in 0..thread_count {
+        //     let mut processor_loop = self.create_loop();
+        //
+        //     self.threads.lock().lock().push(
+        //         /* /* std::/* /* /* thread::Builder::new()
+        //             .name("Blck processing".to_string())
+        //             .spawn(move || {
+        //                 processor_loop.run();
+        //             })
+        //             .unwrap(),
+        //     );
+        // }
+    }
 
-            self.threads.lock().unwrap().push(
-                std::thread::Builder::new()
-                    .name("Blck processing".to_string())
-                    .spawn(move || {
-                        processor_loop.run();
-                    })
-                    .unwrap(),
-            );
-        }
+    pub fn run(&self) {
+        let mut loop_state = self.create_loop();
+        loop_state.run();
+    }
+
+    pub fn run_once(&self) {
+        let mut loop_state = self.create_loop();
+        loop_state.run_once();
     }
 
     fn create_loop(&self) -> BlockProcessorLoop {
@@ -73,19 +84,19 @@ impl BlockProcessor {
             event_publisher: self
                 .event_publisher
                 .lock()
-                .unwrap()
                 .as_ref()
                 .unwrap()
                 .clone(),
+            clock: Arc::new(rsnano_nullable_clock::SteadyClock::default()), // TODO: use real clock
         }
     }
 
     pub fn stop(&self) {
-        drop(self.event_publisher.lock().unwrap().take());
+        drop(self.event_publisher.lock().take());
         self.queue.stop();
-        let mut threads = self.threads.lock().unwrap();
-        for join_handle in threads.drain(..) {
-            join_handle.join().unwrap();
+        let mut threads = self.threads.lock();
+        for _join_handle in threads.drain(..) {
+            // join_handle.join().unwrap(); */ */ */ */ */
         }
     }
 }
@@ -109,14 +120,24 @@ struct BlockProcessorLoop {
 }
 
 impl BlockProcessorLoop {
-    fn run(&mut self) {
+    #[allow(dead_code)]
+    pub fn run(&mut self) {
         while let Some(blocks) = self.queue.pop_blocking() {
+            tracing::info!("Block Processor: processing batch of {} blocks", blocks.len());
             self.backlog_waiter.wait_for_backlog();
 
             if self.queue.stopped() {
                 break;
             }
 
+            self.process.process_blocks(blocks);
+        }
+    }
+
+    pub fn run_once(&mut self) {
+        if let Some(blocks) = self.queue.pop() {
+            tracing::info!("Block Processor: processing batch of {} blocks", blocks.len());
+            self.backlog_waiter.wait_for_backlog();
             self.process.process_blocks(blocks);
         }
     }

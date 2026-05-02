@@ -32,7 +32,7 @@ impl AsyncTcpStream {
 
     pub async fn connect(handle: SocketHandle, endpoint: impl Into<IpEndpoint>) -> Result<Self, TcpError> {
         let endpoint = endpoint.into();
-        let port = endpoint.port;
+        let _port = endpoint.port;
         
         let mut success = false;
         if let Some(ref mut ctx) = *NET.lock() {
@@ -52,11 +52,15 @@ impl AsyncTcpStream {
             if let Some(ref mut ctx) = *NET.lock() {
                 let socket = ctx.sockets.get_mut::<TcpSocket>(handle);
                 match socket.state() {
-                    smoltcp::socket::tcp::State::Established => Poll::Ready(Ok(())),
+                    smoltcp::socket::tcp::State::Established => {
+                        Poll::Ready(Ok(()))
+                    }
                     smoltcp::socket::tcp::State::Closed |
                     smoltcp::socket::tcp::State::Closing |
                     smoltcp::socket::tcp::State::CloseWait |
-                    smoltcp::socket::tcp::State::TimeWait => Poll::Ready(Err(TcpError::SmoltcpError)),
+                    smoltcp::socket::tcp::State::TimeWait => {
+                        Poll::Ready(Err(TcpError::SmoltcpError))
+                    }
                     _ => {
                         socket.register_send_waker(cx.waker());
                         Poll::Pending
@@ -68,6 +72,14 @@ impl AsyncTcpStream {
         }).await?;
 
         Ok(Self { handle })
+    }
+}
+
+impl Drop for AsyncTcpStream {
+    fn drop(&mut self) {
+        if let Some(ref mut ctx) = *NET.lock() {
+            ctx.remove_tcp_socket(self.handle);
+        }
     }
 }
 
@@ -104,17 +116,28 @@ impl Write for AsyncTcpStream {
         poll_fn(|cx| {
             if let Some(ref mut ctx) = *NET.lock() {
                 let socket = ctx.sockets.get_mut::<TcpSocket>(self.handle);
-                if !socket.is_open() {
-                    return Poll::Ready(Err(TcpError::SmoltcpError));
-                }
-                if socket.can_send() {
-                    match socket.send_slice(buf) {
-                        Ok(len) => Poll::Ready(Ok(len)),
-                        Err(_) => Poll::Ready(Err(TcpError::SmoltcpError)),
+                match socket.state() {
+                    smoltcp::socket::tcp::State::Established => {
+                        if socket.can_send() {
+                            match socket.send_slice(buf) {
+                                Ok(len) => Poll::Ready(Ok(len)),
+                                Err(_) => Poll::Ready(Err(TcpError::SmoltcpError)),
+                            }
+                        } else {
+                            socket.register_send_waker(cx.waker());
+                            Poll::Pending
+                        }
                     }
-                } else {
-                    socket.register_send_waker(cx.waker());
-                    Poll::Pending
+                    smoltcp::socket::tcp::State::Closed |
+                    smoltcp::socket::tcp::State::Closing |
+                    smoltcp::socket::tcp::State::CloseWait |
+                    smoltcp::socket::tcp::State::TimeWait => {
+                        Poll::Ready(Err(TcpError::SmoltcpError))
+                    }
+                    _ => {
+                        socket.register_send_waker(cx.waker());
+                        Poll::Pending
+                    }
                 }
             } else {
                 Poll::Ready(Err(TcpError::SmoltcpError))

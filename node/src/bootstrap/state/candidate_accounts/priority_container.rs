@@ -4,7 +4,7 @@ use alloc::collections::BTreeMap;
 use core::mem::size_of;
 
 use super::priority::{Priority, PriorityKeyDesc};
-use rustc_hash::FxHashSet;
+use hashbrown::HashSet as FxHashSet;
 
 #[derive(Clone, Default)]
 pub(super) struct PriorityEntry {
@@ -271,7 +271,6 @@ mod tests {
     }
 
     mod next_priority {
-        use super::*;
         use core::time::Duration;
 
         #[test]

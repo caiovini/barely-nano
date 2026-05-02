@@ -1,6 +1,8 @@
-use alloc::sync::{ Arc };
+use crate::utils::Condvar;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use spin::{ Mutex };
-// // // // // // use std::{   collections::VecDeque, mem::size_of, sync::Condvar   }; // TODO: fix this
+// // // // // // // use std::{    collections::VecDeque, mem::size_of, sync::Condvar    }; // TODO: fix this
 
 use strum::IntoEnumIterator;
 
@@ -55,11 +57,11 @@ impl VoteProcessorQueue {
     }
 
     pub fn len(&self) -> usize {
-        self.data.lock().unwrap().queue.len()
+        self.data.lock().queue.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.data.lock().unwrap().queue.is_empty()
+        self.data.lock().queue.is_empty()
     }
 
     /// Queue vote for processing. @returns true if the vote was queued
@@ -77,7 +79,7 @@ impl VoteProcessorQueue {
 
         let tier;
         let added = {
-            let mut guard = self.data.lock().unwrap();
+            let mut guard = self.data.lock();
             tier = guard.rep_tiers.tier(&vote.voter);
             guard
                 .queue
@@ -109,7 +111,7 @@ impl VoteProcessorQueue {
             Option<BlockHash>,
         ),
     )> {
-        let mut guard = self.data.lock().unwrap();
+        let mut guard = self.data.lock();
         loop {
             if guard.stopped {
                 return VecDeque::new();
@@ -125,7 +127,7 @@ impl VoteProcessorQueue {
 
     pub fn clear(&self) {
         {
-            let mut guard = self.data.lock().unwrap();
+            let mut guard = self.data.lock();
             guard.queue.clear();
         }
         self.condition.notify_all();
@@ -133,20 +135,19 @@ impl VoteProcessorQueue {
 
     pub fn stop(&self) {
         {
-            let mut guard = self.data.lock().unwrap();
+            let mut guard = self.data.lock();
             guard.stopped = true;
         }
         self.condition.notify_all();
     }
 
     pub fn stopped(&self) -> bool {
-        self.data.lock().unwrap().stopped
+        self.data.lock().stopped
     }
 
     pub fn info(&self) -> FairQueueInfo<RepTier> {
         self.data
             .lock()
-            .unwrap()
             .queue
             .compacted_info(|(tier, _)| *tier)
     }
@@ -154,7 +155,7 @@ impl VoteProcessorQueue {
 
 impl ContainerInfoProvider for VoteProcessorQueue {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.data.lock().unwrap();
+        let guard = self.data.lock();
         ContainerInfo::builder()
             .leaf(
                 "votes",
@@ -168,7 +169,7 @@ impl ContainerInfoProvider for VoteProcessorQueue {
 
 impl RepTiersConsumer for VoteProcessorQueue {
     fn update_rep_tiers(&self, new_tiers: RepTiers) {
-        self.data.lock().unwrap().rep_tiers = new_tiers;
+        self.data.lock().rep_tiers = new_tiers;
     }
 }
 
@@ -182,7 +183,7 @@ impl VoteProcessorQueueCleanup {
 
 impl DeadChannelCleanupStep for VoteProcessorQueueCleanup {
     fn clean_up_dead_channels(&self, dead_channel_ids: &[ChannelId]) {
-        let mut guard = self.0.data.lock().unwrap();
+        let mut guard = self.0.data.lock();
         for channel_id in dead_channel_ids {
             for tier in RepTier::iter() {
                 guard.queue.remove(&(tier, *channel_id));

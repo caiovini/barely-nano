@@ -8,11 +8,11 @@ use virtio_drivers::transport::mmio::MmioTransport;
 use crate::net::virtio_hal::VirtioHal;
 
 pub struct VirtioNetDevice<'a> {
-    pub driver: VirtIONet<VirtioHal, MmioTransport<'a>, 32>,
+    pub driver: VirtIONet<VirtioHal, MmioTransport<'a>, 128>,
 }
 
 impl<'a> VirtioNetDevice<'a> {
-    pub fn new(driver: VirtIONet<VirtioHal, MmioTransport<'a>, 32>) -> Self {
+    pub fn new(driver: VirtIONet<VirtioHal, MmioTransport<'a>, 128>) -> Self {
         Self { driver }
     }
 }
@@ -24,6 +24,7 @@ impl<'a> Device for VirtioNetDevice<'a> {
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         match self.driver.receive() {
             Ok(buf) => {
+                crate::uart::print(b".");
                 let rx_token = VirtioRxToken { buf: buf.packet().to_vec() };
                 let _ = self.driver.recycle_rx_buffer(buf);
                 let tx_token = VirtioTxToken { driver: &mut self.driver };
@@ -34,6 +35,7 @@ impl<'a> Device for VirtioNetDevice<'a> {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        crate::uart::print(b">");
         Some(VirtioTxToken { driver: &mut self.driver })
     }
 
@@ -42,6 +44,14 @@ impl<'a> Device for VirtioNetDevice<'a> {
         caps.max_transmission_unit = 1500;
         caps.max_burst_size = Some(1);
         caps.medium = Medium::Ethernet;
+        
+        // Re-enable checksum validation
+        caps.checksum.ipv4 = smoltcp::phy::Checksum::Both;
+        caps.checksum.udp = smoltcp::phy::Checksum::Both;
+        caps.checksum.tcp = smoltcp::phy::Checksum::Both;
+        caps.checksum.icmpv4 = smoltcp::phy::Checksum::Both;
+        caps.checksum.icmpv6 = smoltcp::phy::Checksum::Both;
+        
         caps
     }
 }
@@ -60,7 +70,7 @@ impl RxToken for VirtioRxToken {
 }
 
 pub struct VirtioTxToken<'b, 'a> {
-    driver: &'b mut VirtIONet<VirtioHal, MmioTransport<'a>, 32>,
+    driver: &'b mut VirtIONet<VirtioHal, MmioTransport<'a>, 128>,
 }
 
 impl<'b, 'a> TxToken for VirtioTxToken<'b, 'a> {

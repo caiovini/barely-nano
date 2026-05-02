@@ -1,7 +1,9 @@
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 use crate::config::NodeConfig;
 use rsnano_core::utils::Peer;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 #[derive(Deserialize, Serialize)]
 pub struct ExperimentalToml {
@@ -21,7 +23,7 @@ impl NodeConfig {
         if let Some(secondary_work_peers) = &toml.secondary_work_peers {
             self.secondary_work_peers = secondary_work_peers
                 .iter()
-                .map(|string| Peer::from_str(&string).expect("Invalid secondary work peer"))
+                .map(|string| string.parse::<Peer>().expect("Invalid secondary work peer"))
                 .collect();
         }
     }

@@ -1,9 +1,11 @@
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
 mod telemetry_factory;
 
 pub use telemetry_factory::TelemetryFactory;
 
-use alloc::sync::{ Arc };
-use alloc::collections::{ VecDeque };
 use spin::{ Mutex, RwLock };
 use hashbrown::{ HashMap };
 use core::time::Duration;
@@ -107,7 +109,7 @@ pub fn get_pre_release_version(_v: &Version) -> u8 { 0 }
 
 impl ContainerInfoProvider for Telemetry {
     fn container_info(&self) -> ContainerInfo {
-        ContainerInfo::new()
+        ContainerInfo::default()
     }
 }
 

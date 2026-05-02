@@ -1,6 +1,7 @@
+use alloc::vec::Vec;
 use crate::consensus::election::ElectionBehavior;
 use rsnano_core::Amount;
-use once_cell::sync::Lazy as LazyLock;
+use crate::utils::LazyLock;
 
 static BUCKETING: LazyLock<Bucketing> = LazyLock::new(|| Bucketing::default());
 

@@ -159,7 +159,6 @@ mod tests {
     }
 
     mod optimistic {
-        use super::*;
 
         #[test]
         fn account_not_in_ledger() {
@@ -220,7 +219,6 @@ mod tests {
     }
 
     mod safe {
-        use super::*;
 
         #[test]
         fn account_not_in_ledger() {

@@ -142,10 +142,10 @@ impl<'a> EncodedAccountStr<'a> {
     }
 
     fn is_length_valid(&self) -> bool {
-        if self.has_xrb_prefix() && self.0.chars().count() != 64 {
+        if self.has_xrb_prefix() && self.0.len() != 64 {
             return false;
         }
-        if self.has_nano_prefix() && self.0.chars().count() != 65 {
+        if self.has_nano_prefix() && self.0.len() != 65 {
             return false;
         }
         true
@@ -209,12 +209,11 @@ const ACCOUNT_LOOKUP: &[char] = &[
     'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'w', 'x', 'y', 'z',
 ];
 
-const ACCOUNT_REVERSE: &[char] = &[
-    '~', '0', '~', '1', '2', '3', '4', '5', '6', '7', '~', '~', '~', '~', '~', '~', '~', '~', '~',
-    '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~',
-    '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '~', '8', '9', ':', ';', '<', '=', '>', '?',
-    '@', 'A', 'B', '~', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', '~', 'L', 'M', 'N', 'O', '~',
-    '~', '~', '~', '~',
+const ACCOUNT_REVERSE: &[u8] = &[
+    0, 0xff, 1, 2, 3, 4, 5, 6, 7, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 8, 9, 10, 11, 12, 13, 14,
+    15, 16, 17, 18, 0xff, 19, 20, 21, 22, 23, 24, 25, 26, 27, 0xff, 28, 29, 30, 31,
 ];
 
 fn account_encode(value: u8) -> char {
@@ -222,11 +221,15 @@ fn account_encode(value: u8) -> char {
 }
 
 fn account_decode(value: u8) -> u8 {
-    let mut result = ACCOUNT_REVERSE[(value - 0x30) as usize] as u8;
-    if result != b'~' {
-        result -= 0x30;
+    if value < b'1' || value > b'z' {
+        return b'~';
     }
-    result
+    let result = ACCOUNT_REVERSE[(value - b'1') as usize];
+    if result == 0xff {
+        b'~'
+    } else {
+        result
+    }
 }
 
 impl From<Account> for PublicKey {

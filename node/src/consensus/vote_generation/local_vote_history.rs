@@ -1,12 +1,13 @@
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
     BlockHash, Networks, Root, Vote,
 };
-use alloc::sync::{ Arc };
-use alloc::collections::{ BTreeMap };
 use spin::{ Mutex };
 use hashbrown::{ HashMap, HashSet };
-// // // // // // use std::{   mem::size_of   }; // TODO: fix this
+// // // // // // // use std::{    mem::size_of    }; // TODO: fix this
 
 pub struct LocalVoteHistory {
     data: Mutex<LocalVoteHistoryData>,
@@ -51,7 +52,7 @@ impl LocalVoteHistory {
     }
 
     pub fn add(&self, root: &Root, hash: &BlockHash, vote: &Arc<Vote>) {
-        let mut data_lk = self.data.lock().unwrap();
+        let mut data_lk = self.data.lock();
         let data: &mut LocalVoteHistoryData = &mut data_lk;
         clean(data, self.max_cache);
 
@@ -96,20 +97,20 @@ impl LocalVoteHistory {
             data.history.insert(
                 id,
                 LocalVote {
-                    root: root.to_owned(),
-                    hash: hash.to_owned(),
+                    root: root.clone(),
+                    hash: hash.clone(),
                     vote: vote.clone(),
                 },
             );
             data.history_by_root
-                .entry(root.to_owned())
+                .entry(root.clone())
                 .or_default()
                 .insert(id);
         }
     }
 
     pub fn erase_batch(&self, roots: impl IntoIterator<Item = Root>) {
-        let mut guard = self.data.lock().unwrap();
+        let mut guard = self.data.lock();
         for root in roots {
             if let Some(removed) = guard.history_by_root.remove(&root) {
                 for &id in &removed {
@@ -120,7 +121,7 @@ impl LocalVoteHistory {
     }
 
     pub fn erase(&self, root: &Root) {
-        let mut data_lk = self.data.lock().unwrap();
+        let mut data_lk = self.data.lock();
         if let Some(removed) = data_lk.history_by_root.remove(root) {
             for &id in &removed {
                 data_lk.history.remove(&id);
@@ -129,7 +130,7 @@ impl LocalVoteHistory {
     }
 
     pub fn votes(&self, root: &Root, hash: &BlockHash, is_final: bool) -> Vec<Arc<Vote>> {
-        let data_lk = self.data.lock().unwrap();
+        let data_lk = self.data.lock();
         let mut result = Vec::new();
         if let Some(ids) = data_lk.history_by_root.get(root) {
             for &id in ids.iter() {
@@ -143,12 +144,12 @@ impl LocalVoteHistory {
     }
 
     pub fn exists(&self, root: &Root) -> bool {
-        let data_lk = self.data.lock().unwrap();
+        let data_lk = self.data.lock();
         data_lk.history_by_root.contains_key(root)
     }
 
     pub fn size(&self) -> usize {
-        self.data.lock().unwrap().history.len()
+        self.data.lock().history.len()
     }
 }
 
@@ -156,7 +157,7 @@ impl ContainerInfoProvider for LocalVoteHistory {
     fn container_info(&self) -> ContainerInfo {
         [(
             "history",
-            self.data.lock().unwrap().history.len(),
+            self.data.lock().history.len(),
             size_of::<LocalVote>(),
         )]
         .into()

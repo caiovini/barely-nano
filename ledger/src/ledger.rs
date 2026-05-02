@@ -179,6 +179,14 @@ impl Ledger {
         .unwrap()
     }
 
+    pub fn store_vendor(&self) -> &'static str {
+        "B-tree"
+    }
+
+    pub fn genesis(&self) -> &Block {
+        &self.constants.genesis_block
+    }
+
     pub fn new_null_builder() -> NullLedgerBuilder {
         NullLedgerBuilder::new()
     }
@@ -215,7 +223,13 @@ impl Ledger {
         _thread_count: usize,
         _generate_cache: &GenerateCacheFlags,
     ) -> anyhow::Result<()> {
-        // Simplified initialization for B-tree
+        self.store.generate_cache();
+        let genesis = self.constants.genesis_block.clone();
+        if !self.any().block_exists_or_pruned(&genesis.hash()) {
+            debug!("Genesis block not found, inserting...");
+            self.process_one(&genesis).map_err(|e| anyhow::anyhow!("Could not insert genesis: {:?}", e))?;
+            self.confirm(genesis.hash());
+        }
         Ok(())
     }
 
@@ -243,11 +257,43 @@ impl Ledger {
         self.rep_weights.bootstrap_weight_max_blocks()
     }
 
+    pub fn work_thresholds(&self) -> &rsnano_work::WorkThresholds {
+        &self.constants.work
+    }
+
     /// Returns the cached vote weight for the given representative.
     /// If the weight is below the cache limit it returns 0.
     /// During bootstrap it returns the preconfigured bootstrap weights.
     pub fn weight(&self, rep: &PublicKey) -> Amount {
         self.rep_weights.weight(rep)
+    }
+
+    pub fn verify_votes(
+        &self,
+        candidates: VecDeque<(Root, BlockHash)>,
+        is_final: bool,
+    ) -> VecDeque<(Root, BlockHash)> {
+        let verifier = VoteVerifier {
+            constants: &self.constants,
+            store: &self.store,
+        };
+        verifier.verify_votes(candidates, is_final)
+    }
+
+    pub fn backlog_count(&self) -> usize {
+        0
+    }
+
+    pub fn account_count(&self) -> usize {
+        self.store.cache.account_count.load(Ordering::SeqCst) as usize
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.store.cache.block_count.load(Ordering::SeqCst) as usize
+    }
+
+    pub fn confirmed_count(&self) -> usize {
+        self.store.cache.confirmed_count.load(Ordering::SeqCst) as usize
     }
 
     pub fn is_epoch_link(&self, link: &Link) -> bool {
@@ -336,8 +382,8 @@ impl Ledger {
 
     pub fn roll_back(&self, block: &BlockHash) -> Result<usize, RollbackError> {
         let result = self.roll_back_batch(&[*block], usize::MAX, |_| true);
-        let rolled_back = result[0].rolled_back.len();
-        result[0].error.as_ref().map_or(Ok(rolled_back), |e| Err(e.clone()))
+        let rolled_back = result.0[0].rolled_back.len();
+        result.0[0].error.as_ref().map_or(Ok(rolled_back), |e| Err(e.clone()))
     }
 
     pub fn roll_back_batch<'a, T, F>(
@@ -354,7 +400,7 @@ impl Ledger {
             .inc(StatType::BoundedBacklog, DetailType::PerformingRollbacks);
 
         let mut rolled_back_count = 0;
-        let mut results = RollbackResults::new();
+        let mut results = RollbackResults(Vec::new());
         
         for hash in targets {
             if !can_roll_back(hash) {
@@ -454,7 +500,7 @@ impl Ledger {
         T: IntoIterator<Item = &'a Block>,
         F: FnMut(RollbackResults),
     {
-        let mut rolled_back = RollbackResults::new();
+        let mut rolled_back = RollbackResults(Vec::new());
         for block in blocks {
             let rolled_back_blocks = self.rollback_competitor(block);
             if !rolled_back_blocks.is_empty() {
@@ -569,6 +615,7 @@ pub struct BatchProcessResult {
     pub processed: Vec<(Result<(), BlockError>, Option<SavedBlock>)>,
 }
 
+#[derive(Debug)]
 pub struct RollbackResult {
     pub target_hash: BlockHash,
     pub target_root: QualifiedRoot,
@@ -576,7 +623,42 @@ pub struct RollbackResult {
     pub error: Option<RollbackError>,
 }
 
-pub type RollbackResults = Vec<RollbackResult>;
+#[derive(Debug, Default)]
+pub struct RollbackResults(pub Vec<RollbackResult>);
+
+impl RollbackResults {
+    pub fn hashes(&self) -> Vec<BlockHash> {
+        self.0.iter().flat_map(|r| r.rolled_back.iter().map(|b| b.hash())).collect()
+    }
+
+    pub fn roots(&self) -> Vec<rsnano_core::QualifiedRoot> {
+        self.0.iter().map(|r| r.target_root.clone()).collect()
+    }
+
+    pub fn affected_accounts(&self) -> Vec<rsnano_core::Account> {
+        self.0.iter().map(|r| r.target_root.root.into()).collect()
+    }
+
+    pub fn iter(&self) -> core::slice::Iter<'_, RollbackResult> {
+        self.0.iter()
+    }
+
+    pub fn push(&mut self, result: RollbackResult) {
+        self.0.push(result);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn extend(&mut self, other: RollbackResults) {
+        self.0.extend(other.0);
+    }
+}
 
 pub trait CementingObserver {
     fn batch_confirmed(&mut self, blocks: Vec<(SavedBlock, BlockHash)>);

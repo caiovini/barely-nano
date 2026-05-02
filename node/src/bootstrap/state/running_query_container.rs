@@ -1,8 +1,9 @@
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use super::{QuerySource, RunningQuery};
 use rsnano_core::{Account, BlockHash};
-use alloc::collections::{ VecDeque };
 use hashbrown::{ HashMap };
-// // // // // // use std::{   mem::size_of   }; // TODO: fix this
+// // // // // // // use std::{    mem::size_of    }; // TODO: fix this
 
 #[derive(Default)]
 pub(crate) struct RunningQueryContainer {

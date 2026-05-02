@@ -67,9 +67,11 @@ impl<'a> BufferPool<'a> {
         let victim_page_id = self.frames[victim_frame_id].page_id;
         if self.frames[victim_frame_id].is_dirty {
             if let Some(pid) = victim_page_id {
+                /*
                 crate::uart::print(b"[bpm] Flushing dirty page ");
                 crate::uart::print_usize(pid);
                 crate::uart::print(b" to disk...\n");
+                */
                 self.storage.write_block(pid, &self.frames[victim_frame_id].data)?;
             }
         }

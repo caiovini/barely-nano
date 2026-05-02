@@ -5,169 +5,266 @@ extern crate alloc;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
-use kernel_common::{trap, uart};
-use linked_list_allocator::LockedHeap;
+use core::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
+use alloc::sync::Arc;
+use alloc::string::String;
+use alloc::boxed::Box;
+use core::future::Future;
+use core::pin::Pin;
+use core::str::FromStr;
 
-// ---------------------------------------------------------------------------
-// Global heap allocator
-// ---------------------------------------------------------------------------
+use kernel_common::{uart, trap};
+use rsnano_node::Node;
+use linked_list_allocator::LockedHeap;
+use smoltcp::socket::tcp::Socket as TcpSocket;
 
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+pub static ALLOCATOR: kernel_common::bump_alloc::BumpAllocator = kernel_common::bump_alloc::BumpAllocator::empty();
 
-// ---------------------------------------------------------------------------
-// Linker-provided symbols
-// ---------------------------------------------------------------------------
+global_asm!(include_str!("entry.S"));
 
-unsafe extern "C" {
-    static _bss_start: u8;
-    static _bss_end: u8;
-    static _heap_start: u8;
-    static _heap_end: u8;
-}
-
-// ---------------------------------------------------------------------------
-// Assembly entry: set stack pointer, jump to Rust
-// ---------------------------------------------------------------------------
-
-global_asm!(
-    ".section .text.start",
-    ".global _start",
-    "_start:",
-    "    la    sp, _stack_top",    // set stack pointer
-    "    csrci sstatus, 2",        // clear sstatus.SIE (bit 1) — csrci max imm = 31, bit1=2 OK
-    "    li    t0, 0x20",          // STIE = bit 5 of sie = 32; must use register form
-    "    csrc  sie, t0",           // clear sie.STIE
-    "    j     kernel_main",
-);
-
-// ---------------------------------------------------------------------------
-// Kernel main
-// ---------------------------------------------------------------------------
+static BOOT_HART_ID: AtomicUsize = AtomicUsize::new(999);
+static BOOT_COMPLETE: AtomicBool = AtomicBool::new(false);
+static NODE: spin::Mutex<Option<NodeWrapper>> = spin::Mutex::new(None);
 
 #[no_mangle]
-pub extern "C" fn kernel_main(_hart_id: usize, _dtb: usize) -> ! {
-    // 1. Zero BSS
-    unsafe {
-        let start = &_bss_start as *const u8 as *mut u8;
-        let end = &_bss_end as *const u8;
-        let len = end.offset_from(start) as usize;
-        core::ptr::write_bytes(start, 0, len);
+pub extern "C" fn rust_main(hart_id: usize) {
+    if BOOT_HART_ID.compare_exchange(999, hart_id, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        boot_hart_main(hart_id);
+    } else {
+        secondary_hart_main(hart_id);
     }
+}
 
-    // 2. Initialise heap
-    unsafe {
-        let start = &_heap_start as *const u8 as usize;
-        let end = &_heap_end as *const u8 as usize;
-        ALLOCATOR.lock().init(start as *mut u8, end - start);
+struct NodeWrapper(Arc<Node>);
+
+unsafe impl Send for NodeWrapper {}
+unsafe impl Sync for NodeWrapper {}
+
+fn boot_hart_main(hart_id: usize) {
+    uart::print(b"[boot] RS-Nano Bare Metal Node starting (Hart ");
+    uart::print_usize(hart_id);
+    uart::print(b")\n");
+
+    extern "C" {
+        static _heap_start: u8;
+        static _heap_end: u8;
     }
-
-    uart::print(b"[boot] BSS zeroed, heap ready (4 MB)\n");
-    uart::print(b"[boot] Enabling CLINT timer interrupts (1 s)\n");
-
+    let heap_start = unsafe { &_heap_start as *const u8 as usize };
+    let heap_end = unsafe { &_heap_end as *const u8 as usize };
+    let heap_len = heap_end - heap_start;
+    unsafe {
+        ALLOCATOR.init(heap_start, heap_len);
+    }
+    /*
+    uart::print(b"[boot] BSS zeroed, heap ready (");
+    uart::print_usize(heap_len / 1024 / 1024);
+    uart::print(b" MB)\n");
+    uart::print(b"[boot] Enabling trap handlers\n");
+    */
     trap::init();
-
+    /*
+    uart::print(b"[boot] Waking up secondary cores via SBI HSM...\n");
+    */
+    for id in 0..8 {
+        if id != hart_id {
+            let _ = kernel_common::sbi::hart_start(id, 0x80200000, 0);
+        }
+    }
+    kernel_common::logger::init();
+ 
+    #[cfg(feature = "mmode")]
+    let seed = kernel_common::clint::mtime();
+    #[cfg(not(feature = "mmode"))]
+    let seed = kernel_common::sbi::get_time();
+    rsnano_nullable_random::set_seed(seed);
+    tracing::info!("[node] --- DYNAMIC NODE START ---");
+    
     let net_ctx = kernel_common::net::init_virtio_net();
     if let Some(ctx) = net_ctx {
         *kernel_common::net::NET.lock() = Some(ctx);
-        uart::print(b"[net] Global NET initialized.\n");
+        // uart::print(b"[net] Global NET initialized.\n");
     }
 
     let storage_ctx = kernel_common::storage::init_virtio_blk();
     if let Some(storage) = storage_ctx {
-        let bpm = kernel_common::storage::bpm::BufferPool::new(storage, 10);
-        uart::print(b"[bpm] Initialized Buffer Pool with 10 frames\n");
-
-        let mut btree = kernel_common::storage::btree::BTree::new(bpm);
-        uart::print(b"[btree] Initialized Paged B-Tree\n");
-
-        uart::print(b"[btree] Inserting keys 1 to 100...\n");
-        for i in 1..=100 {
-            let mut key = [0u8; 65];
-            key[0] = 255;
-            let i_bytes = (i as u64).to_le_bytes();
-            key[1..9].copy_from_slice(&i_bytes);
-
-            let mut val = [0u8; 256];
-            let val_bytes = (i * 10 as u64).to_le_bytes();
-            val[0..8].copy_from_slice(&val_bytes);
-
-            btree.insert(key, val);
-        }
-
-        uart::print(b"[btree] Searching for key 42...\n");
-        let mut search_key = [0u8; 65];
-        search_key[0] = 255;
-        search_key[1..9].copy_from_slice(&42u64.to_le_bytes());
-
-        if let Some(val) = btree.search(&search_key) {
-            let found_val = u64::from_le_bytes(val[0..8].try_into().unwrap());
-            if found_val == 420 {
-                uart::print(b"[btree] SUCCESS: Found key 42 with value 420!\n");
-            } else {
-                uart::print(b"[btree] FAILURE: Incorrect value found\n");
-            }
-        } else {
-            uart::print(b"[btree] FAILURE: Key 42 not found\n");
-        }
-
-        let mut fail_key = [0u8; 65];
-        fail_key[0] = 255;
-        fail_key[1..9].copy_from_slice(&999u64.to_le_bytes());
-        if btree.search(&fail_key).is_none() {
-            uart::print(b"[btree] SUCCESS: Key 999 correctly not found.\n");
-        }
-
+        let bpm = kernel_common::storage::bpm::BufferPool::new(storage, 64);
+        let btree = kernel_common::storage::btree::BTree::new(bpm);
         *kernel_common::storage::DB.lock() = Some(btree);
-        uart::print(b"[storage] Global DB initialized.\n");
+        // uart::print(b"[storage] Global DB initialized.\n");
     }
-
-    uart::print(b"[crypto] Running Blake2b Hash test...\n");
-    let test_data = b"nano_block_data";
-    let hash = kernel_common::crypto::hash_blake2b(test_data);
-    
-    uart::print(b"[crypto] Blake2b(\"nano_block_data\") = ");
-    for byte in &hash {
-        let hex_chars = b"0123456789abcdef";
-        let hi = (byte >> 4) as usize;
-        let lo = (byte & 0x0F) as usize;
-        let mut hex_buf = [hex_chars[hi], hex_chars[lo]];
-        uart::print(&hex_buf);
-    }
-    uart::print(b"\n");
-
-    uart::print(b"[crypto] Checking hardware extensions...\n");
-    kernel_common::crypto::test_hw_extensions();
 
     let exec = kernel_common::async_rt::Executor::new();
     *kernel_common::async_rt::EXECUTOR.lock() = Some(exec);
 
-    uart::print(b"[boot] Entering async executor loop\n");
+    // uart::print(b"[nano] Initializing Nano Node...\n");
+    let mut config = rsnano_node::config::NodeConfig::default_for(rsnano_core::Networks::NanoLiveNetwork, 8);
+    config.network.peer_reachout = core::time::Duration::from_secs(1);
+    config.preconfigured_peers.clear();
+    config.preconfigured_peers.push(rsnano_core::utils::Peer::new(alloc::string::String::from("192.168.0.245"), 7075));
+    config.preconfigured_peers.push(rsnano_core::utils::Peer::new(alloc::string::String::from("37.120.187.138"), 7075));
+
+    // uart::print(b"[boot] Building Nano Node...\n");
+    let node = rsnano_node::NodeBuilder::new(rsnano_core::Networks::NanoLiveNetwork)
+        .data_path(".")
+        .resolver(alloc::sync::Arc::new(BareMetalDnsResolver))
+        .config(config)
+        .finish()
+        .expect("Failed to initialize node");
+
+    // uart::print(b"[boot] Starting Nano Node...\n");
+    let mut node = node;
+    node.start();
+    let node_arc = alloc::sync::Arc::new(node);
+    {
+        *NODE.lock() = Some(NodeWrapper(node_arc.clone()));
+    }
+    // uart::print(b"[boot] Nano Node started.\n");
+
+    BOOT_COMPLETE.store(true, Ordering::SeqCst);
+    
+    {
+        let mut db_guard = kernel_common::storage::DB.lock();
+        if let Some(db) = db_guard.as_mut() {
+            let _ = db.flush();
+        }
+    }
+
+    let node_mon = node_arc.clone();
+    kernel_common::async_rt::spawn(async move {
+        loop {
+            kernel_common::async_rt::sleep(core::time::Duration::from_secs(60)).await;
+            node_mon.tick_monitor();
+            let (used, total) = (ALLOCATOR.used(), ALLOCATOR.total());
+            let blocks = node_mon.ledger.block_count();
+            let accounts = node_mon.ledger.account_count();
+            let channels = node_mon.network.read().count();
+            let tasks = kernel_common::async_rt::EXECUTOR.lock().as_ref().map(|e| e.task_count()).unwrap_or(0);
+            let queue = node_mon.block_processor_queue.total_queue_len();
+            tracing::info!(
+                "[monitor] Heap: {}/{} KB, Blocks: {}, Accounts: {}, Channels: {}, Tasks: {}, Queue: {}",
+                used / 1024, total / 1024, blocks, accounts, channels, tasks, queue
+            );
+        }
+    });
+
+    /*
+    uart::print(b"[boot] Entering main loop (Hart ");
+    uart::print_usize(hart_id);
+    uart::print(b")\n");
+    */
 
     loop {
-        if let Some(ref mut ctx) = *kernel_common::net::NET.lock() {
-            #[cfg(feature = "mmode")]
-            let mtime = kernel_common::clint::mtime();
-            #[cfg(feature = "smode")]
-            let mtime = kernel_common::clint::mtime(); 
-            
-            ctx.poll(mtime);
+        #[cfg(feature = "mmode")]
+        let mtime = kernel_common::clint::mtime();
+        #[cfg(not(feature = "mmode"))]
+        let mtime = kernel_common::clint::get_time_offset_ns() / 100 + kernel_common::clint::mtime();
+        {
+            if let Some(mut ctx) = kernel_common::net::NET.try_lock() {
+                if let Some(ref mut ctx_val) = *ctx {
+                    ctx_val.poll(mtime);
+                }
+            }
         }
         
-        if let Some(exec) = kernel_common::async_rt::EXECUTOR.lock().as_ref() {
+        // Run background node tasks
+        node_arc.block_processor.run_once();
+        node_arc.confirming_set.run_once();
+        node_arc.message_processor.lock().run_once();
+
+        let exec = kernel_common::async_rt::EXECUTOR.lock().clone();
+        if let Some(exec) = exec {
             exec.run_ready_tasks();
         }
-        
-        unsafe { core::arch::asm!("wfi", options(nostack)) };
+        if let Some(mut ctx) = kernel_common::net::NET.try_lock() {
+            if let Some(ref mut ctx_val) = *ctx {
+                handle_rpc_server(ctx_val, &node_arc);
+            }
+        }
+        core::hint::spin_loop();
     }
 }
 
-// ---------------------------------------------------------------------------
-// Panic handler
-// ---------------------------------------------------------------------------
+fn secondary_hart_main(_hart_id: usize) {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: &Node) {
+    let socket = ctx.sockets.get_mut::<TcpSocket>(ctx.rpc_handle);
+    if !socket.is_open() { let _ = socket.listen(7076); }
+    if socket.can_recv() {
+        let mut response: Option<alloc::string::String> = None;
+        let _ = socket.recv(|buffer| {
+            if buffer.starts_with(b"GET /telemetry") {
+                let blocks = node.ledger.block_count();
+                let accounts = node.ledger.account_count();
+                let resp_str = alloc::format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"blocks\":{}, \"accounts\":{}}}\n",
+                    blocks, accounts
+                );
+                response = Some(resp_str);
+                (buffer.len(), ())
+            } else {
+                response = Some(alloc::string::String::from("HTTP/1.1 404 Not Found\r\n\r\n"));
+                (buffer.len(), ())
+            }
+        });
+        if let Some(resp_str) = response {
+            let _ = socket.send_slice(resp_str.as_bytes());
+            socket.close();
+        }
+    }
+}
+
+struct BareMetalDnsResolver;
+impl rsnano_network::AsyncDnsResolver for BareMetalDnsResolver {
+    fn resolve(&self, host: &str) -> Pin<Box<dyn Future<Output = anyhow::Result<alloc::vec::Vec<core::net::IpAddr>>> + Send>> {
+        // Try parsing as IP first to avoid DNS query
+        if let Ok(ip) = core::net::IpAddr::from_str(host) {
+            return Box::pin(async move { Ok(alloc::vec![ip]) });
+        }
+        let host_owned = String::from(host);
+        Box::pin(async move {
+            match kernel_common::net::resolve(&host_owned).await {
+                Ok(addrs) => {
+                    let mut ips = alloc::vec::Vec::new();
+                    for addr in addrs {
+                        match addr {
+                            smoltcp::wire::IpAddress::Ipv4(a) => {
+                                let b: [u8; 4] = unsafe { core::mem::transmute(a) };
+                                ips.push(core::net::IpAddr::V4(core::net::Ipv4Addr::new(b[0], b[1], b[2], b[3])));
+                            }
+                            smoltcp::wire::IpAddress::Ipv6(a) => {
+                                let b: [u8; 16] = unsafe { core::mem::transmute(a) };
+                                ips.push(core::net::IpAddr::V6(core::net::Ipv6Addr::from(b)));
+                            }
+                        }
+                    }
+                    Ok(ips)
+                }
+                Err(_) => Err(anyhow::anyhow!("DNS resolution failed")),
+            }
+        })
+    }
+}
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    uart::print(b"[PANIC]\n");
+fn panic(info: &PanicInfo) -> ! {
+    uart::print(b"[PANIC] system panicked\n");
+    if let Some(loc) = info.location() {
+        uart::print(b" at ");
+        uart::print(loc.file().as_bytes());
+        uart::print(b":");
+        uart::print_usize(loc.line() as usize);
+    }
+    uart::print(b"\n");
+    // Print message if available
+    if let Some(s) = info.payload().downcast_ref::<&str>() {
+        uart::print(b"Message: ");
+        uart::print(s.as_bytes());
+        uart::print(b"\n");
+    }
     loop {}
 }

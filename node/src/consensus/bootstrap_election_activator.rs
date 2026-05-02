@@ -14,7 +14,7 @@ pub(crate) struct BootstrapElectionActivator {
 }
 impl BootstrapElectionActivator {
     pub(crate) fn election_started(&self, hash: BlockHash) {
-        let in_cache = self.vote_cache.lock().unwrap().contains(&hash);
+        let in_cache = self.vote_cache.lock().contains(&hash);
         if in_cache {
             // Probably not a bootstrap election
             return;
@@ -23,7 +23,6 @@ impl BootstrapElectionActivator {
         let activated = self
             .active_elections
             .write()
-            .unwrap()
             .transition_active(&hash);
 
         if activated {

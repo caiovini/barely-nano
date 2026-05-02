@@ -1,3 +1,6 @@
+use core::time::Duration;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use super::{CpsLimiter, VoteGenerators};
 use crate::consensus::{
     election::VoteType, election_schedulers::priority::bucket_count, ActiveElectionsContainer,
@@ -7,9 +10,8 @@ use rsnano_core::{
     BlockHash, Networks, Root,
 };
 use rsnano_nullable_clock::SteadyClock;
-use alloc::sync::{ Arc };
 use spin::{ RwLock };
-// // // // // // use std::{   time::Duration   }; // TODO: fix this
+// // // // // // // use std::{    time::Duration    }; // TODO: fix this
 
 /// Creates votes for blocks within the AEC
 pub(crate) struct AecVoter {
@@ -53,7 +55,7 @@ impl AecVoter {
 impl Tickable for AecVoter {
     fn tick(&mut self, cancel_token: &CancellationToken) {
         let now = self.clock.now();
-        let mut aec = self.aec.write().unwrap();
+        let mut aec = self.aec.write();
         let mut voted = true;
         let mut vote_queue = Vec::new();
         while voted {

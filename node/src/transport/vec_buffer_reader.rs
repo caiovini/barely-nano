@@ -1,4 +1,5 @@
-use async_trait::async_trait;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use rsnano_network::AsyncBufferReader;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,7 +17,6 @@ impl VecBufferReader {
     }
 }
 
-#[async_trait]
 impl AsyncBufferReader for VecBufferReader {
     async fn read(&self, buffer: &mut [u8], count: usize) -> anyhow::Result<()> {
         let pos = self.position.load(Ordering::SeqCst);

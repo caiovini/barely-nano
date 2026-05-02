@@ -42,6 +42,7 @@ spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock
 kernel-common = { path = "../common" }
 async-trait = { version = "0.1", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+libm = "0.2"
 
 [build-dependencies]
 build-info-build = "0.0.41"

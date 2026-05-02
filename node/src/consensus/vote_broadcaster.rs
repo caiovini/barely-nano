@@ -1,6 +1,6 @@
-use alloc::sync::{ Arc };
+use alloc::sync::Arc;
 use spin::{ Mutex };
-// // // // // // use std::{   ops::Deref   }; // TODO: fix this
+// // // // // // // use std::{    ops::Deref    }; // TODO: fix this
 
 use rsnano_core::{Vote, VoteSource};
 use rsnano_messages::{ConfirmAck, Message};
@@ -42,7 +42,7 @@ impl VoteBroadcaster {
 
     /// Broadcast vote to PRs and some non-PRs
     pub fn broadcast(&self, vote: Arc<Vote>) {
-        let ack = Message::ConfirmAck(ConfirmAck::new_with_own_vote(vote.deref().clone()));
+        let ack = Message::ConfirmAck(ConfirmAck::new_with_own_vote((*vote).clone()));
 
         let stat_type = if vote.is_final() {
             StatType::VoteGeneratorFinal
@@ -56,7 +56,6 @@ impl VoteBroadcaster {
         let count = self
             .message_flooder
             .lock()
-            .unwrap()
             .flood_prs_and_some_non_prs(&ack, TrafficType::Vote, 2.0);
 
         self.stats

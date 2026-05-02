@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use super::database_crawler::{AccountCrawlSource, DatabaseCrawler, PendingCrawlSource};
 use crate::bootstrap::state::OutdatedAccounts;
 use rsnano_core::{Account, Frontier};

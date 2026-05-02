@@ -1,4 +1,14 @@
-// // // // // // use std::{   collections::VecDeque, mem::size_of, thread::self, thread::JoinHandle, time::Duration, time::Instant   }; // TODO: fix this
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::collections::VecDeque;
+use alloc::string::ToString;
+use alloc::boxed::Box;
+use spin::{ Mutex, MutexGuard };
+use crate::utils::{Condvar, JoinHandle};
+use core::sync::atomic::{ AtomicBool, Ordering };
+use core::time::Duration;
+use core::mem::size_of;
 
 use rsnano_core::{
     utils::{ContainerInfo, UnixMillisTimestamp},
@@ -8,6 +18,7 @@ use rsnano_ledger::{AnySet, Ledger};
 use rsnano_messages::{ConfirmAck, Message};
 use rsnano_network::{Channel, ChannelId, TrafficType};
 use rsnano_nullable_clock::SteadyClock;
+use rsnano_nullable_clock::Timestamp as Instant;
 use rsnano_stats::{DetailType, Direction, Sample, StatType, Stats};
 
 use super::{LocalVoteHistory, VoteSpacing};
@@ -53,7 +64,7 @@ impl VoteGenerator {
             queues: Mutex::new(Queues {
                 requests: Default::default(),
                 candidates: Default::default(),
-                next_broadcast: Instant::now(),
+                next_broadcast: clock.now(),
             }),
             is_final,
             stopped: AtomicBool::new(false),
@@ -86,34 +97,34 @@ impl VoteGenerator {
 
     fn thread_name(is_final: bool) -> String {
         if is_final {
-            "Voting final".to_owned()
+            String::from("Voting final")
         } else {
-            "Voting".to_owned()
+            String::from("Voting")
         }
     }
 
     pub(crate) fn start(&self) {
-        let shared_state_clone = Arc::clone(&self.shared_state);
-        *self.thread.lock().unwrap() = Some(
-            thread::Builder::new()
-                .name(Self::thread_name(self.shared_state.is_final))
-                .spawn(move || shared_state_clone.run())
-                .unwrap(),
-        );
-        self.vote_generation_queue.start();
+        // let shared_state_clone = Arc.clone(&self.shared_state);
+        // *self.thread.lock() = Some(
+        //     std::/* /* thread::Builder::new()
+        //         .name(Self::thread_name(self.shared_state.is_final))
+        //         .spawn(move || shared_state_clone.run())
+        //         .unwrap(),
+        // );
+        // self.vote_generation_queue.start();
     }
 
     pub(crate) fn stop(&self) {
         self.vote_generation_queue.stop();
         {
-            let _guard = self.shared_state.queues.lock().unwrap();
+            let _guard = self.shared_state.queues.lock();
             self.shared_state.stopped.store(true, Ordering::SeqCst);
         }
         self.shared_state.condition.notify_all();
-        let thread = self.thread.lock().unwrap().take();
-        if let Some(thread) = thread {
-            thread.join().unwrap();
-        }
+        let _thread = self.thread.lock().take();
+        // if let Some(thread) = thread {
+        //     thread.join().unwrap(); */ */
+        // }
     }
 
     /// Queue items for vote generation, or broadcast votes already in cache
@@ -138,7 +149,7 @@ impl VoteGenerator {
         };
 
         let result = req_candidates.len();
-        let mut guard = self.shared_state.queues.lock().unwrap();
+        let mut guard = self.shared_state.queues.lock();
         let vote_req = VoteGeneratorRequest {
             candidates: req_candidates,
             channel: channel.clone(),
@@ -160,7 +171,7 @@ impl VoteGenerator {
         let candidates_count;
         let requests_count;
         {
-            let guard = self.shared_state.queues.lock().unwrap();
+            let guard = self.shared_state.queues.lock();
             candidates_count = guard.candidates.len();
             requests_count = guard.requests.len();
         }
@@ -183,7 +194,7 @@ impl VoteGenerator {
 
 impl Drop for VoteGenerator {
     fn drop(&mut self) {
-        debug_assert!(self.thread.lock().unwrap().is_none())
+        // debug_assert!(self.thread.lock().is_none())
     }
 }
 
@@ -204,15 +215,16 @@ struct SharedState {
 }
 
 impl SharedState {
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut queues = self.queues.lock().unwrap();
+        let mut queues = self.queues.lock();
         while !self.stopped.load(Ordering::SeqCst) {
             queues = self
                 .condition
                 .wait_timeout_while(queues, self.vote_generator_delay, |i| {
                     !self.stopped.load(Ordering::SeqCst)
                         && i.requests.is_empty()
-                        && !i.should_broadcast()
+                        && !i.should_broadcast(self.clock.now())
                 })
                 .unwrap()
                 .0;
@@ -221,24 +233,25 @@ impl SharedState {
                 return;
             }
 
-            if queues.should_broadcast() {
+            if queues.should_broadcast(self.clock.now()) {
                 queues = self.broadcast(queues);
-                queues.next_broadcast = Instant::now() + self.vote_generator_delay;
+                queues.next_broadcast = self.clock.now() + self.vote_generator_delay;
             }
 
             if let Some(request) = queues.requests.pop_front() {
                 drop(queues);
                 self.reply(request);
-                queues = self.queues.lock().unwrap();
+                queues = self.queues.lock();
             }
         }
     }
 
+    #[allow(dead_code)]
     fn broadcast<'a>(&'a self, mut queues: MutexGuard<'a, Queues>) -> MutexGuard<'a, Queues> {
         let mut hashes = Vec::with_capacity(VoteGenerator::MAX_HASHES);
         let mut roots = Vec::with_capacity(VoteGenerator::MAX_HASHES);
         {
-            let spacing = self.spacing.lock().unwrap();
+            let spacing = self.spacing.lock();
             while let Some((root, hash)) = queues.candidates.pop_front() {
                 if !roots.contains(&root) {
                     if spacing.votable(&root, &hash, self.clock.now()) {
@@ -272,12 +285,13 @@ impl SharedState {
                 );
                 self.vote_broadcaster.broadcast(generated_vote);
             });
-            queues = self.queues.lock().unwrap();
+            queues = self.queues.lock();
         }
 
         queues
     }
 
+    #[allow(dead_code)]
     fn vote<F>(&self, hashes: &Vec<BlockHash>, roots: &Vec<Root>, action: F)
     where
         F: Fn(Arc<Vote>),
@@ -305,7 +319,7 @@ impl SharedState {
 
         for vote in votes {
             {
-                let mut spacing = self.spacing.lock().unwrap();
+                let mut spacing = self.spacing.lock();
                 let now = self.clock.now();
                 for i in 0..hashes.len() {
                     self.history.add(&roots[i], &hashes[i], &vote);
@@ -316,13 +330,14 @@ impl SharedState {
         }
     }
 
+    #[allow(dead_code)]
     fn reply(&self, request: VoteGeneratorRequest) {
         let mut i = request.candidates.iter().peekable();
         while i.peek().is_some() && !self.stopped.load(Ordering::SeqCst) {
             let mut hashes = Vec::with_capacity(VoteGenerator::MAX_HASHES);
             let mut roots = Vec::with_capacity(VoteGenerator::MAX_HASHES);
             {
-                let spacing = self.spacing.lock().unwrap();
+                let spacing = self.spacing.lock();
                 while hashes.len() < VoteGenerator::MAX_HASHES {
                     let Some((root, hash)) = i.next() else {
                         break;
@@ -348,7 +363,7 @@ impl SharedState {
                 self.vote(&hashes, &roots, |vote| {
                     let confirm =
                         Message::ConfirmAck(ConfirmAck::new_with_own_vote((*vote).clone()));
-                    self.message_sender.lock().unwrap().try_send(
+                    self.message_sender.lock().try_send(
                         &request.channel,
                         &confirm,
                         TrafficType::Vote,
@@ -371,7 +386,7 @@ impl SharedState {
         // Submit verified candidates to the main processing thread
         if !verified.is_empty() {
             let should_notify = {
-                let mut queues = self.queues.lock().unwrap();
+                let mut queues = self.queues.lock();
                 queues.candidates.extend(verified);
                 queues.candidates.len() >= VoteGenerator::MAX_HASHES
             };
@@ -398,11 +413,11 @@ struct Queues {
 }
 
 impl Queues {
-    fn should_broadcast(&self) -> bool {
+    fn should_broadcast(&self, now: Instant) -> bool {
         if self.candidates.len() >= ConfirmAck::HASHES_MAX {
             return true;
         }
 
-        !self.candidates.is_empty() && Instant::now() >= self.next_broadcast
+        !self.candidates.is_empty() && now >= self.next_broadcast
     }
 }

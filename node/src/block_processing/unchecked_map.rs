@@ -1,7 +1,12 @@
-use alloc::sync::{ Arc };
 use alloc::collections::{ BTreeMap, VecDeque };
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use spin::{ Mutex };
-// // // // // // use std::{   cmp::Ordering, mem::size_of, ops::DerefMut, sync::Condvar, thread::JoinHandle   }; // TODO: fix this
+use crate::utils::{Condvar, JoinHandle};
+use core::cmp::Ordering;
+use core::mem::size_of;
+use core::ops::DerefMut;
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
@@ -42,34 +47,34 @@ impl UncheckedMap {
     }
 
     pub fn start(&self) {
-        debug_assert!(self.join_handle.lock().unwrap().is_none());
-        let thread_clone = Arc::clone(&self.thread);
-        *self.join_handle.lock().unwrap() = Some(
-            std::thread::Builder::new()
-                .name("Unchecked".to_string())
-                .spawn(move || {
-                    thread_clone.run();
-                })
-                .unwrap(),
-        );
+        // debug_assert!(self.join_handle.lock().is_none());
+        // let thread_clone = Arc::clone(&self.thread);
+        // *self.join_handle.lock() = Some(
+        //     /* std::/* /* /* thread::Builder::new()
+        //         .name("Unchecked".to_string())
+        //         .spawn(move || {
+        //             thread_clone.run();
+        //         })
+        //         .unwrap(),
+        // );
     }
 
     pub fn stop(&self) {
-        self.mutable.lock().unwrap().stopped = true;
+        self.mutable.lock().stopped = true;
         self.condition.notify_all();
-        let handle = self.join_handle.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.join().unwrap();
-        }
+        let _handle = self.join_handle.lock().take();
+        // if let Some(handle) = handle {
+        //     handle.join().unwrap(); */ */ */ */
+        // }
     }
 
     pub fn exists(&self, key: &UncheckedKey) -> bool {
-        let lock = self.mutable.lock().unwrap();
+        let lock = self.mutable.lock();
         lock.entries_container.exists(key)
     }
 
     pub fn put(&self, dependency: HashOrAccount, info: UncheckedInfo) {
-        let mut lock = self.mutable.lock().unwrap();
+        let mut lock = self.mutable.lock();
         let key = UncheckedKey::new(dependency.into(), info.block.hash());
         let inserted = lock.entries_container.insert(Entry::new(key, info));
         if lock.entries_container.len() > self.max_unchecked_blocks {
@@ -81,7 +86,7 @@ impl UncheckedMap {
     }
 
     pub fn get(&self, hash: &HashOrAccount) -> Vec<UncheckedInfo> {
-        let lock = self.mutable.lock().unwrap();
+        let lock = self.mutable.lock();
         let mut result = Vec::new();
         lock.entries_container.for_each_with_dependency(
             hash,
@@ -94,12 +99,12 @@ impl UncheckedMap {
     }
 
     pub fn clear(&self) {
-        let mut lock = self.mutable.lock().unwrap();
+        let mut lock = self.mutable.lock();
         lock.entries_container.clear();
     }
 
     pub fn trigger(&self, dependency: &HashOrAccount) {
-        let mut lock = self.mutable.lock().unwrap();
+        let mut lock = self.mutable.lock();
         lock.buffer.push_back(*dependency);
         drop(lock);
         self.stats.inc(StatType::Unchecked, DetailType::Trigger);
@@ -107,17 +112,17 @@ impl UncheckedMap {
     }
 
     pub fn remove(&self, key: &UncheckedKey) {
-        let mut lock = self.mutable.lock().unwrap();
+        let mut lock = self.mutable.lock();
         lock.entries_container.remove(key);
     }
 
     pub fn len(&self) -> usize {
-        let lock = self.mutable.lock().unwrap();
+        let lock = self.mutable.lock();
         lock.entries_container.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        let lock = self.mutable.lock().unwrap();
+        let lock = self.mutable.lock();
         lock.entries_container.is_empty()
     }
 
@@ -126,7 +131,7 @@ impl UncheckedMap {
     }
 
     pub fn buffer_count(&self) -> usize {
-        let lock = self.mutable.lock().unwrap();
+        let lock = self.mutable.lock();
         lock.buffer.len()
     }
 
@@ -139,7 +144,7 @@ impl UncheckedMap {
         action: impl FnMut(&UncheckedKey, &UncheckedInfo),
         predicate: impl FnMut() -> bool,
     ) {
-        let lock = self.mutable.lock().unwrap();
+        let lock = self.mutable.lock();
         lock.entries_container.for_each(action, predicate)
     }
 
@@ -149,13 +154,13 @@ impl UncheckedMap {
         action: impl FnMut(&UncheckedKey, &UncheckedInfo),
         predicate: impl FnMut() -> bool,
     ) {
-        let lock = self.mutable.lock().unwrap();
+        let lock = self.mutable.lock();
         lock.entries_container
             .for_each_with_dependency(dependency, action, predicate)
     }
 
     pub fn set_satisfied_observer(&self, callback: Box<dyn Fn(&UncheckedInfo) + Send>) {
-        self.mutable.lock().unwrap().satisfied_callback = Some(callback);
+        self.mutable.lock().satisfied_callback = Some(callback);
     }
 }
 
@@ -177,7 +182,7 @@ impl Default for UncheckedMap {
 
 impl Drop for UncheckedMap {
     fn drop(&mut self) {
-        debug_assert!(self.join_handle.lock().unwrap().is_none());
+        // debug_assert!(self.join_handle.lock().is_none());
         self.stop()
     }
 }
@@ -211,16 +216,17 @@ pub struct UncheckedMapThread {
 }
 
 impl UncheckedMapThread {
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut lock = self.mutable.lock().unwrap();
+        let mut lock = self.mutable.lock();
         while !lock.stopped {
             if !lock.buffer.is_empty() {
-                let mut back_buffer_lock = self.back_buffer.lock().unwrap();
+                let mut back_buffer_lock = self.back_buffer.lock();
                 core::mem::swap(&mut lock.buffer, back_buffer_lock.deref_mut());
                 lock.writing_back_buffer = true;
                 drop(lock);
                 self.process_queries(&back_buffer_lock);
-                lock = self.mutable.lock().unwrap();
+                lock = self.mutable.lock();
                 lock.writing_back_buffer = false;
                 back_buffer_lock.clear();
             } else {
@@ -242,7 +248,7 @@ impl UncheckedMapThread {
 
     pub fn query_impl(&self, hash: &HashOrAccount) {
         let mut delete_queue = Vec::new();
-        let mut lock = self.mutable.lock().unwrap();
+        let mut lock = self.mutable.lock();
         lock.entries_container.for_each_with_dependency(
             hash,
             |key, info| {

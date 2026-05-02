@@ -1,3 +1,7 @@
+use core::time::Duration;
+use hashbrown::HashMap;
+use core::cmp::max;
+use alloc::sync::Arc;
 
 
 use rsnano_core::{Block, BlockHash, Networks, PublicKey};
@@ -62,7 +66,7 @@ impl WinnerBlockBroadcaster {
 
         // Maximum amount of directed broadcasts to be sent per election
         let max_election_broadcasts = max(
-            self.message_flooder.network.read().unwrap().fanout(1.0) / 2,
+            self.message_flooder.network.read().fanout(1.0) / 2,
             1,
         );
 
@@ -76,7 +80,6 @@ impl WinnerBlockBroadcaster {
             .message_flooder
             .online_reps
             .lock()
-            .unwrap()
             .peered_principal_reps();
 
         let mut count = 0;

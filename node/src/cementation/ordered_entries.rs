@@ -1,6 +1,6 @@
+use alloc::collections::VecDeque;
 use rsnano_core::BlockHash;
 use hashbrown::{ HashMap };
-use alloc::collections::{ VecDeque };
 
 use super::CementingEntry;
 

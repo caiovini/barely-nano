@@ -1,3 +1,7 @@
+use hashbrown::HashMap;
+use core::net::SocketAddrV6;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use super::PeeredRep;
 use rsnano_core::{Account, PublicKey};
 use rsnano_network::{Channel, ChannelId};
@@ -35,6 +39,7 @@ impl PeeredContainer {
         channel: Arc<Channel>,
         now: Timestamp,
     ) -> InsertResult {
+        tracing::info!("[node] PeeredContainer::update_or_insert");
         let channel_id = channel.channel_id();
         if let Some(rep) = self.by_account.get_mut(&account) {
             // Update if representative channel was changed

@@ -1,3 +1,4 @@
+use alloc::string::String;
 use crate::config::NodeConfig;
 use serde::{Deserialize, Serialize};
 

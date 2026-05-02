@@ -9,7 +9,7 @@ use core::{
 use hashbrown::HashMap;
 use spin::{RwLock, RwLockReadGuard};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct RepWeights(HashMap<PublicKey, Amount>);
 
 impl RepWeights {
@@ -36,7 +36,7 @@ impl DerefMut for RepWeights {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BootstrapWeights {
     pub weights: RepWeights,
     pub max_blocks: u64,
@@ -111,7 +111,7 @@ impl RepWeightCache {
     }
 
     pub fn bootstrap_weights(&self) -> HashMap<PublicKey, Amount> {
-        self.bootstrap_weights.read().clone()
+        self.bootstrap_weights.read().0.clone()
     }
 
     pub fn block_count(&self) -> u64 {

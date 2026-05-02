@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use super::peer_score::PeerScore;
 use rsnano_network::ChannelId;
 use hashbrown::HashMap;

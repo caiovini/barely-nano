@@ -1,7 +1,7 @@
 use crate::{
     bandwidth_limiter::BandwidthLimiter, channel_stats::ChannelStats,
-    utils::map_address_to_subnetwork, Channel, ChannelDirection, ChannelId, ChannelMode,
-    DataReceiver, DataReceiverFactory, TrafficType,
+    utils::{into_core_addr, map_address_to_subnetwork}, Channel, ChannelDirection, ChannelId, ChannelMode,
+    DataReceiver, DataReceiverFactory, NetworkConfig, TrafficType,
 };
 use rsnano_core::NodeId;
 use rsnano_nullable_clock::{SteadyClock, Timestamp};
@@ -18,16 +18,18 @@ use hashbrown::HashMap;
 use rand::seq::SliceRandom;
 use num_traits::Float;
 use tracing::debug;
-
 pub struct Network {
     channels: HashMap<ChannelId, Arc<Channel>>,
     next_channel_id: usize,
-    stopped: AtomicBool,
+    stopped: core::sync::atomic::AtomicBool,
     clock: Arc<SteadyClock>,
     limiter: Arc<BandwidthLimiter>,
     stats: Arc<ChannelStats>,
     data_receiver_factory: Box<dyn DataReceiverFactory>,
     listening_port: u16,
+    loopback: Arc<Channel>,
+    pub protocol: rsnano_core::ProtocolInfo,
+    on_new_realtime_channel_callback: Option<Arc<dyn Fn(Arc<Channel>) + Send + Sync>>,
 }
 
 impl Network {
@@ -37,16 +39,37 @@ impl Network {
         stats: Arc<ChannelStats>,
         data_receiver_factory: Box<dyn DataReceiverFactory>,
     ) -> Self {
+        let loopback = Arc::new(Channel::new(
+            ChannelId::LOOPBACK,
+            into_core_addr(rsnano_core::utils::TEST_ENDPOINT_1),
+            into_core_addr(rsnano_core::utils::TEST_ENDPOINT_1),
+            ChannelDirection::Inbound,
+            u8::MAX,
+            clock.now(),
+            limiter.clone(),
+            stats.clone(),
+        ));
         Self {
             channels: HashMap::new(),
             next_channel_id: 1,
-            stopped: AtomicBool::new(false),
+            stopped: core::sync::atomic::AtomicBool::new(false),
             clock,
             limiter,
             stats,
             data_receiver_factory,
             listening_port: 0,
+            loopback,
+            protocol: rsnano_core::ProtocolInfo::default(),
+            on_new_realtime_channel_callback: None,
         }
+    }
+
+    pub fn loopback(&self) -> &Arc<Channel> {
+        &self.loopback
+    }
+
+    pub fn new_from_config(_config: NetworkConfig) -> Self {
+        Self::new_test_instance()
     }
 
     pub fn new_test_instance() -> Self {
@@ -68,6 +91,14 @@ impl Network {
 
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
+    }
+
+    pub fn available_channels(&self) -> Vec<Arc<Channel>> {
+        self.channels
+            .values()
+            .filter(|c| !c.is_closed() && c.mode() == ChannelMode::Realtime)
+            .cloned()
+            .collect()
     }
 
     pub fn add(
@@ -137,8 +168,8 @@ impl Network {
         // Placeholder
     }
 
-    pub fn connect_error(&self, _peer: SocketAddrV6, _e: anyhow::Error) {
-        // Placeholder
+    pub fn connect_error(&self, peer: SocketAddrV6, e: anyhow::Error) {
+        debug!("Connection to {} failed: {}", peer, e);
     }
 
     pub fn attempt_timeout(&self, _peer: SocketAddrV6) {
@@ -160,6 +191,22 @@ impl Network {
         self.channels.values().find(|c: &&Arc<Channel>| {
             c.mode() == ChannelMode::Realtime && c.is_alive() && c.peer_addr() == *endpoint
         }).cloned()
+    }
+
+    pub fn on_new_realtime_channel(&mut self, callback: Arc<dyn Fn(Arc<Channel>) + Send + Sync>) {
+        self.on_new_realtime_channel_callback = Some(callback);
+    }
+
+    pub fn add_channel(&mut self, channel: Arc<Channel>) {
+        self.channels.insert(channel.channel_id(), channel.clone());
+        if channel.mode() == crate::ChannelMode::Realtime {
+            if let Some(callback) = &self.on_new_realtime_channel_callback {
+                callback(channel);
+            }
+        }
+    }
+    pub fn set_data_receiver_factory(&mut self, factory: Box<dyn DataReceiverFactory>) {
+        self.data_receiver_factory = factory;
     }
 
     pub fn random_channels(&self, count: usize) -> Vec<Arc<Channel>> {
@@ -193,24 +240,120 @@ impl Network {
         removed
     }
 
-    pub fn fanout(&self, size: usize) -> usize {
-        let fanout = (size as f32).ln();
-        let scale = 2.0_f32;
+    pub fn fanout(&self, scale: f32) -> usize {
+        let fanout = (self.channels.len() as f32).ln();
         (scale * fanout).ceil() as usize
+    }
+
+    pub fn check_capacity(&self, _traffic_type: TrafficType, _scale: f32) -> bool {
+        true
+    }
+
+    pub fn idle_channels(&self, _min_idle_period: Duration, _now: Timestamp) -> Vec<Arc<Channel>> {
+        Vec::new()
+    }
+
+    pub fn sorted_channels(&self) -> Vec<Arc<Channel>> {
+        let mut result: Vec<_> = self.channels.values().cloned().collect();
+        // Just return them as is for now
+        result
+    }
+
+    pub fn set_peering_addr(&self, channel_id: ChannelId, peering_addr: SocketAddrV6) {
+        if let Some(channel) = self.channels.get(&channel_id) {
+            channel.set_peering_addr(peering_addr);
+        }
     }
 
     pub fn upgrade_to_realtime_connection(
         &self,
-        _channel_id: ChannelId,
-        _node_id: NodeId,
+        channel_id: ChannelId,
+        node_id: NodeId,
     ) -> Option<(Arc<Channel>, Vec<Arc<dyn Fn(Arc<Channel>) + Send + Sync>>)> {
-        // TODO: implement
+        if let Some(channel) = self.channels.get(&channel_id) {
+            channel.set_mode(ChannelMode::Realtime);
+            channel.set_node_id(node_id);
+            let observers = if let Some(callback) = &self.on_new_realtime_channel_callback {
+                alloc::vec![callback.clone()]
+            } else {
+                alloc::vec![]
+            };
+            return Some((channel.clone(), observers));
+        }
         None
     }
 
     pub fn perma_ban(&mut self, _addr: SocketAddrV6) {
         // TODO: implement
     }
+
+    pub fn count_by_mode(&self, mode: ChannelMode) -> usize {
+        self.channels
+            .values()
+            .filter(|c| c.mode() == mode)
+            .count()
+    }
+
+    pub fn shuffled_channels(&self, _type: TrafficType) -> Vec<Arc<Channel>> {
+        let mut result: Vec<Arc<Channel>> = self.channels.values().cloned().collect();
+        let mut rng = NullableRng::rng();
+        result.shuffle(&mut rng);
+        result
+    }
+
+    pub fn protocol_info(&self) -> rsnano_core::ProtocolInfo {
+        self.protocol.clone()
+    }
+
+    pub fn random_fill_realtime(&self, peers: &mut [SocketAddrV6; 8]) {
+        let mut i = 0;
+        for channel in self.channels.values() {
+            if channel.mode() == ChannelMode::Realtime {
+                peers[i] = channel.peer_addr();
+                i += 1;
+                if i >= 8 {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn find_realtime_channel_by_peering_addr(
+        &self,
+        peering_addr: &SocketAddrV6,
+    ) -> Option<Arc<Channel>> {
+        self.channels.values().find(|c| {
+            c.mode() == ChannelMode::Realtime && c.peering_addr() == Some(*peering_addr)
+        }).cloned()
+    }
+
+    pub fn bandwidth_limit(&self) -> usize {
+        self.limiter.limit()
+    }
+
+    pub fn channels_info(&self) -> ChannelsInfo {
+        let mut info = ChannelsInfo::default();
+        for channel in self.channels.values() {
+            info.total += 1;
+            if channel.mode() == ChannelMode::Realtime {
+                info.realtime += 1;
+            }
+            if channel.direction() == ChannelDirection::Inbound {
+                info.inbound += 1;
+            } else {
+                info.outbound += 1;
+            }
+        }
+        info
+    }
+}
+
+#[derive(Default)]
+pub struct ChannelsInfo {
+    pub total: usize,
+    pub realtime: usize,
+    pub inbound: usize,
+    pub outbound: usize,
 }
 
 #[derive(Debug)]

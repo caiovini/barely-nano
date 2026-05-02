@@ -1,11 +1,14 @@
+use core::time::Duration;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
 use super::MessageFlooder;
 use crate::utils::ThreadPool;
 use rsnano_core::Block;
 use rsnano_messages::{Message, Publish};
 use rsnano_network::TrafficType;
-use alloc::sync::{ Arc };
 use spin::{ Mutex };
-// // // // // // use std::{   collections::VecDeque, time::Duration   }; // TODO: fix this
+// // // // // // // use std::{    collections::VecDeque, time::Duration    }; // TODO: fix this
 
 pub(crate) struct BlockFlooder {
     pub message_flooder: Arc<Mutex<MessageFlooder>>,
@@ -40,7 +43,6 @@ fn flood(
         let publish = Message::Publish(Publish::new_forward(block));
         message_flooder
             .lock()
-            .unwrap()
             .flood(&publish, TrafficType::BlockBroadcastRpc, 1.0);
         if blocks.is_empty() {
             callback()

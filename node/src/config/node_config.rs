@@ -10,7 +10,7 @@ use rsnano_core::{
 };
 use rsnano_network::NetworkConfig;
 use rsnano_nullable_http_client::Url;
-// use rsnano_store_lmdb::LmdbConfig;
+// // use rsnano_store_lmdb::LmdbConfig;
 use rsnano_work::OpenClConfig;
 
 use super::{websocket_config::WebsocketConfig, NetworkParams, Networks, DEV_NETWORK_PARAMS};
@@ -125,6 +125,7 @@ static DEFAULT_TEST_PEER_NETWORK: Lazy<String> =
 
 impl NodeConfig {
     pub fn default_for(network: Networks, parallelism: usize) -> Self {
+        // kernel_common::uart::print(b"[node] NodeConfig::default_for starting\n");
         let net_params = NetworkParams::new(network);
         Self::new(
             Some(net_params.network.default_node_port),
@@ -379,8 +380,8 @@ impl TcpConfig {
 impl Default for TcpConfig {
     fn default() -> Self {
         Self {
-            max_inbound_connections: 2048,
-            max_outbound_connections: 2048,
+            max_inbound_connections: 128,
+            max_outbound_connections: 128,
             max_attempts: 60,
             max_attempts_per_ip: 1,
             connect_timeout: Duration::from_secs(60),
@@ -389,8 +390,16 @@ impl Default for TcpConfig {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum SyncStrategy {
+    Always,
+    NosyncSafe,
+    NosyncUnsafe,
+    NosyncUnsafeLargeMemory,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct LmdbConfig {
-    pub sync: u8,
+    pub sync: SyncStrategy,
     pub max_databases: u32,
     pub map_size: usize,
 }
@@ -398,9 +407,21 @@ pub struct LmdbConfig {
 impl Default for LmdbConfig {
     fn default() -> Self {
         Self {
-            sync: 0,
+            sync: SyncStrategy::Always,
             max_databases: 128,
             map_size: 1024 * 1024 * 1024,
         }
+    }
+}
+
+impl LmdbConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self::new(None, &DEV_NETWORK_PARAMS, 1)
     }
 }

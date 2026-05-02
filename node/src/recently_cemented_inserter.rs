@@ -13,6 +13,6 @@ pub(crate) struct RecentlyCementedInserter {
 
 impl RecentlyCementedInserter {
     pub fn insert(&self, status: ConfirmedElection) {
-        self.recently_cemented.lock().unwrap().push_back(status);
+        self.recently_cemented.lock().push_back(status);
     }
 }

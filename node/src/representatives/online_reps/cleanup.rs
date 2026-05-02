@@ -16,7 +16,7 @@ impl OnlineRepsCleanup {
 
 impl DeadChannelCleanupStep for OnlineRepsCleanup {
     fn clean_up_dead_channels(&self, dead_channel_ids: &[ChannelId]) {
-        let mut online_reps = self.0.lock().unwrap();
+        let mut online_reps = self.0.lock();
         for channel_id in dead_channel_ids {
             let removed_reps = online_reps.remove_peer(*channel_id);
             for rep in removed_reps {

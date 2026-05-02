@@ -4,14 +4,18 @@ use rsnano_core::{
 };
 use kernel_common::storage::DB;
 use kernel_common::storage::btree::KEY_SIZE;
+use alloc::sync::Arc;
+use crate::LedgerCache;
 
-pub struct BtreeAccountStore {}
+pub struct BtreeAccountStore {
+    cache: Arc<LedgerCache>,
+}
 
 impl BtreeAccountStore {
     pub const TABLE_ID: u8 = 1;
 
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(cache: Arc<LedgerCache>) -> Self {
+        Self { cache }
     }
 
     fn make_key(&self, account: &Account) -> [u8; KEY_SIZE] {
@@ -30,6 +34,7 @@ impl BtreeAccountStore {
         let mut lock = DB.lock();
         if let Some(db) = lock.as_mut() {
             db.insert(key, value);
+            self.cache.account_count.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         }
     }
 

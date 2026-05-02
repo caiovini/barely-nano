@@ -27,3 +27,15 @@ pub fn mtime() -> u64 {
 pub fn set_mtimecmp(val: u64) {
     unsafe { (MTIMECMP_ADDR as *mut u64).write_volatile(val) };
 }
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static TIME_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_time_offset_ns(offset: u64) {
+    TIME_OFFSET_NS.store(offset, Ordering::SeqCst);
+}
+
+pub fn get_time_offset_ns() -> u64 {
+    TIME_OFFSET_NS.load(Ordering::SeqCst)
+}

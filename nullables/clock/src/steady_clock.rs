@@ -128,6 +128,10 @@ impl Timestamp {
     }
 
     pub const DEFAULT_STUB_NOW: Timestamp = Timestamp(DEFAULT_STUB_DURATION);
+
+    pub fn now() -> Self {
+        SteadyClock::default().now()
+    }
 }
 
 impl Add<Duration> for Timestamp {

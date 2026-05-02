@@ -1,3 +1,4 @@
+use alloc::string::String;
 use super::{NodeRpcToml, NodeToml, OpenclToml};
 use crate::config::DaemonConfig;
 use serde::{Deserialize, Serialize};
@@ -72,7 +73,6 @@ impl From<&DaemonConfig> for OpenclToml {
 mod tests {
     use crate::config::{DaemonConfig, DaemonToml};
     use rsnano_core::Networks;
-    use alloc::string::String as PathBuf;
 
     static CUSTOM_TOML_STR: &str = r#"[node]
         allow_local_peers = false

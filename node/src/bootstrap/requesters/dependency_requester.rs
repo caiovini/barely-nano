@@ -66,13 +66,12 @@ mod tests {
     use crate::bootstrap::progress;
     use rsnano_core::{Account, BlockHash};
     use rsnano_network::{token_bucket::TokenBucket, Network};
-    use rsnano_nullable_clock::Timestamp;
     use spin::{ Mutex, RwLock };
 
     #[test]
     fn happy_path() {
         let network = test_network();
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
         let mut requester = create_test_requester(network);
         let mut state = BootstrapState::default();
 
@@ -103,7 +102,7 @@ mod tests {
         assert!(matches!(result, PollResult::Wait));
         assert!(matches!(requester.state, DependencyState::WaitChannel));
 
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
         let result = requester.poll(&mut state, now);
         assert!(matches!(result, PollResult::Progress));
         assert!(matches!(requester.state, DependencyState::WaitBlocking(_)));
@@ -112,7 +111,7 @@ mod tests {
     #[test]
     fn wait_dependency() {
         let network = test_network();
-        network.write().unwrap().add_test_channel();
+        network.write().add_test_channel();
         let mut requester = create_test_requester(network);
         let mut state = BootstrapState::default();
         let now = Timestamp::new_test_instance();

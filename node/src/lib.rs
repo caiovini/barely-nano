@@ -6,8 +6,10 @@ extern crate num_derive;
 
 #[macro_use]
 extern crate anyhow;
+#[macro_use]
 extern crate alloc;
 extern crate core;
+extern crate kernel_common;
 
 mod aec_event_processor;
 pub mod block_processing;

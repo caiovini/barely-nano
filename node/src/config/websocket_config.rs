@@ -1,5 +1,6 @@
+use alloc::string::String;
 use crate::config::NetworkConstants;
-// use std::net::Ipv6Addr;
+// // // // // // // // use std::net::Ipv6Addr;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WebsocketConfig {
@@ -13,7 +14,7 @@ impl WebsocketConfig {
         Self {
             enabled: false,
             port: network.default_websocket_port,
-            address: Ipv6Addr::LOCALHOST.to_string(),
+            address: alloc::string::ToString::to_string("::1"),
         }
     }
 }

@@ -9,22 +9,21 @@ pub struct TcpSocket {
 
 impl TcpSocket {
     pub fn new_v6() -> anyhow::Result<Self> {
+        let handle = {
+            if let Some(ref mut ctx) = *NET.lock() {
+                ctx.create_tcp_socket()
+            } else {
+                return Err(anyhow::anyhow!("No network context"));
+            }
+        };
         Ok(Self {
-            strategy: Strategy::Real,
+            strategy: Strategy::Real(handle),
         })
     }
 
     pub async fn connect(self, addr: SocketAddr) -> anyhow::Result<TcpStream> {
         match self.strategy {
-            Strategy::Real => {
-                let handle = {
-                    if let Some(ref ctx) = *NET.lock() {
-                        ctx.tcp_handle
-                    } else {
-                        return Err(anyhow::anyhow!("No network context"));
-                    }
-                };
-
+            Strategy::Real(handle) => {
                 let endpoint = match addr {
                     SocketAddr::V4(v4) => {
                         smoltcp::wire::IpEndpoint::new(
@@ -38,12 +37,12 @@ impl TcpSocket {
                         )
                     }
                     SocketAddr::V6(v6) => {
-                        smoltcp::wire::IpEndpoint::new(
-                            smoltcp::wire::IpAddress::Ipv6(smoltcp::wire::Ipv6Address::from_octets(
-                                v6.ip().octets()
-                            )),
-                            v6.port()
-                        )
+                        let ipv6 = smoltcp::wire::Ipv6Address::from_octets(v6.ip().octets());
+                        if let Some(v4) = ipv6.to_ipv4() {
+                            smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(v4), v6.port())
+                        } else {
+                            smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv6(ipv6), v6.port())
+                        }
                     }
                 };
 
@@ -56,5 +55,5 @@ impl TcpSocket {
 }
 
 enum Strategy {
-    Real,
+    Real(smoltcp::iface::SocketHandle),
 }

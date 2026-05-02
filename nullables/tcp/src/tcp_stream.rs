@@ -99,14 +99,14 @@ impl TcpStream {
                     let endpoint = socket.local_endpoint().ok_or_else(|| anyhow::anyhow!("No local endpoint"))?;
                     match endpoint.addr {
                         smoltcp::wire::IpAddress::Ipv4(ipv4) => {
-                            let octets: [u8; 4] = unsafe { core::mem::transmute(ipv4) };
+                            let octets = ipv4.octets();
                             Ok(SocketAddr::V4(SocketAddrV4::new(
                                 Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]),
                                 endpoint.port
                             )))
                         }
                         smoltcp::wire::IpAddress::Ipv6(ipv6) => {
-                            let octets: [u8; 16] = unsafe { core::mem::transmute(ipv6) };
+                            let octets = ipv6.octets();
                             Ok(SocketAddr::V6(SocketAddrV6::new(
                                 Ipv6Addr::from(octets),
                                 endpoint.port,
@@ -131,14 +131,14 @@ impl TcpStream {
                     let endpoint = socket.remote_endpoint().ok_or_else(|| anyhow::anyhow!("No remote endpoint"))?;
                     match endpoint.addr {
                         smoltcp::wire::IpAddress::Ipv4(ipv4) => {
-                            let octets: [u8; 4] = unsafe { core::mem::transmute(ipv4) };
+                            let octets = ipv4.octets();
                             Ok(SocketAddr::V4(SocketAddrV4::new(
                                 Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]),
                                 endpoint.port
                             )))
                         }
                         smoltcp::wire::IpAddress::Ipv6(ipv6) => {
-                            let octets: [u8; 16] = unsafe { core::mem::transmute(ipv6) };
+                            let octets = ipv6.octets();
                             Ok(SocketAddr::V6(SocketAddrV6::new(
                                 Ipv6Addr::from(octets),
                                 endpoint.port,

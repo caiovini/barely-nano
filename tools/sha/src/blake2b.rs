@@ -227,9 +227,6 @@ impl Blake2bHasher {
             if self.buf_len == 128 && !data.is_empty() {
                 self.t += 128;
                 let block = self.buf;
-                #[cfg(target_arch = "riscv64")]
-                compress_vector(&mut self.h, &block, self.t, false);
-                #[cfg(not(target_arch = "riscv64"))]
                 compress(&mut self.h, &block, self.t, false);
                 self.buf_len = 0;
             }
@@ -240,9 +237,6 @@ impl Blake2bHasher {
         self.t += self.buf_len as u128;
         self.buf[self.buf_len..].fill(0);
         let block = self.buf;
-        #[cfg(target_arch = "riscv64")]
-        compress_vector(&mut self.h, &block, self.t, true);
-        #[cfg(not(target_arch = "riscv64"))]
         compress(&mut self.h, &block, self.t, true);
 
         let mut out = [0u8; 64];

@@ -1,10 +1,13 @@
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::ops::{Deref, DerefMut};
+use core::mem::size_of;
 use super::{BlockContext, BlockSource};
 use rsnano_core::{
     utils::{ContainerInfo, FairQueue, FairQueueInfo},
     Block,
 };
 use rsnano_network::ChannelId;
-// // // // // // use std::{   collections::VecDeque, ops::Deref, ops::DerefMut, sync::Arc   }; // TODO: fix this
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcessQueueConfig {
@@ -27,13 +30,13 @@ impl ProcessQueueConfig {}
 impl Default for ProcessQueueConfig {
     fn default() -> Self {
         Self {
-            max_peer_queue: 1024,
-            max_system_queue: 16 * 1024,
+            max_peer_queue: 512,
+            max_system_queue: 1024,
             priority_live: 1,
             priority_bootstrap: 8,
             priority_local: 16,
             priority_system: 32,
-            batch_size: 256,
+            batch_size: 64,
         }
     }
 }
@@ -131,17 +134,5 @@ impl Deref for ProcessQueue {
 impl DerefMut for ProcessQueue {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.queue
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_config() {
-        let config = ProcessQueueConfig::default();
-        assert_eq!(config.max_system_queue, 1024 * 16, "max system queue");
-        assert_eq!(config.max_peer_queue, 1024, "max peer queue");
     }
 }

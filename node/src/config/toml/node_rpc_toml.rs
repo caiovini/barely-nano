@@ -1,11 +1,11 @@
+use alloc::string::String;
 use crate::config::{NodeRpcConfig, RpcChildProcessConfig};
 use serde::{Deserialize, Serialize};
-use alloc::string::String as PathBuf;
 
 #[derive(Deserialize, Serialize)]
 pub struct RpcChildProcessToml {
     pub enable: Option<bool>,
-    pub rpc_path: Option<PathBuf>,
+    pub rpc_path: Option<String>,
 }
 
 impl RpcChildProcessToml {

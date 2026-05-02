@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use spin::Mutex;
 
 use rsnano_core::Frontier;
@@ -30,7 +31,7 @@ impl<'a> FrontierWorker<'a> {
     pub fn process(&mut self, frontiers: Vec<Frontier>) {
         let outdated = self.checker.get_outdated_accounts(&frontiers);
         self.update_stats(&frontiers, &outdated);
-        self.state.lock().unwrap().frontiers_processed(&outdated);
+        self.state.lock().frontiers_processed(&outdated);
     }
 
     fn update_stats(&self, frontiers: &[Frontier], outdated: &OutdatedAccounts) {
@@ -74,7 +75,7 @@ mod tests {
 
         worker.process(Vec::new());
 
-        assert_eq!(state.lock().unwrap().candidate_accounts.priority_len(), 0);
+        assert_eq!(state.lock().candidate_accounts.priority_len(), 0);
     }
 
     #[test]
@@ -96,7 +97,7 @@ mod tests {
 
         worker.process(vec![Frontier::new(account, BlockHash::from(3))]);
 
-        let guard = state.lock().unwrap();
+        let guard = state.lock();
         assert_eq!(guard.candidate_accounts.priority_len(), 1);
         assert_eq!(
             guard.candidate_accounts.priority(&account),

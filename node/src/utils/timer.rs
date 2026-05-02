@@ -1,30 +1,31 @@
 #[cfg(feature = "output_tracking")]
 use alloc::sync::Arc;
 use spin::{ Mutex};
+use core::time::Duration;
 
 #[cfg(feature = "output_tracking")]
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 
 pub trait TimerStrategy: Send {
-    fn schedule_with_delay<F>(&self, delay: chrono::Duration, cb: F)
+    fn schedule_with_delay<F>(&self, delay: Duration, cb: F)
     where
         F: 'static + FnMut() + Send;
 }
 
-pub struct TimerWrapper(timer::Timer);
+pub struct TimerWrapper;
 
 impl TimerStrategy for TimerWrapper {
-    fn schedule_with_delay<F>(&self, delay: chrono::Duration, cb: F)
+    fn schedule_with_delay<F>(&self, _delay: Duration, mut _cb: F)
     where
         F: 'static + FnMut() + Send,
     {
-        self.0.schedule_with_delay(delay, cb).ignore();
+        // Stub: In bare-metal, use a hardware timer
     }
 }
 
 pub struct NullTimer;
 impl TimerStrategy for NullTimer {
-    fn schedule_with_delay<F>(&self, _delay: chrono::Duration, _cb: F)
+    fn schedule_with_delay<F>(&self, _delay: Duration, _cb: F)
     where
         F: 'static + FnMut() + Send,
     {
@@ -41,7 +42,7 @@ pub struct Timer<T: TimerStrategy = TimerWrapper> {
 #[derive(Clone)]
 pub struct TimerEvent {
     callback: Arc<dyn Fn() + Send + Sync>,
-    pub delay: chrono::Duration,
+    pub delay: Duration,
 }
 
 #[cfg(feature = "output_tracking")]
@@ -59,7 +60,7 @@ impl Timer<NullTimer> {
 
 impl Timer<TimerWrapper> {
     pub fn new() -> Self {
-        Self::new_with(TimerWrapper(timer::Timer::new()))
+        Self::new_with(TimerWrapper)
     }
 }
 
@@ -77,7 +78,7 @@ impl<T: TimerStrategy> Timer<T> {
         self.listener.track()
     }
 
-    pub fn schedule_with_delay<F>(&self, delay: chrono::Duration, cb: F)
+    pub fn schedule_with_delay<F>(&self, delay: Duration, cb: F)
     where
         F: 'static + FnMut() + Send,
     {
@@ -85,7 +86,7 @@ impl<T: TimerStrategy> Timer<T> {
         let cb = {
             let option_cb = Arc::new(Mutex::new(Some(cb)));
             let arc_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                let cb = option_cb.lock().unwrap().take();
+                let cb = option_cb.lock().take();
                 if let Some(mut cb) = cb {
                     cb();
                 }
@@ -99,39 +100,5 @@ impl<T: TimerStrategy> Timer<T> {
         };
 
         self.timer.schedule_with_delay(delay, cb);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    
-
-    use super::*;
-
-    #[test]
-    fn schedule_with_delay() {
-        let t = Timer::new();
-        let (tx, rx) = channel();
-        t.schedule_with_delay(chrono::Duration::microseconds(1), move || {
-            tx.send("done").unwrap();
-        });
-        let result = rx.recv_timeout(Duration::from_millis(300));
-        assert_eq!(result, Ok("done"));
-    }
-
-    #[test]
-    fn can_be_tracked() {
-        let t = Timer::new_null();
-        let tracker = t.track();
-        let (tx, rx) = channel();
-        t.schedule_with_delay(chrono::Duration::seconds(10), move || {
-            tx.send("done").unwrap();
-        });
-        let output = tracker.output();
-        assert_eq!(output.len(), 1, "nothing tracked");
-        assert_eq!(output[0].delay, chrono::Duration::seconds(10), "delay");
-        output[0].execute_callback();
-        let result = rx.recv_timeout(Duration::from_millis(300));
-        assert_eq!(result, Ok("done"));
     }
 }

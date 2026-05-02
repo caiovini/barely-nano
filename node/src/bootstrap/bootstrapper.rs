@@ -1,6 +1,8 @@
-use alloc::sync::{ Arc };
-use spin::{ Mutex, RwLock };
-// // // // // // use std::{   sync::Condvar, sync::MutexGuard, thread::JoinHandle, time::Duration   }; // TODO: fix this
+use alloc::sync::Arc;
+use alloc::boxed::Box;
+use spin::{ Mutex, RwLock, MutexGuard };
+use crate::utils::{JoinHandle, Condvar};
+use core::time::Duration;
 
 use tracing::warn;
 
@@ -173,7 +175,6 @@ impl Bootstrapper {
         let inserted = self
             .state
             .lock()
-            .unwrap()
             .candidate_accounts
             .priority_set_initial(genesis_account);
 
@@ -186,34 +187,33 @@ impl Bootstrapper {
 
     pub fn stop(&self) {
         {
-            let mut guard = self.state.lock().unwrap();
+            let mut guard = self.state.lock();
             guard.stopped = true;
         }
         self.state_changed.notify_all();
 
         self.requesters.stop();
 
-        let threads = self.threads.lock().unwrap().take();
+        let threads = self.threads.lock().take();
         if let Some(threads) = threads {
             threads.cleanup.join().unwrap();
         }
     }
 
     pub fn state(&self) -> MutexGuard<BootstrapState> {
-        self.state.lock().unwrap()
+        self.state.lock()
     }
 
     pub fn prioritized(&self, account: &Account) -> bool {
         self.state
             .lock()
-            .unwrap()
             .candidate_accounts
             .prioritized(account)
     }
 
     fn run_timeouts(&self) {
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         while !state.stopped {
             cleanup.cleanup(&mut state);
             self.state_changed.notify_all();
@@ -221,14 +221,14 @@ impl Bootstrapper {
             state = self
                 .state_changed
                 .wait_timeout_while(state, Duration::from_secs(1), |s| !s.stopped)
-                .unwrap()
-                .0;
+                .unwrap().0;
         }
     }
 
     /// Process `asc_pull_ack` message coming from network
     pub fn process(&self, message: AscPullAck, channel_id: ChannelId) {
         let now = self.clock.now();
+        tracing::info!("Bootstrapper: processing AscPullAck from channel {}", channel_id);
         let result = self.response_handler.process(message, channel_id, now);
         match result {
             Ok(info) => {
@@ -271,7 +271,7 @@ impl Bootstrapper {
     }
 
     pub fn unblock_batch(&self, accounts: impl IntoIterator<Item = Account>) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
         for account in accounts {
             guard.candidate_accounts.unblock(account, None);
         }
@@ -281,13 +281,13 @@ impl Bootstrapper {
 impl Drop for Bootstrapper {
     fn drop(&mut self) {
         // All threads must be stopped before destruction
-        debug_assert!(self.threads.lock().unwrap().is_none());
+        debug_assert!(self.threads.lock().is_none());
     }
 }
 
 impl ContainerInfoProvider for Bootstrapper {
     fn container_info(&self) -> ContainerInfo {
-        self.state.lock().unwrap().container_info()
+        self.state.lock().container_info()
     }
 }
 
@@ -303,7 +303,7 @@ pub trait BootstrapExt {
 
 impl BootstrapExt for Arc<Bootstrapper> {
     fn start(&self) {
-        debug_assert!(self.threads.lock().unwrap().is_none());
+        debug_assert!(self.threads.lock().is_none());
 
         if !self.config.enable {
             warn!("Ascending bootstrap is disabled");
@@ -312,13 +312,13 @@ impl BootstrapExt for Arc<Bootstrapper> {
 
         self.requesters.start();
 
-        let self_l = Arc::clone(self);
-        let timeout = std::thread::Builder::new()
-            .name("Bootstrap clean".to_string())
-            .spawn(Box::new(move || self_l.run_timeouts()))
-            .unwrap();
+        // let self_l = Arc::clone(self);
+        // let timeout = std::thread::Builder::new()
+        //     .name("Bootstrap clean".to_string())
+        //     .spawn(Box::new(move || self_l.run_timeouts()))
+        //     .unwrap();
 
-        *self.threads.lock().unwrap() = Some(Threads { cleanup: timeout });
+        // *self.threads.lock() = Some(Threads { cleanup: timeout });
     }
 }
 
@@ -329,7 +329,6 @@ impl DeadChannelCleanupStep for BootstrapperCleanup {
         self.0
             .state
             .lock()
-            .unwrap()
             .scoring
             .clean_up_dead_channels(dead_channel_ids);
     }

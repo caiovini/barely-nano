@@ -1,6 +1,14 @@
-use alloc::collections::{ VecDeque };
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::boxed::Box;
 use hashbrown::{ HashMap };
-// // // // // // use std::{   cmp::min, mem::size_of, thread::JoinHandle, time::Instant   }; // TODO: fix this
+use spin::{ Mutex, RwLock };
+use core::sync::atomic::{ AtomicBool, Ordering };
+use core::time::Duration;
+use rsnano_nullable_clock::Timestamp as Instant;
+use crate::utils::{Condvar, JoinHandle};
+use core::mem::size_of;
+use core::cmp::min;
 
 use rsnano_core::{utils::ContainerInfo, Account, AccountInfo, ConfirmationHeightInfo};
 use rsnano_ledger::{AnySet, ConfirmedSet, Ledger};
@@ -15,13 +23,8 @@ use rsnano_nullable_clock::SteadyClock;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OptimisticSchedulerConfig {
-    /// Minimum difference between confirmation frontier and account frontier to become a candidate for optimistic confirmation
     pub gap_threshold: u64,
-
-    /// Maximum number of candidates stored in memory
     pub max_size: usize,
-
-    /// Limit of optimistic elections as percentage of `active_elections_size`
     pub optimistic_limit_percentage: usize,
 }
 
@@ -67,7 +70,7 @@ impl OptimisticScheduler {
         clock: Arc<SteadyClock>,
     ) -> Self {
         let max_elections =
-            active_elections.read().unwrap().max_len() * config.optimistic_limit_percentage / 100;
+            active_elections.read().max_len() * config.optimistic_limit_percentage / 100;
 
         Self {
             thread: Mutex::new(None),
@@ -88,10 +91,10 @@ impl OptimisticScheduler {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.notify();
-        let handle = self.thread.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.join().unwrap();
-        }
+        let _handle = self.thread.lock().take();
+        // if let Some(handle) = handle {
+        //     handle.join().unwrap();
+        // }
     }
 
     /// Notify about changes in AEC vacancy
@@ -125,7 +128,7 @@ impl OptimisticScheduler {
 
         if self.activate_predicate(account_info, conf_info) {
             {
-                let mut candidates = self.candidates.lock().unwrap();
+                let mut candidates = self.candidates.lock();
                 // Prevent duplicate candidate accounts
                 if candidates.contains(&account) {
                     return false; // Not activated
@@ -137,7 +140,7 @@ impl OptimisticScheduler {
 
                 self.stats
                     .inc(StatType::OptimisticScheduler, DetailType::Activated);
-                candidates.insert(*account, Instant::now());
+                candidates.insert(*account, self.clock.now());
             }
             true // Activated
         } else {
@@ -146,7 +149,7 @@ impl OptimisticScheduler {
     }
 
     pub fn container_info(&self) -> ContainerInfo {
-        let guard = self.candidates.lock().unwrap();
+        let guard = self.candidates.lock();
         [(
             "candidates",
             guard.len(),
@@ -156,7 +159,7 @@ impl OptimisticScheduler {
     }
 
     fn predicate(&self, candidates: &OrderedCandidates) -> bool {
-        let active = self.active_elections.read().unwrap();
+        let active = self.active_elections.read();
         let vacancy = self.max_elections as i64
             - active.count_by_behavior(ElectionBehavior::Optimistic) as i64;
         let vacancy = min(vacancy, active.vacancy());
@@ -165,14 +168,15 @@ impl OptimisticScheduler {
             return false;
         }
         if let Some((_account, time)) = candidates.front() {
-            time.elapsed() >= self.network_constants.optimistic_activation_delay
+            time.elapsed(self.clock.now()) >= self.network_constants.optimistic_activation_delay
         } else {
             false
         }
     }
 
+    #[allow(dead_code)]
     fn run(&self) {
-        let mut guard = self.candidates.lock().unwrap();
+        let mut guard = self.candidates.lock();
         while !self.stopped.load(Ordering::SeqCst) {
             self.stats
                 .inc(StatType::OptimisticScheduler, DetailType::Loop);
@@ -184,7 +188,7 @@ impl OptimisticScheduler {
                     let (account, time) = guard.pop_front().unwrap();
                     drop(guard);
                     self.run_one(&any, account, time);
-                    guard = self.candidates.lock().unwrap();
+                    guard = self.candidates.lock();
                 }
             }
 
@@ -216,7 +220,6 @@ impl OptimisticScheduler {
                 let inserted = self
                     .active_elections
                     .write()
-                    .unwrap()
                     .insert(AecInsertRequest::new_optimistic(block, priority), now)
                     .is_ok();
 
@@ -235,7 +238,7 @@ impl OptimisticScheduler {
 impl Drop for OptimisticScheduler {
     fn drop(&mut self) {
         // Thread must be stopped before destruction
-        debug_assert!(self.thread.lock().unwrap().is_none())
+        // debug_assert!(self.thread.lock().is_none())
     }
 }
 
@@ -245,17 +248,17 @@ pub trait OptimisticSchedulerExt {
 
 impl OptimisticSchedulerExt for Arc<OptimisticScheduler> {
     fn start(&self) {
-        debug_assert!(self.thread.lock().unwrap().is_none());
-        self.stopped.store(false, Ordering::SeqCst);
-        let self_l = Arc::clone(self);
-        *self.thread.lock().unwrap() = Some(
-            std::thread::Builder::new()
-                .name("Sched Opt".to_string())
-                .spawn(Box::new(move || {
-                    self_l.run();
-                }))
-                .unwrap(),
-        );
+        // debug_assert!(self.thread.lock().is_none());
+        // self.stopped.store(false, Ordering::SeqCst);
+        // let self_l = Arc::clone(self);
+        // *self.thread.lock() = Some(
+        //     std::/* /* /* thread::Builder::new()
+        //         .name("Sched Opt".to_string())
+        //         .spawn(Box::new(move || {
+        //             self_l.run();
+        //         }))
+        //         .unwrap(),
+        // );
     }
 }
 
@@ -267,7 +270,7 @@ struct OrderedCandidates {
 
 impl OrderedCandidates {
     fn insert(&mut self, account: Account, time: Instant) {
-        if let Some(_) = self.by_account.insert(account, time) {
+        if self.by_account.insert(account, time).is_some() {
             self.sequenced.retain(|i| *i != account);
         }
         self.sequenced.push_back(account);

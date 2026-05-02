@@ -30,7 +30,7 @@ impl AccountAckProcessor {
             .inc(StatType::BootstrapProcess, DetailType::AccountInfo);
 
         // Prioritize account containing the dependency
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
         self.update_dependency(&mut guard, &query.hash, response.account);
         self.prioritize(&mut guard, &response.account);
 
@@ -184,7 +184,7 @@ mod tests {
         };
 
         {
-            let mut guard = fixture.state.lock().unwrap();
+            let mut guard = fixture.state.lock();
             guard
                 .candidate_accounts
                 .priority_set_initial(&blocked_account);
@@ -197,7 +197,7 @@ mod tests {
 
         assert!(fixture.processor.process(&query, &response));
 
-        let mut guard = fixture.state.lock().unwrap();
+        let mut guard = fixture.state.lock();
         assert!(guard.candidate_accounts.blocked(&blocked_account));
         assert!(guard.candidate_accounts.prioritized(&source_account));
         let query = guard.next_priority(Timestamp::new_test_instance());
@@ -240,7 +240,7 @@ mod tests {
         };
 
         {
-            let mut guard = fixture.state.lock().unwrap();
+            let mut guard = fixture.state.lock();
             guard
                 .candidate_accounts
                 .priority_set_initial(&blocked_account);

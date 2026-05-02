@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use super::frontier_head::{FrontierHead, FrontierScanConfig};
 use rsnano_core::Account;
 use rsnano_nullable_clock::Timestamp;

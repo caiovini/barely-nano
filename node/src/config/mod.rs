@@ -22,3 +22,13 @@ pub struct GlobalConfig {
     pub flags: NodeFlags,
     pub network_params: NetworkParams,
 }
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            node_config: NodeConfig::default(),
+            flags: NodeFlags::default(),
+            network_params: NetworkParams::new(rsnano_core::Networks::NanoLiveNetwork),
+        }
+    }
+}

@@ -1,6 +1,6 @@
-use alloc::sync::{ Arc };
+use alloc::sync::Arc;
 use spin::{ Mutex, RwLock };
-// // // // // // use std::{   time::Instant   }; // TODO: fix this
+use rsnano_nullable_clock::Timestamp as Instant;
 
 use tracing::info;
 
@@ -12,7 +12,6 @@ use crate::{
     block_rate_calculator::CurrentBlockRates, consensus::ActiveElectionsContainer,
     representatives::OnlineReps,
 };
-use num_format::{Locale, ToFormattedString};
 
 /// Periodically prints info about BPS, CPS, elections, peers,...
 pub struct NodeMonitor {
@@ -46,7 +45,7 @@ impl NodeMonitor {
         let blocks_confirmed = self.ledger.confirmed_count();
         let blocks_total = self.ledger.block_count();
 
-        let channels = self.network.read().unwrap().channels_info();
+        let channels = self.network.read().channels_info();
         info!(
             "Peers: {} (realtime: {} | inbound: {} | outbound: {})",
             channels.total, channels.realtime, channels.inbound, channels.outbound
@@ -54,7 +53,7 @@ impl NodeMonitor {
 
         {
             let (delta, online, peered) = {
-                let online_reps = self.online_reps.lock().unwrap();
+                let online_reps = self.online_reps.lock();
                 (
                     online_reps.quorum_delta(),
                     online_reps.online_weight(),
@@ -69,7 +68,7 @@ impl NodeMonitor {
             );
         }
 
-        let elections = self.active_elections.read().unwrap().info();
+        let elections = self.active_elections.read().info();
         info!(
             "Elections active: {} (priority: {} | hinted: {} | optimistic: {})",
             elections.total, elections.priority, elections.hinted, elections.optimistic
@@ -78,9 +77,9 @@ impl NodeMonitor {
         // TODO: Maybe emphasize somehow that confirmed doesn't need to be equal to total; backlog is OK
         info!(
             "Blocks confirmed: {} | total: {} (backlog: {})",
-            blocks_confirmed.to_formatted_string(&Locale::en),
-            blocks_total.to_formatted_string(&Locale::en),
-            (blocks_total - blocks_confirmed).to_formatted_string(&Locale::en)
+            blocks_confirmed,
+            blocks_total,
+            (blocks_total - blocks_confirmed)
         );
 
         let blocks_checked_rate = self.block_rates.bps();

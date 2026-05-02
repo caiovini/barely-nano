@@ -1,9 +1,13 @@
-use alloc::sync::{ Arc };
+use core::time::Duration;
+use crate::utils::JoinHandle;
+use alloc::string::String;
+use alloc::sync::Arc;
 use spin::{ Mutex };
-// // // // // // use std::{   thread::JoinHandle, time::Duration, time::Instant   }; // TODO: fix this
+// // // // // // // use std::{    thread::JoinHandle, time::Duration, time::Instant    }; // TODO: fix this
 
 use rsnano_core::utils::{CancellationToken, Tickable};
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
+use rsnano_nullable_clock::{SteadyClock, Timestamp as Instant};
 
 // Runs a task periodically in it's own thread
 pub struct TimerThread<T: Tickable + 'static> {
@@ -12,6 +16,7 @@ pub struct TimerThread<T: Tickable + 'static> {
     thread: Mutex<Option<JoinHandle<()>>>,
     cancel_token: CancellationToken,
     start_listener: OutputListenerMt<TimerStartEvent>,
+    clock: Arc<SteadyClock>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,22 +34,23 @@ pub enum TimerStartType {
 }
 
 impl<T: Tickable> TimerThread<T> {
-    pub fn new(name: impl Into<String>, task: T) -> Self {
+    pub fn new(name: impl Into<String>, task: T, clock: Arc<SteadyClock>) -> Self {
         Self {
             thread_name: name.into(),
             task: Mutex::new(Some(task)),
             thread: Mutex::new(None),
             cancel_token: CancellationToken::new(),
             start_listener: OutputListenerMt::new(),
+            clock,
         }
     }
 
-    pub fn task(&self) -> std::sync::MutexGuard<Option<T>> {
-        self.task.lock().unwrap()
+    pub fn task(&self) -> spin::MutexGuard<Option<T>> {
+        self.task.lock()
     }
 
     pub fn is_running(&self) -> bool {
-        self.thread.lock().unwrap().is_some()
+        self.thread.lock().is_some()
     }
 
     pub fn track_start(&self) -> Arc<OutputTrackerMt<TimerStartEvent>> {
@@ -76,7 +82,6 @@ impl<T: Tickable> TimerThread<T> {
         let mut task = self
             .task
             .lock()
-            .unwrap()
             .take()
             .expect("task already taken");
 
@@ -92,21 +97,22 @@ impl<T: Tickable> TimerThread<T> {
             cancel_token,
             task,
             next_wait_duration: interval,
+            clock: self.clock.clone(),
         };
 
-        let handle = std::thread::Builder::new()
-            .name(self.thread_name.clone())
-            .spawn(move || timer_loop.run())
-            .unwrap();
+//         let _handle = // /* /* std::/* /* /* thread::Builder::new()
+//             .name(self.thread_name.clone())
+//             .spawn(move || timer_loop.run())
+//             .unwrap(); */ */ */ */ */
 
-        *self.thread.lock().unwrap() = Some(handle);
+        *self.thread.lock() = Some(crate::utils::JoinHandle::new());
     }
 
     pub fn stop(&self) {
         self.cancel_token.cancel();
-        let handle = self.thread.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.join().unwrap();
+        let handle = self.thread.lock().take();
+        if let Some(_handle) = handle {
+            // _handle.join().unwrap();
         }
     }
 }
@@ -117,6 +123,7 @@ struct TimerLoop<T: Tickable> {
     cancel_token: CancellationToken,
     task: T,
     next_wait_duration: Duration,
+    clock: Arc<SteadyClock>,
 }
 
 impl<T: Tickable> TimerLoop<T> {
@@ -137,9 +144,9 @@ impl<T: Tickable> TimerLoop<T> {
     }
 
     fn run_one(&mut self) {
-        let start = Instant::now();
+        let start = self.clock.now();
         self.task.tick(&self.cancel_token);
-        let elapsed = start.elapsed();
+        let elapsed = start.elapsed(self.clock.now());
         self.next_wait_duration = self.interval.saturating_sub(elapsed);
     }
 }

@@ -15,9 +15,10 @@ hashbrown = { version = "0.14", default-features = false, features = ["ahash", "
 anyhow = { version = "1", default-features = false }
 # cipher = { version = "0.4", default-features = false }
 # ctr = { version = "0", default-features = false }
-# ed25519-dalek = { git = "https://github.com/rsnano-node/ed25519-dalek.git", rev = "1f9d706d7033d34bdc1ed7c1789498c82ec0df10", default-features = false, features = ["rand_core"] }
-# curve25519-dalek = { git = "https://github.com/rsnano-node/curve25519-dalek.git", rev = "fbc3a9939608b5d455b8a7f7b3499b37834a8bcb", default-features = false }
-# blake2 = { version = "0.10", default-features = false }
+tracing = { version = "0.1", default-features = false }
+# ed25519-dalek = ...
+curve25519-dalek = { version = "4", default-features = false }
+blake2 = { version = "0.10", default-features = false }
 hex = { version = "0", default-features = false }
 num = { version = "0", default-features = false }
 num-traits = { version = "0", default-features = false }
@@ -30,5 +31,5 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 spin = "0.9"
 static_assertions = "1"
 chrono = { version = "0", default-features = false, features = ["alloc"] }
-strum = { version = "0", default-features = false }
-strum_macros = { version = "0", default-features = false }
+strum = { version = "0.26", default-features = false, features = ["derive"] }
+strum_macros = { version = "0.26", default-features = false }

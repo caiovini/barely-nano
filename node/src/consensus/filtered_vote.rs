@@ -1,3 +1,5 @@
+use core::ops::Deref;
+use alloc::sync::Arc;
 use rsnano_core::{BlockHash, Vote, VoteSource};
 use rsnano_network::Channel;
 

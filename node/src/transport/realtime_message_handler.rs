@@ -1,6 +1,7 @@
-use alloc::sync::{ Arc };
+use core::net::SocketAddrV6;
+use alloc::sync::Arc;
 use spin::{ RwLock };
-// // // // // // use std::{   net::SocketAddrV6   }; // TODO: fix this
+// // // // // // // use std::{    net::SocketAddrV6    }; // TODO: fix this
 
 use tracing::trace;
 
@@ -68,7 +69,7 @@ impl RealtimeMessageHandler {
             message.message_type().into(),
             Direction::In,
         );
-        trace!(?message, "network processed");
+        tracing::info!("Received message: {:?} from {}", message.message_type(), channel.peer_addr());
 
         match message {
             Message::Keepalive(keepalive) => {
@@ -82,7 +83,6 @@ impl RealtimeMessageHandler {
                     // Remember this for future forwarding to other peers
                     self.network
                         .read()
-                        .unwrap()
                         .set_peering_addr(channel.channel_id(), peering_addr);
                 }
             }

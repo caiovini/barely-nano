@@ -1,3 +1,5 @@
+use core::time::Duration;
+use alloc::sync::Arc;
 
 
 use rand::RngCore;
@@ -58,7 +60,8 @@ impl QuerySender {
             self.send_listener.emit(spec.clone());
         }
 
-        let id = rand::rng().next_u64();
+        static NEXT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let now = self.clock.now();
         let query_type = spec.query_type();
         let mut query = RunningQuery::from_spec(id, &spec, now, self.request_timeout);
