@@ -1,16 +1,14 @@
 use alloc::sync::Arc;
 use spin::Mutex;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
-use tracing::warn;
 
 use rsnano_core::{
-    utils::{ContainerInfo, ContainerInfoProvider, Peer},
-    Difficulty, Root, WorkNonce,
+    utils::{ContainerInfo, ContainerInfoProvider, Peer}, Root, WorkNonce,
 };
-use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
+use rsnano_output_tracker::OutputTrackerMt;
 use rsnano_work::{WorkPool, WorkPoolBuilder};
 
 use super::distributed_work_client::DistributedWorkClient;

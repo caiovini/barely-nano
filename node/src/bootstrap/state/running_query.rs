@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use crate::bootstrap::AscPullQuerySpec;
 use rsnano_core::{Account, BlockHash, Frontier, HashOrAccount};
 use rsnano_messages::{AscPullAck, AscPullAckType, AscPullReqType, BlocksAckPayload, HashType};

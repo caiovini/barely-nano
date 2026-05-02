@@ -1,4 +1,3 @@
-use alloc::string::String;
 use super::{NodeRpcToml, NodeToml, OpenclToml};
 use crate::config::DaemonConfig;
 use serde::{Deserialize, Serialize};

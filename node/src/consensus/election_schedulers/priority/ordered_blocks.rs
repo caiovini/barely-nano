@@ -1,5 +1,4 @@
 use core::cmp::Ordering;
-use alloc::vec::Vec;
 use rsnano_core::{utils::BlockPriority, BlockHash, SavedBlock};
 use alloc::collections::{ BTreeSet };
 use hashbrown::{ HashSet };

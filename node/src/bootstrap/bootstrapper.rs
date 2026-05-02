@@ -1,5 +1,4 @@
 use alloc::sync::Arc;
-use alloc::boxed::Box;
 use spin::{ Mutex, RwLock, MutexGuard };
 use crate::utils::{JoinHandle, Condvar};
 use core::time::Duration;
@@ -200,7 +199,7 @@ impl Bootstrapper {
         }
     }
 
-    pub fn state(&self) -> MutexGuard<BootstrapState> {
+    pub fn state(&self) -> MutexGuard<'_, BootstrapState> {
         self.state.lock()
     }
 

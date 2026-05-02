@@ -10,7 +10,7 @@ use crate::{
     config::{
         DaemonConfig, NetworkParams, NodeConfig, NodeFlags,
     },
-    working_path_for, Node, NodeArgs, NodeEvent,
+    working_path_for, Node, NodeArgs,
 };
 
 #[derive(Default)]
@@ -140,7 +140,7 @@ impl NodeBuilder {
             Some(c) => c,
             None => {
                 let cpu_count = get_cpu_count();
-                let mut daemon_config = DaemonConfig::new(&network_params, cpu_count);
+                let daemon_config = DaemonConfig::new(&network_params, cpu_count);
                 let _config_path = "/tmp/node.toml";
                 // if config_path.exists() {
                 //     let toml_str = // // // std::fs::read_to_string(config_path)?;

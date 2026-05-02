@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use super::{
     bucket_stats::BucketStats,
     ordered_blocks::{BlockEntry, OrderedBlocks},

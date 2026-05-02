@@ -1,9 +1,7 @@
 use alloc::sync::Arc;
-use spin::{ Mutex, RwLock, MutexGuard };
+use spin::{ Mutex, RwLock };
 use crate::utils::{Condvar, JoinHandle};
 use core::time::Duration;
-use alloc::vec::Vec;
-use alloc::string::String;
 
 use rsnano_messages::{Keepalive, Message, NetworkFilter};
 use rsnano_network::{DeadChannelCleanup, Network, NetworkConfig, PeerConnector, TrafficType};

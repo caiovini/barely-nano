@@ -1,5 +1,5 @@
 use rsnano_stats::{StatsCollection, StatsSource};
-use strum::{EnumCount, IntoEnumIterator};
+use strum::IntoEnumIterator;
 
 use rsnano_core::VoteSource;
 

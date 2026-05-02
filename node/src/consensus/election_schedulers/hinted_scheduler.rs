@@ -1,7 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 use hashbrown::{ HashMap, HashSet };
 use spin::{ Mutex, RwLock };
 use core::sync::atomic::{ AtomicBool, Ordering };

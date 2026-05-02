@@ -2,7 +2,6 @@ use core::time::Duration;
 use alloc::sync::Arc;
 
 
-use rand::RngCore;
 
 use rsnano_messages::{AscPullReq, Message};
 use rsnano_network::TrafficType;

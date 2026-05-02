@@ -2,10 +2,9 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use hashbrown::HashSet;
 
-use anyhow::Context;
 use tracing::warn;
 
-use rsnano_core::{KeyDerivationFunction, PrivateKey, PublicKey, Root, WorkNonce};
+use rsnano_core::{PublicKey, Root, WorkNonce};
 use rsnano_ledger::Ledger;
 use rsnano_work::WorkThresholds;
 

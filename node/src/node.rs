@@ -31,7 +31,6 @@ use rsnano_network_protocol::{
     LatestKeepalivesCleanup, NanoDataReceiverFactory, SynCookies,
 };
 use rsnano_nullable_clock::{SteadyClock, SystemTimeFactory};
-use rsnano_nullable_fs::NullableFilesystem;
 
 use rsnano_output_tracker::OutputListenerMt;
 use rsnano_stats::{Direction, Stats, StatsCollection, StatsCollector};
@@ -52,7 +51,7 @@ use crate::{
     consensus::{
         election::ConfirmedElection,
         election_schedulers::{ElectionSchedulers, ElectionSchedulersPlugin},
-        get_bootstrap_weights, log_bootstrap_weights, ActiveElectionsContainer, AecTicker,
+        get_bootstrap_weights, ActiveElectionsContainer, AecTicker,
         AecVoter, BootstrapElectionActivator, BootstrapStaleElections, ConfirmReqSender,
         ConfirmationSolicitorPlugin, CpsLimiter, CurrentRepTiers, DependentElectionsConfirmer,
         ForkCache, ForkCacheUpdater, ForkProcessor, ForkProcessorPlugin, LocalVoteHistory,
@@ -70,7 +69,7 @@ use crate::{
         OnlineReps, OnlineRepsCleanup, OnlineWeightCalculation, RepCrawler, RepCrawlerExt,
     },
     telemetry::{
-        rsnano_build_info, rsnano_version_string, TelementryConfig, TelementryExt, Telemetry,
+        TelementryConfig, TelementryExt, Telemetry,
         TelemetryFactory,
     },
     transport::{
@@ -315,12 +314,12 @@ impl Node {
         let inbound_message_queue = Arc::new(inbound_message_queue);
 
         let network = Network::new_from_config(config.network.clone());
-        let _ = (run_loopback_channel_adapter(
+        let _ = run_loopback_channel_adapter(
             network.loopback().clone(),
             node_id,
             current_network,
             inbound_message_queue.clone(),
-        ));
+        ) ;
         let network = Arc::new(RwLock::new(network));
 
         let mut network_filter = NetworkFilter::new(config.network_duplicate_filter_size);
@@ -1395,7 +1394,7 @@ impl Node {
         self.stats_collector.collect().get_dir(stat, detail, dir)
     }
 
-    pub fn stats(&self) -> MutexGuard<StatsCollection> {
+    pub fn stats(&self) -> MutexGuard<'_, StatsCollection> {
         self.stats_collector.collect()
     }
 

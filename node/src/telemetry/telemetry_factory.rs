@@ -1,4 +1,3 @@
-use rsnano_nullable_clock::Timestamp as SystemTime;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::{ RwLock };

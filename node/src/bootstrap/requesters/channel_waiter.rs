@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::bootstrap::{state::BootstrapState, BootstrapPromise, PollResult};
-use rsnano_network::{token_bucket::TokenBucket, Channel, ChannelId, Network, TrafficType};
+use rsnano_network::{token_bucket::TokenBucket, Channel, ChannelId, Network};
 use rsnano_nullable_clock::Timestamp;
 use rsnano_stats::StatsCollection;
 use spin::{ Mutex, RwLock };

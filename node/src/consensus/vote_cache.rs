@@ -1,20 +1,16 @@
 use alloc::vec::Vec;
 use alloc::sync::Arc;
-use spin::Mutex;
-use alloc::collections::BTreeMap;
 use hashbrown::{HashMap, HashSet};
-use core::cmp::Ordering;
 use core::fmt::Debug;
-use core::mem::size_of;
 use core::time::Duration;
 
 use rsnano_nullable_clock::Timestamp as Instant;
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
-    Amount, BlockHash, DescTallyKey, PublicKey, Vote, VoteError,
+    Amount, BlockHash, Vote, VoteError,
 };
-use rsnano_stats::{DetailType, StatType, Stats};
+use rsnano_stats::Stats;
 
 type FxHashMap<K, V> = HashMap<K, V>;
 type FxHashSet<T> = HashSet<T>;

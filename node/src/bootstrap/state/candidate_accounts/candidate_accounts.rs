@@ -1,4 +1,4 @@
-use core::cmp::{min, max};
+use core::cmp::min;
 use core::time::Duration;
 use super::{
     blocking_container::{BlockingContainer, BlockingEntry},

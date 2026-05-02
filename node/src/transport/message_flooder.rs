@@ -67,7 +67,7 @@ impl MessageFlooder {
         &mut self,
         message: &Message,
         traffic_type: TrafficType,
-        scale: f32,
+        _scale: f32,
     ) -> FloodCount {
         let mut flood_count = FloodCount::default();
         let peered_prs = self.online_reps.lock().peered_principal_reps();

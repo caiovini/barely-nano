@@ -3,7 +3,6 @@ use alloc::sync::Arc;
 use spin::{ RwLock };
 // // // // // // // use std::{    net::SocketAddrV6    }; // TODO: fix this
 
-use tracing::trace;
 
 use rsnano_core::VoteSource;
 use rsnano_messages::{Message, NetworkFilter};

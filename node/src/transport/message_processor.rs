@@ -4,9 +4,7 @@ use alloc::collections::VecDeque;
 use crate::utils::JoinHandle;
 use core::sync::atomic::{ AtomicBool, Ordering };
 use core::cmp::{max, min};
-use rsnano_nullable_clock::Timestamp as Instant;
 
-use tracing::debug;
 
 use rsnano_messages::Message;
 use rsnano_network::{Channel, ChannelId};
@@ -117,7 +115,7 @@ impl State {
     #[allow(dead_code)]
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
         // let start = Instant::now();
-        let batch_size = batch.len();
+        let _batch_size = batch.len();
         for (_, (message, channel)) in batch {
             self.realtime_handler.process(message, &channel);
         }

@@ -1,10 +1,8 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use alloc::boxed::Box;
 use hashbrown::{ HashMap };
 use spin::{ Mutex, RwLock };
 use core::sync::atomic::{ AtomicBool, Ordering };
-use core::time::Duration;
 use rsnano_nullable_clock::Timestamp as Instant;
 use crate::utils::{Condvar, JoinHandle};
 use core::mem::size_of;

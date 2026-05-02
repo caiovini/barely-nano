@@ -8,14 +8,12 @@ mod timer;
 mod timer_thread;
 mod bounded_vec_deque;
 
-use core::net::Ipv6Addr;
 
 use blake2::{
     digest::{Update, VariableOutput},
     Blake2bVar,
 };
 
-use rsnano_core::HardenedConstants;
 
 pub(crate) use backpressure_event_processor::{
     spawn_backpressure_processor, BackpressureEventProcessor,

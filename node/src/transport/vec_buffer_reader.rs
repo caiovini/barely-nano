@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use rsnano_network::AsyncBufferReader;
 use core::sync::atomic::{AtomicUsize, Ordering};

@@ -2,7 +2,6 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
-use alloc::string::ToString;
 use alloc::boxed::Box;
 use spin::{ Mutex, MutexGuard };
 use crate::utils::{Condvar, JoinHandle};

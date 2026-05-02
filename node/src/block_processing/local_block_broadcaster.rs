@@ -8,7 +8,6 @@ use core::time::Duration;
 use rsnano_nullable_clock::Timestamp as Instant;
 use core::mem::size_of;
 use core::cmp::min;
-use core::net::SocketAddrV6;
 
 use tracing::debug;
 

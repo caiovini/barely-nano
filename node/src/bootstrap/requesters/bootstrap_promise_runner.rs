@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use crate::bootstrap::{state::BootstrapState, BootstrapPromise, PollResult};
-use rsnano_nullable_clock::{SteadyClock, Timestamp};
+use rsnano_nullable_clock::SteadyClock;
 use spin::{ Mutex };
 use crate::utils::Condvar;
 use core::time::Duration;

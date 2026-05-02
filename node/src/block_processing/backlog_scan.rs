@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use spin::{ Mutex, MutexGuard };
 use crate::utils::{Condvar, JoinHandle};
-use core::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
+use core::sync::atomic::{ AtomicU64, Ordering };
 use core::time::Duration;
 use core::cmp::max;
 

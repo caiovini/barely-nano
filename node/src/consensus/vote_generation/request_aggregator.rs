@@ -1,6 +1,5 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::ToString;
 use spin::{ Mutex, MutexGuard };
 use crate::utils::{Condvar, JoinHandle};
 use core::cmp::{max, min};

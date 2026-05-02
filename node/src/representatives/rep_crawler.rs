@@ -1,10 +1,8 @@
 use alloc::sync::Arc;
 use spin::{Mutex, RwLock};
-use alloc::collections::VecDeque;
 use core::time::Duration;
 use alloc::vec::Vec;
 use alloc::vec;
-use alloc::string::ToString;
 use core::ops::DerefMut;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -215,7 +213,7 @@ impl RepCrawler {
                     .inc_dir(StatType::RepCrawler, DetailType::Keepalive, Direction::In);
                 let preconfigured = self.preconfigured_peers.clone();
                 info!("[rep_crawler] Spawning keepalive task");
-                let in_progress = Arc::new(&self.keepalive_in_progress);
+                let _in_progress = Arc::new(&self.keepalive_in_progress);
                 // unsafe: we know 'self' lives as long as the node
                 let self_ptr = self as *const RepCrawler as usize;
                 kernel_common::async_rt::spawn(async move {

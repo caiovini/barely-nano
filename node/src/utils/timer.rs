@@ -1,6 +1,5 @@
 #[cfg(feature = "output_tracking")]
 use alloc::sync::Arc;
-use spin::{ Mutex};
 use core::time::Duration;
 
 #[cfg(feature = "output_tracking")]

@@ -1,8 +1,6 @@
 use super::Wallet;
 use rsnano_core::Amount;
 use alloc::sync::Arc;
-use spin::Mutex;
-use alloc::vec::Vec;
 use alloc::boxed::Box;
 
 pub struct WalletActionThread {}

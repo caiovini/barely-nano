@@ -99,7 +99,7 @@ impl LedgerPruning {
     ) -> bool {
         let mut read_operations = 0;
         let mut finish_transaction = false;
-        let mut tx = self.ledger.store.tx_begin_read();
+        let tx = self.ledger.store.tx_begin_read();
         let mut it = self
             .ledger
             .store

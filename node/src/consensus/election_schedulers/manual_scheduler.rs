@@ -1,6 +1,5 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use alloc::boxed::Box;
 use spin::{ Mutex, RwLock };
 use crate::utils::{Condvar, JoinHandle};
 use core::mem::size_of;

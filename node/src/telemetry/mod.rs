@@ -1,5 +1,4 @@
 use alloc::collections::VecDeque;
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::boxed::Box;
 mod telemetry_factory;
@@ -8,20 +7,18 @@ pub use telemetry_factory::TelemetryFactory;
 
 use spin::{ Mutex, RwLock };
 use hashbrown::{ HashMap };
-use core::time::Duration;
 use core::mem::size_of;
-use core::cmp::min;
 use core::net::SocketAddrV6;
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
-    BlockHash, PublicKey,
+    BlockHash,
 };
-use rsnano_messages::{Message, TelemetryAck, TelemetryData};
-use rsnano_network::{Channel, ChannelId, DeadChannelCleanupStep, Network, TrafficType};
+use rsnano_messages::{TelemetryAck, TelemetryData};
+use rsnano_network::{Channel, ChannelId, DeadChannelCleanupStep, Network};
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_nullable_clock::Timestamp as Instant;
-use rsnano_stats::{DetailType, StatType, Stats, StatsCollection, StatsSource};
+use rsnano_stats::Stats;
 
 use crate::{config::NetworkParams, transport::MessageSender};
 

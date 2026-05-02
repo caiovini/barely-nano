@@ -1,15 +1,12 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::string::ToString;
 use hashbrown::{ HashMap };
 use spin::{ Mutex };
 use core::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
-use rsnano_nullable_clock::Timestamp as Instant;
 use crate::utils::{JoinHandle};
 use core::cmp::{max, min};
 
-use tracing::debug;
 
 use rsnano_core::{utils::BackpressureSender, BlockHash, Vote, VoteError, VoteSource};
 use rsnano_network::Channel;

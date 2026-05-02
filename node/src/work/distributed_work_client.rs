@@ -1,5 +1,5 @@
 use super::WorkRequest;
-use rsnano_core::{Root, WorkNonce};
+use rsnano_core::WorkNonce;
 
 #[derive(Default)]
 pub(crate) struct DistributedWorkClient {}

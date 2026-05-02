@@ -1,14 +1,14 @@
 use alloc::sync::Arc;
 use spin::Mutex;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
-    Account, Amount, BlockHash, KeyDerivationFunction, Networks,
+    Account, KeyDerivationFunction, Networks,
     PrivateKey, PublicKey, Root, SavedBlock, WalletId,
 };
 use rsnano_ledger::Ledger;

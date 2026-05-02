@@ -7,7 +7,7 @@ use spin::{ Mutex };
 
 use rsnano_core::utils::{CancellationToken, Tickable};
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
-use rsnano_nullable_clock::{SteadyClock, Timestamp as Instant};
+use rsnano_nullable_clock::SteadyClock;
 
 // Runs a task periodically in it's own thread
 pub struct TimerThread<T: Tickable + 'static> {
@@ -45,7 +45,7 @@ impl<T: Tickable> TimerThread<T> {
         }
     }
 
-    pub fn task(&self) -> spin::MutexGuard<Option<T>> {
+    pub fn task(&self) -> spin::MutexGuard<'_, Option<T>> {
         self.task.lock()
     }
 
@@ -91,7 +91,7 @@ impl<T: Tickable> TimerThread<T> {
             task.tick(&cancel_token);
         }
 
-        let mut timer_loop = TimerLoop {
+        let _timer_loop = TimerLoop {
             interval,
             start_type,
             cancel_token,

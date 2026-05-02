@@ -1,5 +1,4 @@
 use alloc::sync::Arc;
-use core::time::Duration;
 
 use rsnano_core::{Networks, NodeId, ProtocolInfo};
 use rsnano_messages::MessageDeserializer;
