@@ -15,7 +15,6 @@ use core::str::FromStr;
 
 use kernel_common::{uart, trap};
 use rsnano_node::Node;
-use linked_list_allocator::LockedHeap;
 use smoltcp::socket::tcp::Socket as TcpSocket;
 
 #[global_allocator]
