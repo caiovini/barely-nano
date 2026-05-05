@@ -25,6 +25,7 @@ use crate::{
     work::WorkFactory,
 };
 
+#[allow(dead_code)]
 pub struct Wallets {
     pub mutex: Mutex<HashMap<WalletId, Arc<Wallet>>>,
     node_config: NodeConfig,

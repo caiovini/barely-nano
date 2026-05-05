@@ -10,7 +10,7 @@ mod utils;
 // mod wallets;
 
 use anyhow::anyhow;
-use rsnano_core::{Account, AccountInfo, BlockHash, SavedBlock};
+use rsnano_core::{Account, AccountInfo};
 use rsnano_ledger::AnySet;
 use rsnano_node::Node;
 use rsnano_rpc_messages::{RpcCommand, RpcError, StatsType};
@@ -82,9 +82,17 @@ impl RpcCommandHandler {
             RpcCommand::Uptime => to_value(self.uptime()),
             RpcCommand::Version => to_value(self.version()),
             RpcCommand::ActiveDifficulty => to_value(self.active_difficulty()),
+            RpcCommand::KeyCreate => to_value(key_create()),
+            RpcCommand::DeterministicKey(args) => to_value(deterministic_key(args)),
+            RpcCommand::KeyExpand(args) => to_value(key_expand(args)?),
+            RpcCommand::AccountKey(args) => to_value(account_key(args)),
+            RpcCommand::AccountGet(args) => to_value(account_get(args)),
+            RpcCommand::Ledger(args) => to_value(self.ledger(args)),
             RpcCommand::Stats(_) |
             RpcCommand::StatsClear => self.not_implemented(),
             _ => self.not_implemented(),
+
+
         }?;
 
         Ok(response)
@@ -98,10 +106,7 @@ impl RpcCommandHandler {
         }
     }
 
-    fn load_block_any(&self, any: &dyn AnySet, hash: &BlockHash) -> anyhow::Result<SavedBlock> {
-        any.get_block(hash)
-            .ok_or_else(|| anyhow!(Self::BLOCK_NOT_FOUND))
-    }
+
 
     fn load_account(&self, any: &dyn AnySet, account: &Account) -> anyhow::Result<AccountInfo> {
         any.get_account(account)
@@ -164,9 +169,7 @@ fn requires_control(command: &RpcCommand) -> bool {
     }
 }
 
-fn legacy_bootstrap_disabled() -> anyhow::Result<serde_json::Value> {
-    Err(anyhow!("Legacy bootstrap is disabled"))
-}
+
 
 #[cfg(test)]
 use serde::de::DeserializeOwned;

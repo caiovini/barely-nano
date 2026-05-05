@@ -1,12 +1,10 @@
-use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
 use alloc::string::String;
-use alloc::string::ToString;
 use crate::{RpcBool, RpcCommand, RpcU16, RpcU32, RpcU64, RpcU8};
 use rsnano_core::{to_hex_string, BlockHash, NodeId, Signature};
 use rsnano_messages::TelemetryData;
 use serde::{Deserialize, Serialize};
-use rsnano_core::utils::{Ipv6Addr, SocketAddrV6, UnixMillisTimestamp};
+use rsnano_core::utils::{Ipv6Addr, SocketAddrV6};
 
 impl RpcCommand {
     pub fn telemetry(args: TelemetryArgs) -> Self {

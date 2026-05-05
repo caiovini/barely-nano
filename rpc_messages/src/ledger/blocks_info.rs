@@ -1,7 +1,4 @@
-use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::string::ToString;
 use super::BlockInfoResponse;
 use crate::{RpcBool, RpcCommand};
 use rsnano_core::BlockHash;

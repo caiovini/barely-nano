@@ -9,5 +9,5 @@ rsnano_messages = { path = "../messages" }
 serde = { version = "=1.0.210", default-features = false, features = ["derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 indexmap = { version = "2", default-features = false, features = ["serde"] }
-hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc", "inline-more"] }
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc", "inline-more", "serde"] }
 serde_derive = "=1.0.210"

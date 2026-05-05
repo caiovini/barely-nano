@@ -16,6 +16,7 @@ use rsnano_nullable_clock::{SteadyClock, Timestamp};
 use strum::{EnumCount, IntoEnumIterator};
 
 /// Rebroadcasts a given vote if necessary
+#[allow(dead_code)]
 pub(super) struct RebroadcastProcessor {
     message_flooder: MessageFlooder,
     history: RebroadcastHistory,
@@ -25,6 +26,7 @@ pub(super) struct RebroadcastProcessor {
     last_rep_weight_update: Timestamp,
 }
 
+#[allow(dead_code)]
 impl RebroadcastProcessor {
     pub(super) fn new(
         message_flooder: MessageFlooder,
