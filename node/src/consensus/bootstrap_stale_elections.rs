@@ -1,4 +1,4 @@
-use super::{ActiveElectionsContainer, AecTickerPlugin, election::Election};
+use super::{ActiveElectionsContainer, AecTickerPlugin};
 use crate::bootstrap::Bootstrapper;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
