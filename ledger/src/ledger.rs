@@ -291,7 +291,7 @@ impl Ledger {
             info.balance
         );
 
-        let accounts = self.any().iter_accounts();
+        let _accounts = self.any().iter_accounts();
         tracing::info!(
             "Block Store contains {} blocks:",
             self.store.cache.block_count.load(Ordering::Relaxed)
