@@ -23,4 +23,3 @@ mod ledger;
 mod representatives;
 // mod unopened;
 
-pub(crate) use account_history::AccountHistoryHelper;

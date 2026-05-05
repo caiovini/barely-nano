@@ -4,8 +4,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::arch::global_asm;
 use core::future::Future;
@@ -17,10 +16,9 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use kernel_common::{trap, uart};
 use linked_list_allocator::LockedHeap;
 use rsnano_core::utils::Tickable;
-use rsnano_ledger::{ConfirmedSet, LedgerSet};
+use rsnano_ledger::LedgerSet;
 use rsnano_node::Node;
 use rsnano_rpc_handler::RpcCommandHandler;
-use rsnano_rpc_messages::RpcCommand;
 use rsnano_rpc_server::bare_metal::BareMetalRpcServer;
 use smoltcp::socket::tcp::Socket as TcpSocket;
 
@@ -35,8 +33,6 @@ static HARDWARE_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 static HEAP_MAGIC: AtomicUsize = AtomicUsize::new(0);
 const MAGIC_VAL: usize = 0xACE1FEED;
 static NODE: spin::Mutex<Option<NodeWrapper>> = spin::Mutex::new(None);
-static VOTE_RATE: AtomicUsize = AtomicUsize::new(0);
-static MSG_RATE: AtomicUsize = AtomicUsize::new(0);
 
 const CLINT_FREQ: u64 = 10_000_000;
 
@@ -375,7 +371,7 @@ fn dispatch_hart_task(hart_id: usize, node_arc: Arc<Node>) {
     }
 }
 
-fn run_network_loop(node_arc: Arc<Node>) {
+fn run_network_loop(_node_arc: Arc<Node>) {
     kernel_common::uart::print(b"[boot] Hart 0: Network & RPC loop enter\n");
     let exec = kernel_common::async_rt::EXECUTOR
         .lock()
@@ -484,7 +480,6 @@ fn run_maintenance_loop(node_arc: Arc<Node>) {
     let mut last_aec_tick = kernel_common::clint::mtime();
     let mut last_online_weight_tick = kernel_common::clint::mtime();
     let mut last_bootstrap_tick = kernel_common::clint::mtime();
-    let mut iterations = 0;
     loop {
         let mtime = kernel_common::clint::mtime();
         if mtime - last_bootstrap_tick > millis(100) {
@@ -502,7 +497,6 @@ fn run_maintenance_loop(node_arc: Arc<Node>) {
 
         if mtime - last_heartbeat > seconds(60) {
             last_heartbeat = mtime;
-            iterations = 0;
         }
         if mtime - last_cleanup > seconds(5) {
             node_arc.dead_channel_cleanup.lock().clean_up();
@@ -532,7 +526,6 @@ fn run_maintenance_loop(node_arc: Arc<Node>) {
         for _ in 0..16 {
             exec.run_once();
         }
-        iterations += 1;
         core::hint::spin_loop();
     }
 }
@@ -736,7 +729,7 @@ fn run_monitor_loop(node_mon: Arc<Node>) {
         iterations += 1;
 
         if mtime - last_tick > seconds(5) {
-            let (used, total) = {
+            let (used, _) = {
                 let heap = ALLOCATOR.lock();
                 (heap.used(), heap.size())
             };
