@@ -79,7 +79,7 @@ fn compress(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
 
 /// Vectorized compression using RISC-V Vector Cryptography.
 #[cfg(target_arch = "riscv64")]
-fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
+fn _compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
     // compile_error!("COMPILING VECTOR VERSION");
     let mut v = [0u64; 16];
     v[0..8].copy_from_slice(h);
@@ -255,4 +255,10 @@ pub fn hash(data: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&full[..32]);
     out
+}
+
+pub fn hash64(data: &[u8]) -> [u8; 64] {
+    let mut hasher = Blake2bHasher::new(64);
+    hasher.update(data);
+    hasher.finalize()
 }

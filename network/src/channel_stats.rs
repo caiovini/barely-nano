@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use strum::{EnumCount, IntoEnumIterator};
 
 #[derive(Default)]
-pub(crate) struct ChannelStats {
+pub struct ChannelStats {
     pub timed_out: AtomicUsize,
     pub read_succeeded: AtomicUsize,
     pub read_failed: AtomicUsize,

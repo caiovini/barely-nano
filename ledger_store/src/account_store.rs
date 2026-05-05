@@ -2,6 +2,7 @@ use rsnano_core::{
     utils::{BufferReader, Deserialize, MutStreamAdapter, Serialize},
     Account, AccountInfo,
 };
+
 use kernel_common::storage::DB;
 use kernel_common::storage::btree::KEY_SIZE;
 use alloc::sync::Arc;
@@ -27,14 +28,14 @@ impl BtreeAccountStore {
 
     pub fn put(&self, account: &Account, info: &AccountInfo) {
         let key = self.make_key(account);
-        let mut value = [0u8; 256];
+        let mut value = [0u8; 512];
         let mut adapter = MutStreamAdapter::new(&mut value);
         info.serialize(&mut adapter);
         
+        tracing::debug!("AccountStore: putting account {}, head={}", account.encode_account(), info.head);
         let mut lock = DB.lock();
         if let Some(db) = lock.as_mut() {
             db.insert(key, value);
-            self.cache.account_count.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -44,9 +45,13 @@ impl BtreeAccountStore {
         if let Some(db) = lock.as_mut() {
             if let Some(value) = db.search(&key) {
                 let mut stream = BufferReader::new(&value);
-                return AccountInfo::deserialize(&mut stream).ok();
+                if let Ok(info) = AccountInfo::deserialize(&mut stream) {
+                    tracing::debug!("AccountStore: found account {}, head={}", account.encode_account(), info.head);
+                    return Some(info);
+                }
             }
         }
+        tracing::debug!("AccountStore: NOT found account {}", account.encode_account());
         None
     }
 
@@ -56,5 +61,25 @@ impl BtreeAccountStore {
         if let Some(db) = lock.as_mut() {
             db.delete(key);
         }
+    }
+
+    pub fn iter(&self, start: Account) -> alloc::vec::Vec<(Account, AccountInfo)> {
+        let start_key = self.make_key(&start);
+        let mut results = alloc::vec::Vec::new();
+        let mut lock = DB.lock();
+        if let Some(db) = lock.as_mut() {
+            let mut it = db.iter(start_key);
+            while let Some((key, value)) = it.next_kv() {
+                if key[0] != Self::TABLE_ID {
+                    break;
+                }
+                let account = Account::from_bytes(key[1..33].try_into().unwrap());
+                let mut stream = BufferReader::new(&value);
+                if let Ok(info) = AccountInfo::deserialize(&mut stream) {
+                    results.push((account, info));
+                }
+            }
+        }
+        results
     }
 }

@@ -73,6 +73,9 @@ impl BlockSideband {
             || block_type == BlockType::LegacyChange
             || block_type == BlockType::LegacyOpen
         {
+            if self.balance == Amount::MAX {
+                tracing::info!("BlockSideband::serialize: Serializing MAX balance");
+            }
             self.balance.serialize(stream);
         }
 

@@ -1,3 +1,12 @@
+#![no_std]
+
+extern crate alloc;
+
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
+
 mod common;
 mod ledger;
 mod node;
@@ -10,7 +19,9 @@ pub use node::*;
 pub use utils::*;
 pub use wallets::*;
 
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
+
+pub type IndexMap<K, V> = indexmap::IndexMap<K, V, hashbrown::hash_map::DefaultHashBuilder>;
 
 #[derive(PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]

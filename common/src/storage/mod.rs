@@ -27,7 +27,16 @@ impl<'a> StorageContext<'a> {
 
     pub fn write_block(&mut self, block_id: usize, buf: &[u8]) -> Result<(), virtio_drivers::Error> {
         // block_id is 4KB page index, convert to 512B sector index
-        self.driver.write_blocks(block_id * 8, buf)
+        match self.driver.write_blocks(block_id * 8, buf) {
+            Ok(_) => {
+                // tracing::debug!("Storage: wrote block {} successfully", block_id);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Storage: FAILED to write block {}: {:?}", block_id, e);
+                Err(e)
+            }
+        }
     }
 
     pub fn capacity(&self) -> u64 {
@@ -41,21 +50,10 @@ pub fn init_virtio_blk<'a>() -> Option<StorageContext<'a>> {
         match unsafe { MmioTransport::new(header, VIRTIO_STEP) } {
             Ok(transport) => {
                 if transport.device_type() == DeviceType::Block {
-                    /*
-                    uart::print(b"[storage] Found VirtIO Block device at ");
-                    uart::print_usize(addr);
-                    uart::print(b"\n");
-                    */
 
                     match VirtIOBlk::<VirtioHal, MmioTransport>::new(transport) {
                         Ok(driver) => {
-                            let capacity = driver.capacity();
-                            /*
-                            uart::print(b"[storage] Capacity: ");
-                            uart::print_usize((capacity * 512 / 1024 / 1024) as usize);
-                            uart::print(b" MB\n");
-                            */
-
+                            let _capacity = driver.capacity();
                             return Some(StorageContext {
                                 driver,
                             });

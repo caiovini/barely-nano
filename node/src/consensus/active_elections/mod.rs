@@ -37,6 +37,7 @@ impl Default for ActiveElectionsConfig {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum AecEvent {
     ElectionStarted(BlockHash, QualifiedRoot),
     ElectionConfirmed(ConfirmedElection),

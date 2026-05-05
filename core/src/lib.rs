@@ -30,7 +30,7 @@ mod vote_timestamp;
 
 pub use account::Account;
 pub use amount::*;
-use tools::blake2b::{Blake2bHasher, hash as blake2b_hash};
+use tools::blake2b::Blake2bHasher;
 pub use block_hash::{Blake2HashBuilder, BlockHash};
 pub use hardened_constants::*;
 pub use node_id::NodeId;
@@ -325,7 +325,7 @@ impl Default for ProtocolInfo {
         Self {
             version_using: 0x1B,
             version_max: 0x1B,
-            version_min: 0x1B,
+            version_min: 0x00,
             network: Networks::NanoLiveNetwork,
         }
     }

@@ -250,29 +250,23 @@ struct ReachoutLoop {
 impl ReachoutLoop {
     #[allow(dead_code)]
     async fn run_async(&self) {
-        tracing::info!("[node] ReachoutLoop started");
         while !*self.stopped.1.lock() {
             async_rt::sleep(self.reachout_interval).await;
-            tracing::info!("[node] ReachoutLoop: checking for peers");
 
             if *self.stopped.1.lock() {
                 return;
             }
 
-            tracing::info!("[node] ReachoutLoop: pop_random...");
             let keepalive = self.latest_keepalives.lock().pop_random();
             if let Some(keepalive) = keepalive {
-                tracing::info!("[node] ReachoutLoop: found keepalive with {} peers", keepalive.peers.len());
                 for peer in keepalive.peers {
                     if peer.ip().is_unspecified() {
                         continue;
                     }
-                    tracing::info!("[node] ReachoutLoop: connecting to {}", peer);
                     self.stats.inc(StatType::Network, DetailType::ReachoutLive);
                     let _ = self.peer_connector.connect_to(peer);
                 }
             }
-            tracing::info!("[node] ReachoutLoop: finished checking peers");
         }
     }
 }

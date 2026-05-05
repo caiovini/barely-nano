@@ -5,7 +5,7 @@ use kernel_common::storage::btree::KEY_SIZE;
 pub struct BtreeRepWeightStore {}
 
 impl BtreeRepWeightStore {
-    pub const TABLE_ID: u8 = 6;
+    pub const TABLE_ID: u8 = 12;
 
     pub fn new() -> Self {
         Self {}
@@ -20,7 +20,7 @@ impl BtreeRepWeightStore {
 
     pub fn put(&self, pub_key: PublicKey, amount: Amount) {
         let key = self.make_key(&pub_key);
-        let mut value = [0u8; 256];
+        let mut value = [0u8; 512];
         let mut adapter = MutStreamAdapter::new(&mut value);
         amount.serialize(&mut adapter);
         

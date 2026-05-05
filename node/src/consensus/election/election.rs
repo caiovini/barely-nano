@@ -17,7 +17,7 @@ pub enum VoteType {
     Final,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Election {
     qualified_root: QualifiedRoot,
     winner: MaybeSavedBlock,

@@ -109,8 +109,5 @@ pub fn validate_message(
     message: &[u8],
     signature: &Signature,
 ) -> Result<(), ()> {
-    let public =
-        ed25519_dalek_blake2b::PublicKey::from_bytes(public_key.as_bytes()).map_err(|_| ())?;
-    let sig = ed25519_dalek_blake2b::Signature::from_bytes(signature.as_bytes()).map_err(|_| ())?;
-    public.verify_strict(message, &sig).map_err(|_| ())
+    public_key.verify(message, signature).map_err(|_| ())
 }

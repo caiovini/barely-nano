@@ -14,7 +14,7 @@ impl UnsavedBlockLatticeBuilder {
         }
     }
 
-    pub fn genesis(&mut self) -> UnsavedAccountChainBuilder {
+    pub fn genesis(&mut self) -> UnsavedAccountChainBuilder<'_> {
         self.account(&DEV_GENESIS_KEY)
     }
 

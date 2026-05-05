@@ -77,7 +77,7 @@ impl RepWeightCache {
         }
     }
 
-    pub fn read(&self) -> RwLockReadGuard<RepWeights> {
+    pub fn read(&self) -> RwLockReadGuard<'_, RepWeights> {
         if self.use_bootstrap_weights() {
             self.bootstrap_weights.read()
         } else {

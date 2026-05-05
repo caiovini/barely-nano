@@ -1,7 +1,11 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{RpcBool, RpcCommand, RpcU8};
 use rsnano_core::{Account, Amount};
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddrV6;
+use rsnano_core::utils::SocketAddrV6;
 
 impl RpcCommand {
     pub fn confirmation_quorum() -> Self {

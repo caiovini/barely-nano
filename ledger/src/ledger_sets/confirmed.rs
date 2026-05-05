@@ -3,7 +3,6 @@ use rsnano_core::{
     SavedBlock,
 };
 use rsnano_ledger_store::BtreeStore;
-use alloc::vec::Vec;
 
 use super::{AnyReceivableIterator, LedgerSet};
 

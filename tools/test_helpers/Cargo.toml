@@ -9,7 +9,6 @@ rsnano_nullable_tracing_subscriber = { path = "../../nullables/tracing_subscribe
 rsnano_core = { path = "../../core" }
 rsnano_work = { path = "../../work" }
 rsnano_ledger = { path = "../../ledger" }
-rsnano_store_lmdb = { path = "../../store_lmdb" }
 rsnano_network = { path = "../../network" }
 rsnano_node = { path = "../../node", features = ["output_tracking"] }
 rsnano_rpc_client = { path = "../../rpc_client" }

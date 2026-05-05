@@ -68,7 +68,6 @@ impl Requesters {
     }
 
     pub fn start(&self) {
-        tracing::info!("Starting bootstrap requesters...");
         let limiter = self.limiter.clone();
         let max_requests = self.config.max_requests;
         let channel_waiter =
@@ -159,6 +158,7 @@ impl Requesters {
         let clock = self.clock.clone();
         let stats = self.stats.clone();
         kernel_common::async_rt::spawn(async move {
+
             let mut promise = SendQueriesPromise::new(query_factory, QuerySender::new(
                 message_sender,
                 clock,
@@ -169,14 +169,17 @@ impl Requesters {
                 if runner.state.lock().stopped { break; }
                 
                 let now = runner.clock.now();
+
                 let result = {
                     let mut state = runner.state.lock();
                     promise.poll(&mut state, now)
                 };
 
+
                 match result {
                     PollResult::Finished(_) => {
                         // Already handled by SendQueriesPromise::poll
+                        kernel_common::async_rt::yield_now().await;
                     }
                     PollResult::Wait => {
                         // Yield and wait a bit

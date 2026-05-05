@@ -70,7 +70,6 @@ impl BackpressureEventProcessor<LedgerEvent> for LedgerEventProcessor {
     }
 
     fn process(&mut self, event: LedgerEvent) {
-        tracing::info!("[node] LedgerEventProcessor::process");
         for plugin in &mut self.plugins {
             plugin.process(&event);
         }

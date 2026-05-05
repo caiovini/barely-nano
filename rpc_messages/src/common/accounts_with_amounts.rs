@@ -1,7 +1,11 @@
-use indexmap::IndexMap;
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
+use crate::IndexMap;
 use rsnano_core::{Account, Amount};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AccountsWithAmountsDto {

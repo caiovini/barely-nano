@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::sync::Arc;
-use kernel_common::storage::DB;
+use crate::{BtreeBlockStore, BtreeAccountStore, BtreePendingStore, BtreeOnlineWeightStore, BtreePrunedStore, BtreeRepWeightStore, BtreePeerStore, BtreeConfirmationHeightStore, BtreeFinalVoteStore, BtreeSuccessorStore, BtreeVersionStore};
 
 pub struct LedgerCache {
     pub confirmed_count: AtomicU64,
@@ -60,37 +60,43 @@ impl BtreeStore {
             version: BtreeVersionStore::new(),
         }
     }
+    
     pub fn generate_cache(&self) {
-        let mut lock = DB.lock();
-        if let Some(db) = lock.as_mut() {
-            // kernel_common::uart::print(b"[node] Generating cache...\n");
-            // Count blocks
-            let mut block_count = 0;
-            let mut start_key = [0u8; kernel_common::storage::btree::KEY_SIZE];
-            start_key[0] = crate::block_store::BtreeBlockStore::TABLE_ID;
-            let mut iter = db.iter(start_key);
-            while let Some((k, _)) = iter.next_kv() {
-                if k[0] != crate::block_store::BtreeBlockStore::TABLE_ID { break; }
-                block_count += 1;
-                // if block_count % 1000 == 0 { kernel_common::uart::print(b"."); }
-            }
-            self.cache.block_count.store(block_count, Ordering::SeqCst);
-
-            // Count accounts
-            let mut account_count = 0;
-            let mut start_key = [0u8; kernel_common::storage::btree::KEY_SIZE];
-            start_key[0] = crate::account_store::BtreeAccountStore::TABLE_ID;
-            let mut iter = db.iter(start_key);
-            while let Some((k, _)) = iter.next_kv() {
-                if k[0] != crate::account_store::BtreeAccountStore::TABLE_ID { break; }
-                account_count += 1;
-            }
-            self.cache.account_count.store(account_count, Ordering::SeqCst);
-            // kernel_common::uart::print(b"[node] Cache generated.\n");
-        }
+        self.cache.reset();
+        
+        // Block count
+        let blocks = self.block.iter();
+        self.cache.block_count.store(blocks.len() as u64, Ordering::SeqCst);
+        
+        // Account count
+        let accounts = self.account.iter(rsnano_core::Account::zero());
+        self.cache.account_count.store(accounts.len() as u64, Ordering::SeqCst);
+        
+        // Confirmed count
+        let conf_heights = self.confirmation_height.iter();
+        let total_confirmed: u64 = conf_heights.iter().map(|(_, info)| info.height).sum();
+        self.cache.confirmed_count.store(total_confirmed, Ordering::SeqCst);
     }
+
     pub fn tx_begin_read(&self) -> () { () }
     pub fn tx_begin_write(&self) -> () { () }
+
+    pub fn flush(&self) -> anyhow::Result<()> {
+        let mut lock = kernel_common::storage::DB.lock();
+        if let Some(db) = lock.as_mut() {
+            db.flush().map_err(|e: virtio_drivers::Error| anyhow::anyhow!("DB flush failed: {:?}", e))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn wipe(&self) {
+        let mut lock = kernel_common::storage::DB.lock();
+        if let Some(db) = lock.as_mut() {
+            db.wipe();
+        }
+        self.cache.reset();
+    }
 }
 
 use crate::*;

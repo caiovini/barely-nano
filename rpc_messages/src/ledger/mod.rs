@@ -1,3 +1,7 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 mod account_balance;
 mod account_block_count;
 mod account_history;

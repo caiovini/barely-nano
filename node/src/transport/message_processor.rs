@@ -48,6 +48,7 @@ impl MessageProcessor {
                 inbound_queue,
                 realtime_handler,
                 stopped: AtomicBool::new(false),
+                total_processed: core::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -84,6 +85,14 @@ impl MessageProcessor {
             self.state.handle_batch(batch);
         }
     }
+
+    pub fn queue_len(&self) -> usize {
+        self.state.inbound_queue.size()
+    }
+
+    pub fn total_processed(&self) -> u64 {
+        self.state.total_processed.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for MessageProcessor {
@@ -96,6 +105,7 @@ struct State {
     stopped: AtomicBool,
     realtime_handler: Arc<RealtimeMessageHandler>,
     inbound_queue: Arc<InboundMessageQueue>,
+    total_processed: core::sync::atomic::AtomicU64,
 }
 
 impl State {
@@ -115,19 +125,10 @@ impl State {
     #[allow(dead_code)]
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
         // let start = Instant::now();
-        let _batch_size = batch.len();
+        let batch_size = batch.len();
         for (_, (message, channel)) in batch {
             self.realtime_handler.process(message, &channel);
         }
-
-        // let elapsed_millis = start.elapsed().as_millis();
-        // if elapsed_millis > 100 {
-        //     debug!(
-        //         "Processed {} messages in {} milliseconds (rate of {} messages per second)",
-        //         batch_size,
-        //         elapsed_millis,
-        //         batch_size as u128 * 1000 / elapsed_millis
-        //     );
-        // }
+        self.total_processed.fetch_add(batch_size as u64, Ordering::Relaxed);
     }
 }

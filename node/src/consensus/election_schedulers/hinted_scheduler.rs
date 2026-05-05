@@ -213,6 +213,16 @@ impl HintedScheduler {
         }
     }
 
+    pub fn run_once(&self) {
+        if self.stopped.load(Ordering::Relaxed) {
+            return;
+        }
+
+        if self.predicate() {
+            self.run_interactive()
+        }
+    }
+
     fn run_interactive(&self) {
         let minimum_tally = self.tally_threshold();
         let minimum_final_tally = self.final_tally_threshold();
@@ -317,16 +327,7 @@ pub trait HintedSchedulerExt {
 
 impl HintedSchedulerExt for Arc<HintedScheduler> {
     fn start(&self) {
-        // debug_assert!(self.thread.lock().is_none());
-        // let self_l = Arc::clone(self);
-        // *self.thread.lock() = Some(
-        //     std::thread::Builder::new()
-        //         .name("Sched Hinted".to_string())
-        //         .spawn(Box::new(move || {
-        //             self_l.run();
-        //         }))
-        //         .unwrap(),
-        // );
+        self.stopped.store(false, Ordering::SeqCst);
     }
 }
 

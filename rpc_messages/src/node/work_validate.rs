@@ -1,3 +1,7 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{RpcCommand, RpcF64, RpcU64};
 use rsnano_core::{BlockHash, WorkNonce};
 use serde::{Deserialize, Serialize};

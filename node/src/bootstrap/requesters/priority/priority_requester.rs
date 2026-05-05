@@ -1,5 +1,6 @@
 use alloc::sync::{ Arc };
 use core::sync::atomic::{ AtomicU64, Ordering };
+use tracing::debug;
 
 use rsnano_ledger::Ledger;
 use rsnano_network::Channel;
@@ -105,6 +106,7 @@ impl BootstrapPromise<AscPullQuerySpec> for PriorityRequester {
                     self.query_factory
                         .next_priority_query(state, channel.clone(), self.clock.now())
                 {
+                    debug!("PriorityRequester: issuing query for account {} to channel {}", query.account.encode_account(), channel.channel_id());
                     self.state = PriorityState::Initial;
                     PollResult::Finished(query)
                 } else {

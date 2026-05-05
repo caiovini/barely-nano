@@ -1,6 +1,11 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{RpcBool, RpcCommand, RpcU8};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddrV6};
+use hashbrown::HashMap;
+use rsnano_core::utils::SocketAddrV6;
 
 impl RpcCommand {
     pub fn peers(peer_details: Option<bool>) -> Self {
@@ -8,7 +13,7 @@ impl RpcCommand {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct PeersArgs {
     pub peer_details: Option<RpcBool>,
 }
@@ -51,7 +56,7 @@ pub struct DetailedPeers {
 mod tests {
     use super::*;
     use serde_json;
-    use std::net::Ipv6Addr;
+    use rsnano_core::utils::Ipv6Addr;
 
     #[test]
     fn serialize_simple_peers() {

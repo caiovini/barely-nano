@@ -1,3 +1,7 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{RpcCommand, RpcU64};
 use serde::{Deserialize, Serialize};
 

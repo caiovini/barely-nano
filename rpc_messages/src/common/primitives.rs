@@ -1,5 +1,9 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use serde::{de::Visitor, Deserialize, Serialize};
-use std::fmt::Debug;
+use core::fmt::Debug;
 
 #[macro_export]
 macro_rules! rpc_number {
@@ -53,15 +57,15 @@ macro_rules! rpc_number_impl {
             }
         }
 
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                std::fmt::Debug::fmt(&self.0, f)
+        impl core::fmt::Debug for $name {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                core::fmt::Debug::fmt(&self.0, f)
             }
         }
 
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                std::fmt::Display::fmt(&self.0, f)
+        impl core::fmt::Display for $name {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                core::fmt::Display::fmt(&self.0, f)
             }
         }
 
@@ -88,7 +92,7 @@ macro_rules! rpc_number_impl {
         impl<'de> serde::de::Visitor<'de> for $visitor {
             type Value = $name;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                 formatter.write_str(stringify!($type))
             }
 
@@ -145,7 +149,7 @@ impl From<RpcBoolNumber> for bool {
 }
 
 impl Debug for RpcBoolNumber {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -191,7 +195,7 @@ impl From<RpcBool> for bool {
 }
 
 impl Debug for RpcBool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -220,7 +224,7 @@ struct BoolVisitor {}
 impl<'de> Visitor<'de> for BoolVisitor {
     type Value = bool;
 
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
         formatter.write_str("bool, string of bool, or 0/1 as string")
     }
 

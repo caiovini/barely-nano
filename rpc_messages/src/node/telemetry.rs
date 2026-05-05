@@ -1,8 +1,12 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{RpcBool, RpcCommand, RpcU16, RpcU32, RpcU64, RpcU8};
 use rsnano_core::{to_hex_string, BlockHash, NodeId, Signature};
 use rsnano_messages::TelemetryData;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv6Addr, SocketAddrV6};
+use rsnano_core::utils::{Ipv6Addr, SocketAddrV6, UnixMillisTimestamp};
 
 impl RpcCommand {
     pub fn telemetry(args: TelemetryArgs) -> Self {
@@ -10,7 +14,7 @@ impl RpcCommand {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct TelemetryArgs {
     pub raw: Option<RpcBool>,
     pub address: Option<Ipv6Addr>,
@@ -99,12 +103,7 @@ impl From<TelemetryData> for TelemetryDto {
             patch_version: data.patch_version.into(),
             pre_release_version: data.pre_release_version.into(),
             maker: data.maker.into(),
-            timestamp: data
-                .timestamp
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                .into(),
+            timestamp: (data.timestamp.as_u64() / 1000).into(),
             active_difficulty: to_hex_string(data.active_difficulty),
             signature: Some(data.signature),
             node_id: Some(data.node_id),
@@ -131,7 +130,6 @@ mod tests {
     use super::*;
     use rsnano_core::{to_hex_string, BlockHash, Signature};
     use rsnano_messages::TelemetryData;
-    use std::time::UNIX_EPOCH;
 
     fn create_test_telemetry_data() -> TelemetryData {
         TelemetryData {
@@ -151,7 +149,7 @@ mod tests {
             patch_version: 0,
             pre_release_version: 0,
             maker: 3,
-            timestamp: UNIX_EPOCH + std::time::Duration::from_secs(1623456789),
+            timestamp: UnixMillisTimestamp::new(1623456789 * 1000),
             active_difficulty: 0xFFFFFFFFFFFFFFFF,
             unknown_data: vec![],
         }

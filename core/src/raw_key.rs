@@ -17,7 +17,7 @@ impl RawKey {
 
     pub fn encrypt(&self, _key: &RawKey, _iv: &[u8; 16]) -> Self {
         // let mut cipher = Aes256Ctr::new(&(*key.as_bytes()).into(), &(*iv).into());
-        let mut buf = self.0;
+        let buf = self.0;
         // cipher.apply_keystream(&mut buf);
         RawKey(buf)
     }

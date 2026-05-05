@@ -1,7 +1,7 @@
 use rsnano_core::utils::ContainerInfo;
 use rsnano_nullable_clock::Timestamp;
 use core::net::Ipv6Addr;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 
 pub struct PeerExclusion {
     excluded: HashMap<Ipv6Addr, ExcludedPeer>,

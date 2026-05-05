@@ -3,9 +3,10 @@ use super::{
     ordered_blocks::{BlockEntry, OrderedBlocks},
 };
 use crate::consensus::{ActiveElectionsContainer, AecInsertError, AecInsertRequest};
-use rsnano_core::{utils::BlockPriority, BlockHash, SavedBlock};
-use rsnano_nullable_clock::Timestamp;
 use core::sync::atomic::Ordering;
+use rsnano_core::{BlockHash, SavedBlock, utils::BlockPriority};
+use rsnano_nullable_clock::Timestamp;
+use tracing::debug;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PriorityBucketConfig {
@@ -136,9 +137,14 @@ impl Bucket {
             stats.replaced.fetch_add(1, Ordering::Relaxed);
         }
 
+        let block_hash = block.hash();
         match aec.insert(AecInsertRequest::new_priority(block, priority), now) {
             Ok(_) => {
                 stats.activate_success.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    "PriorityBucket {}: activated election for block {}",
+                    self.bucket_id, block_hash
+                );
             }
             Err(AecInsertError::RecentlyConfirmed) => {
                 stats
@@ -174,7 +180,7 @@ pub enum BucketInsertError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsnano_core::{utils::TimePriority, Amount};
+    use rsnano_core::{Amount, utils::TimePriority};
 
     #[test]
     fn construction() {

@@ -1,4 +1,3 @@
-use core::sync::atomic::Ordering;
 
 use rsnano_core::{
     Account, AccountInfo, Amount, Block, BlockSideband, PendingInfo, PendingKey, SavedBlock,
@@ -56,11 +55,6 @@ impl<'a> BlockInserter<'a> {
         self.delete_old_pending_info();
         self.insert_new_pending_info();
         self.update_representative_cache();
-        self.ledger
-            .store
-            .cache
-            .block_count
-            .fetch_add(1, Ordering::SeqCst);
 
         Some(saved_block)
     }

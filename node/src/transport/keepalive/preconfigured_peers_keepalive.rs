@@ -1,9 +1,9 @@
-use alloc::vec::Vec;
 use super::KeepalivePublisher;
-use rsnano_core::utils::Peer;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use rsnano_core::utils::Peer;
 
-use tracing::info;
+use tracing::debug;
 
 /// Connect to preconfigured peers or send keepalive messages
 /// if we are already connected
@@ -18,9 +18,11 @@ impl PreconfiguredPeersKeepalive {
     }
 
     pub async fn keepalive(&self) {
-        info!("Running keepalive for {} preconfigured peers", self.peers.len());
+        debug!(
+            "Running keepalive for {} preconfigured peers",
+            self.peers.len()
+        );
         for peer in &self.peers {
-            info!("Resolving preconfigured peer: {}:{}", peer.address, peer.port);
             self.keepalive
                 .keepalive_or_connect(peer.address.clone(), peer.port)
                 .await;

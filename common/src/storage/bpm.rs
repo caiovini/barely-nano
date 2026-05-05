@@ -98,13 +98,19 @@ impl<'a> BufferPool<'a> {
     }
 
     pub fn flush_all(&mut self) -> Result<(), virtio_drivers::Error> {
+        let mut count = 0;
         for frame in &mut self.frames {
             if frame.is_dirty {
                 if let Some(pid) = frame.page_id {
+                    tracing::debug!("BPM: flushing page {} to storage", pid);
                     self.storage.write_block(pid, &frame.data)?;
                     frame.is_dirty = false;
+                    count += 1;
                 }
             }
+        }
+        if count > 0 {
+            tracing::debug!("BPM: flushed {} dirty pages", count);
         }
         Ok(())
     }

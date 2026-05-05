@@ -4,7 +4,6 @@ use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 use core::{net::SocketAddrV6, time::Duration};
 use alloc::sync::Arc;
 use alloc::boxed::Box;
-use alloc::string::ToString;
 use tracing::debug;
 use kernel_common::async_rt;
 use core::future::{poll_fn, Future};
@@ -55,24 +54,44 @@ impl PeerConnector {
             return Err(NetworkError::Cancelled);
         }
 
-        tracing::info!("[node] Attempting to connect to peer: {}", peer);
-        self.network_adapter.add_outbound_attempt(peer)?;
+        match self.network_adapter.add_outbound_attempt(peer) {
+            Ok(_) => {
+            }
+            Err(NetworkError::DuplicateConnection) => {
+                // Silently skip if already attempting or connected
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
 
         let network_l = self.network_adapter.clone();
         let cancel_token = self.cancel_token.clone();
 
         async_rt::spawn(async move {
+            // Add a timeout to the connection attempt to prevent task leaks
             let mut connect_fut = Box::pin(connect_impl(peer, &network_l));
             let mut cancel_fut = Box::pin(cancel_token.cancelled());
+            
+            // Simple timeout implementation for bare-metal
+            let start = kernel_common::clint::mtime();
+            let timeout_ticks = 5 * kernel_common::clint::FREQ; 
             
             poll_fn(|cx| {
                 if let Poll::Ready(_) = Pin::new(&mut cancel_fut).poll(cx) {
                     debug!("Connection attempt cancelled: {}", peer);
                     return Poll::Ready(());
                 }
+                
                 if let Poll::Ready(_) = Pin::new(&mut connect_fut).poll(cx) {
                     return Poll::Ready(());
                 }
+                
+                if kernel_common::clint::mtime() - start > timeout_ticks {
+                    return Poll::Ready(());
+                }
+                
+                // Re-register waker to ensure we check the timeout
+                cx.waker().wake_by_ref();
                 Poll::Pending
             }).await;
 
@@ -93,6 +112,7 @@ async fn connect_impl(peer: SocketAddrV6, network_adapter: &TcpNetworkAdapter) {
             let _ = network_adapter.add(stream, ChannelDirection::Outbound);
         }
         Err(e) => {
+            tracing::warn!("Failed to connect to {}: {:?}", peer, e);
             network_adapter.connect_error(peer, e);
         }
     }

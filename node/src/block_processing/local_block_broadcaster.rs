@@ -306,7 +306,6 @@ impl LocalBlockBroadcaster {
     }
 
     pub fn blocks_processed(&self, batch: &[ProcessedResult]) {
-        tracing::info!("[node] LocalBlockBroadcaster::blocks_processed, batch size: {}", batch.len());
         if !self.enabled {
             return;
         }

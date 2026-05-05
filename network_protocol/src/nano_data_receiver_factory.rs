@@ -1,13 +1,13 @@
 use alloc::sync::{Arc, Weak};
 use spin::{Mutex, RwLock};
 
-use rsnano_core::{BlockHash, NodeId, PrivateKey, ProtocolInfo};
+use rsnano_core::{BlockHash, PrivateKey, ProtocolInfo};
 use rsnano_messages::{Message, MessageDeserializer, NetworkFilter};
 use rsnano_network::{Channel, DataReceiver, DataReceiverFactory, Network};
 use rsnano_stats::Stats;
 
 use crate::{
-    HandshakeProcess, HandshakeStats, LatestKeepalives, MessageCallback, NanoDataReceiver,
+    HandshakeProcess, HandshakeStats, LatestKeepalives, NanoDataReceiver,
     SynCookies,
 };
 

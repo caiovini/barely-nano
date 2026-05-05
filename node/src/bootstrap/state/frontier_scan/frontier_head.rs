@@ -25,6 +25,8 @@ pub(super) struct FrontierHead {
     /// Total number of accounts processed for the current starting account
     pub accounts_processed: usize,
 
+    pub processed_full_range: bool,
+
     config: FrontierScanConfig,
 }
 
@@ -44,6 +46,7 @@ impl FrontierHead {
             requests_completed: 0,
             last_request_sent: Timestamp::default(),
             accounts_processed: 0,
+            processed_full_range: false,
             config,
         }
     }
@@ -105,22 +108,18 @@ impl FrontierHead {
 
     /// Take the last candidate as the next frontier or wraps around
     fn advance(&mut self) {
-        self.next = self.next_start_account();
+        let last = self.candidates.last().cloned().unwrap_or(self.next);
+        self.next = if last.number() >= self.end.number() {
+            self.processed_full_range = true;
+            self.start
+        } else {
+            last
+        };
         self.accounts_processed += self.candidates.len();
         self.candidates.clear();
         self.requests_sent = 0;
         self.requests_completed = 0;
         self.last_request_sent = Timestamp::default();
-    }
-
-    fn next_start_account(&self) -> Account {
-        let last = self.candidates.last().cloned().unwrap_or(self.next);
-        // Bound the search range
-        if last.number() >= self.end.number() {
-            self.start
-        } else {
-            last
-        }
     }
 }
 

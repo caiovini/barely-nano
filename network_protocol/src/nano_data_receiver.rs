@@ -1,7 +1,6 @@
 use core::sync::atomic::Ordering;
 use alloc::sync::{Arc, Weak};
 use spin::{Mutex, RwLock};
-use alloc::boxed::Box;
 
 use tracing::{debug, warn};
 
@@ -15,11 +14,11 @@ use rsnano_stats::{DetailType, Direction, StatType, Stats};
 use crate::{HandshakeProcess, HandshakeStats, HandshakeStatus, LatestKeepalives};
 
 pub struct NanoDataReceiver {
+    try_enqueue: Arc<dyn Fn(Message, Arc<Channel>) -> bool + Send + Sync>,
     channel: Arc<Channel>,
     handshake_process: HandshakeProcess,
     serializer: MessageSerializer,
     message_deserializer: MessageDeserializer,
-    try_enqueue: Arc<dyn Fn(Message, Arc<Channel>) -> bool + Send + Sync>,
     latest_keepalives: Arc<Mutex<LatestKeepalives>>,
     stats: Arc<Stats>,
     network: Weak<RwLock<Network>>,
@@ -42,11 +41,11 @@ impl NanoDataReceiver {
         protocol: ProtocolInfo,
     ) -> Self {
         Self {
+            try_enqueue,
             channel,
             handshake_process,
-            serializer: MessageSerializer::new_with_buffer_size(protocol, 512),
+            serializer: MessageSerializer::new(protocol),
             message_deserializer,
-            try_enqueue,
             latest_keepalives,
             stats,
             network,
@@ -69,8 +68,6 @@ impl NanoDataReceiver {
 
         match result {
             Ok(_) => {
-                // Handshake message is sent by initiate_handshake or we should do it here
-                // For now, assume it's just a placeholder
                 debug!("Initiating handshake query ({})", peer);
                 self.handshake_stats
                     .handshakes_sent
@@ -149,12 +146,6 @@ impl NanoDataReceiver {
 
             self.stats
                 .inc(StatType::TcpChannels, DetailType::ChannelAccepted);
-
-            tracing::info!(
-                "Switched to realtime mode (addr: {}, node_id: {})",
-                self.channel.peer_addr(),
-                node_id
-            );
             true
         } else {
             tracing::info!(
@@ -210,6 +201,7 @@ impl NanoDataReceiver {
 
             match status {
                 HandshakeStatus::Abort | HandshakeStatus::AbortOwnNodeId => {
+                    tracing::info!("Handshake aborted with {} (status: {:?})", self.channel.peer_addr(), status);
                     if matches!(status, HandshakeStatus::AbortOwnNodeId) {
                         if let Some(peering_addr) = self.channel.peering_addr() {
                             if let Some(network) = self.network.upgrade() {
@@ -237,6 +229,8 @@ impl NanoDataReceiver {
 
 impl DataReceiver for NanoDataReceiver {
     fn receive(&mut self, data: &[u8]) -> ReceiveResult {
+        
+
         self.message_deserializer.push(data);
         while let Some(result) = self.message_deserializer.try_deserialize() {
             let result = match result {
@@ -246,29 +240,15 @@ impl DataReceiver for NanoDataReceiver {
                             .set_protocol_version(msg.protocol.version_using);
                         self.first_message = false;
                     }
-                    tracing::info!("[node] Deserialized message: {:?} from {}", msg.message.message_type(), self.channel.peer_addr());
                     self.process_message(msg.message)
                 }
-                Err(ParseMessageError::DuplicatePublishMessage) => {
-                    self.stats.inc_dir(
-                        StatType::Filter,
-                        DetailType::DuplicatePublishMessage,
-                        Direction::In,
-                    );
-                    ReceiveResult::Continue
-                }
-                Err(ParseMessageError::DuplicateConfirmAckMessage) => {
-                    self.stats.inc_dir(
-                        StatType::Filter,
-                        DetailType::DuplicateConfirmAckMessage,
-                        Direction::In,
-                    );
-                    ReceiveResult::Continue
-                }
                 Err(e) => {
-                    self.stats
-                        .inc_dir(StatType::Error, DetailType::from(&e), Direction::In);
-                    ReceiveResult::Abort
+                    if matches!(e, ParseMessageError::DuplicateConfirmAckMessage | ParseMessageError::DuplicatePublishMessage) {
+                        ReceiveResult::Continue
+                    } else {
+                        warn!("Message deserialization error: {:?} (addr: {})", e, self.channel.peer_addr());
+                        ReceiveResult::Abort
+                    }
                 }
             };
 
@@ -292,13 +272,10 @@ impl DataReceiver for NanoDataReceiver {
             ChannelMode::Undefined => {
                 let q_len = self.channel.queue_len();
                 if q_len > 0 {
-                    tracing::info!("[node] try_unpause: still paused (queue_len: {})", q_len);
                     return ReceiveResult::Pause;
                 }
 
-                tracing::info!("[node] try_unpause: upgrading to realtime...");
                 if !self.to_realtime_connection(&self.node_id) {
-                    tracing::info!("[node] try_unpause: upgrade failed!");
                     return ReceiveResult::Abort;
                 }
 

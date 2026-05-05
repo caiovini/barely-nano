@@ -208,19 +208,15 @@ impl RepCrawler {
         // If online weight drops below minimum, reach out to preconfigured peers
         if !sufficient_weight {
             if !self.keepalive_in_progress.swap(true, Ordering::SeqCst) {
-                info!("[rep_crawler] Insufficient weight, calling keepalive");
                 self.stats
                     .inc_dir(StatType::RepCrawler, DetailType::Keepalive, Direction::In);
                 let preconfigured = self.preconfigured_peers.clone();
-                info!("[rep_crawler] Spawning keepalive task");
                 let _in_progress = Arc::new(&self.keepalive_in_progress);
                 // unsafe: we know 'self' lives as long as the node
                 let self_ptr = self as *const RepCrawler as usize;
                 kernel_common::async_rt::spawn(async move {
                     let this = unsafe { &*(self_ptr as *const RepCrawler) };
-                    tracing::info!("[node] Keepalive task started");
                     preconfigured.keepalive().await;
-                    tracing::info!("[node] Keepalive task finished");
                     this.keepalive_in_progress.store(false, Ordering::SeqCst);
                 });
             }
@@ -278,7 +274,7 @@ impl RepCrawler {
         }
     }
 
-    fn validate_and_process(&self, mut guard: spin::MutexGuard<RepCrawlerImpl>) {
+    fn validate_and_process(&self, mut guard: spin::MutexGuard<'_, RepCrawlerImpl>) {
         let mut responses = BoundedVecDeque::new(Self::MAX_RESPONSES);
         core::mem::swap(&mut guard.responses, &mut responses);
         drop(guard);

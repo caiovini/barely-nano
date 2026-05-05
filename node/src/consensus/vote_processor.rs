@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use hashbrown::{ HashMap };
 use spin::{ Mutex };
 use core::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
@@ -97,8 +98,7 @@ impl VoteProcessor {
                 if self.queue.stopped() {
                     return;
                 }
-
-                // std::thread::sleep(Duration::from_millis(25));
+                core::hint::spin_loop();
                 continue;
             }
 
@@ -109,29 +109,53 @@ impl VoteProcessor {
                 break; //stopped
             }
 
-            // let start = Instant::now();
-            // TODO: fix time
-
-            for (_, (vote, source, channel, filter)) in &batch {
-                let filter = filter.unwrap_or_default();
-                let received_vote = ReceivedVote::new(vote.clone(), *source, channel.clone());
-                let filtered_vote = FilteredVote::new(received_vote.clone(), filter);
-                let _ = self.vote_blocking(&filtered_vote);
-            }
-
-            self.total_processed
-                .fetch_add(batch.len() as u64, Ordering::SeqCst);
-
-            // let elapsed_millis = start.elapsed().as_millis();
-            // if batch.len() == self.queue.config.batch_size && elapsed_millis > 100 {
-            //     debug!(
-            //         "Processed {} votes in {} milliseconds (rate of {} votes per second)",
-            //         batch.len(),
-            //         elapsed_millis,
-            //         (batch.len() * 1000) / elapsed_millis as usize
-            //     );
-            // }
+            self.handle_batch(batch);
         }
+    }
+
+    pub fn run_once(&self) {
+        if self.queue.stopped() {
+            return;
+        }
+        if self.cool_down.load(Ordering::Relaxed) {
+            // kernel_common::uart::print(b"[node] VoteProcessor: in cool_down\n");
+            return;
+        }
+
+        let batch = {
+            let mut guard = self.queue.data.lock();
+            if guard.stopped || guard.queue.is_empty() {
+                return;
+            }
+            guard.queue.next_batch(self.queue.config.batch_size)
+        };
+
+        if !batch.is_empty() {
+            self.handle_batch(batch);
+        }
+    }
+
+    fn handle_batch(
+        &self,
+        batch: VecDeque<(
+            (super::RepTier, rsnano_network::ChannelId),
+            (
+                Arc<Vote>,
+                VoteSource,
+                Option<Arc<Channel>>,
+                Option<BlockHash>,
+            ),
+        )>,
+    ) {
+        for (_, (vote, source, channel, filter)) in &batch {
+            let filter: BlockHash = filter.unwrap_or_default();
+            let received_vote = ReceivedVote::new(vote.clone(), *source, channel.clone());
+            let filtered_vote = FilteredVote::new(received_vote, filter);
+            let _ = self.vote_blocking(&filtered_vote);
+        }
+
+        self.total_processed
+            .fetch_add(batch.len() as u64, Ordering::SeqCst);
     }
 
     pub fn vote_blocking(&self, vote: &FilteredVote) -> Result<(), VoteError> {
@@ -140,7 +164,6 @@ impl VoteProcessor {
             let vote_results = self.vote_applier.vote(vote);
             result = aggregate_vote_results(&vote_results);
         }
-
         result
     }
 }

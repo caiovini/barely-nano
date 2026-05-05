@@ -1,8 +1,12 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{RpcBool, RpcCommand, RpcU64};
 use rsnano_core::WalletId;
 use rsnano_core::{Account, Amount, BlockHash};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 impl RpcCommand {
     pub fn wallet_ledger(args: WalletLedgerArgs) -> Self {

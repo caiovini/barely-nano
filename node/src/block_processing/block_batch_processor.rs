@@ -89,6 +89,10 @@ impl BlockBatchProcessor {
             .collect();
 
         for (status, block_ctx) in &result {
+            let hash = &block_ctx.block.hash();
+            let block = &block_ctx.block;
+            let saved_block = block_ctx.saved_block.lock().clone();
+
             match status {
                 Ok(()) => {
                     self.stats.progress.fetch_add(1, Relaxed);
@@ -99,10 +103,6 @@ impl BlockBatchProcessor {
             }
 
             self.stats.sources[block_ctx.source as usize].fetch_add(1, Relaxed);
-
-            let hash = &block_ctx.block.hash();
-            let block = &block_ctx.block;
-            let saved_block = block_ctx.saved_block.lock().clone();
 
             match status {
                 Ok(()) => {

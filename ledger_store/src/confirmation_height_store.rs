@@ -24,7 +24,7 @@ impl BtreeConfirmationHeightStore {
 
     pub fn put(&self, account: &Account, info: &ConfirmationHeightInfo) {
         let key = self.make_key(account);
-        let mut value = [0u8; 256];
+        let mut value = [0u8; 512];
         let mut adapter = MutStreamAdapter::new(&mut value);
         info.serialize(&mut adapter);
         
@@ -56,11 +56,50 @@ impl BtreeConfirmationHeightStore {
         }
     }
 
+    pub fn iter(&self) -> alloc::vec::Vec<(Account, ConfirmationHeightInfo)> {
+        let mut results = alloc::vec::Vec::new();
+        let mut start_key = [0u8; KEY_SIZE];
+        start_key[0] = Self::TABLE_ID;
+
+        let mut lock = DB.lock();
+        if let Some(db) = lock.as_mut() {
+            let mut it = db.iter(start_key);
+            while let Some((key, value)) = it.next_kv() {
+                if key[0] != Self::TABLE_ID {
+                    break;
+                }
+                let account = Account::from_bytes(key[1..33].try_into().unwrap());
+                let mut stream = BufferReader::new(&value);
+                if let Ok(info) = ConfirmationHeightInfo::deserialize(&mut stream) {
+                    results.push((account, info));
+                }
+            }
+        }
+        results
+    }
+
     pub fn iter_range(
         &self,
         _tx: &(),
-        _range: core::ops::RangeFrom<Account>,
+        range: core::ops::RangeFrom<Account>,
     ) -> Box<dyn Iterator<Item = (Account, ConfirmationHeightInfo)>> {
-        Box::new(core::iter::empty())
+        let mut results = alloc::vec::Vec::new();
+        let start_key = self.make_key(&range.start);
+
+        let mut lock = DB.lock();
+        if let Some(db) = lock.as_mut() {
+            let mut it = db.iter(start_key);
+            while let Some((key, value)) = it.next_kv() {
+                if key[0] != Self::TABLE_ID {
+                    break;
+                }
+                let account = Account::from_bytes(key[1..33].try_into().unwrap());
+                let mut stream = BufferReader::new(&value);
+                if let Ok(info) = ConfirmationHeightInfo::deserialize(&mut stream) {
+                    results.push((account, info));
+                }
+            }
+        }
+        Box::new(results.into_iter())
     }
 }

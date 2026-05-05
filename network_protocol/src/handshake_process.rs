@@ -1,4 +1,4 @@
-use core::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use core::net::{Ipv6Addr, SocketAddrV6};
 use alloc::sync::Arc;
 
 use rsnano_core::{BlockHash, PrivateKey};
@@ -7,6 +7,7 @@ use rsnano_network::Channel;
 use rsnano_stats::Stats;
 use crate::SynCookies;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeStatus {
     Abort,
     AbortOwnNodeId,
@@ -40,14 +41,12 @@ impl HandshakeProcess {
     }
 
     pub fn initiate_handshake(&self, peer: &SocketAddrV6) -> anyhow::Result<()> {
-        tracing::info!("[node] HandshakeProcess::initiate_handshake");
-        if let Some(cookie) = self.syn_cookies.assign(peer) {
+        let cookie = self.syn_cookies.assign(peer);
+        if let Some(cookie) = cookie {
             let mut hex = alloc::string::String::new();
-            for &b in &cookie {
-                use core::fmt::Write;
-                write!(hex, "{:02X}", b).unwrap();
+            for b in cookie {
+                hex.push_str(&alloc::format!("{:02x}", b));
             }
-            tracing::info!("[node] Sending handshake with cookie: {} to {}", hex, peer);
             
             let message = Message::NodeIdHandshake(NodeIdHandshake {
                 query: Some(rsnano_messages::NodeIdHandshakeQuery { cookie }),
@@ -75,7 +74,7 @@ impl HandshakeProcess {
 
         // Handle incoming query
         if let Some(query) = &message.query {
-            let signature = self.node_id_key.sign(&query.cookie);
+            let _signature = self.node_id_key.sign(&query.cookie);
             response_message.response = Some(rsnano_messages::NodeIdHandshakeResponse::new_v2(
                 &query.cookie,
                 &self.node_id_key,
@@ -91,8 +90,6 @@ impl HandshakeProcess {
                 if let Err(e) = response.validate(&cookie) {
                     tracing::warn!("Invalid handshake response from {}: {:?}", self.channel.peer_addr(), e);
                     return (HandshakeStatus::Abort, None);
-                } else {
-                    tracing::info!("Handshake SUCCESS! Peer: {}", self.channel.peer_addr());
                 }
             } else {
                 tracing::warn!("No cookie found for handshake response from {}", self.channel.peer_addr());

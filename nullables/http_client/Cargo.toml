@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 rsnano_output_tracker = { path = "../output_tracker" }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde = { version = "=1.0.210", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 anyhow = { version = "1", default-features = false }
 reqwless = { version = "0.12", default-features = false, features = ["alloc"] }

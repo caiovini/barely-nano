@@ -1,12 +1,12 @@
-use core::ops::{RangeBounds};
 use alloc::vec::Vec;
+use core::ops::RangeBounds;
 
 use rsnano_core::{
     block_priority, utils::BlockPriority, Account, AccountInfo, Amount, Block, BlockHash,
     DependentBlocks, DetailedBlock, PendingInfo, PendingKey, PublicKey, QualifiedRoot, Root,
     SavedBlock,
 };
-use rsnano_ledger_store::{BtreeStore, BtreePendingStore};
+use rsnano_ledger_store::{BtreePendingStore, BtreeStore};
 
 use super::{BorrowingConfirmedSet, ConfirmedSet, LedgerSet};
 use crate::{DependentBlocksFinder, LedgerConstants, RepresentativeBlockFinder};
@@ -16,7 +16,7 @@ pub trait AnySet: LedgerSet {
     fn block_exists_or_pruned(&self, hash: &BlockHash) -> bool;
     fn get_block(&self, hash: &BlockHash) -> Option<SavedBlock>;
     fn receivable_exists(&self, account: Account) -> bool;
-    fn confirmed(&self) -> BorrowingConfirmedSet;
+    fn confirmed(&self) -> BorrowingConfirmedSet<'_>;
 
     fn block_balance(&self, hash: &BlockHash) -> Option<Amount> {
         if hash.is_zero() {
@@ -72,10 +72,7 @@ pub struct OwningAnySet<'a> {
 
 impl<'a> OwningAnySet<'a> {
     pub(crate) fn new(store: &'a BtreeStore, constants: &'a LedgerConstants) -> Self {
-        Self {
-            store,
-            constants,
-        }
+        Self { store, constants }
     }
 
     fn borrowing_set(&'a self) -> BorrowingAnySet<'a> {
@@ -88,10 +85,15 @@ impl<'a> OwningAnySet<'a> {
 
     pub fn accounts_range(
         &self,
-        _range: impl RangeBounds<Account> + 'static,
+        range: impl RangeBounds<Account> + 'static,
     ) -> Vec<(Account, AccountInfo)> {
-        // Btree doesn't have range iterators yet
-        Vec::new()
+        use core::ops::Bound::*;
+        let start = match range.start_bound() {
+            Included(a) => *a,
+            Excluded(a) => a.inc().unwrap_or(Account::zero()),
+            Unbounded => Account::zero(),
+        };
+        self.store.account.iter(start)
     }
 
     pub fn iter_account_range(
@@ -109,7 +111,7 @@ impl<'a> OwningAnySet<'a> {
     }
 
     pub fn iter_accounts(&self) -> Vec<(Account, AccountInfo)> {
-        Vec::new()
+        self.accounts_range(Account::zero()..)
     }
 
     pub fn random_blocks(&self, count: usize) -> Vec<SavedBlock> {
@@ -131,8 +133,7 @@ impl<'a> OwningAnySet<'a> {
             .unwrap_or_default()
     }
 
-    pub fn refresh_if_needed(&mut self) {
-    }
+    pub fn refresh_if_needed(&mut self) {}
 }
 
 impl<'a> LedgerSet for OwningAnySet<'a> {
@@ -165,7 +166,7 @@ impl<'a> AnySet for OwningAnySet<'a> {
         self.borrowing_set().get_block(hash)
     }
 
-    fn confirmed(&self) -> BorrowingConfirmedSet {
+    fn confirmed(&self) -> BorrowingConfirmedSet<'_> {
         BorrowingConfirmedSet::new(self.store, &())
     }
 
@@ -228,19 +229,43 @@ impl<'a> AnySet for OwningAnySet<'a> {
     }
 
     fn linked_account(&self, block: &SavedBlock) -> Option<Account> {
-        self.borrowing_set().linked_account(block)
+        if block.is_send() {
+            Some(block.destination_or_link())
+        } else if block.is_receive() {
+            self.block_account(&block.source_or_link())
+        } else {
+            None
+        }
     }
 
     fn block_amount(&self, hash: &BlockHash) -> Option<Amount> {
-        self.borrowing_set().block_amount(hash)
+        let block = self.get_block(hash)?;
+        self.block_amount_for(&block)
     }
 
     fn block_amount_for(&self, block: &SavedBlock) -> Option<Amount> {
-        self.borrowing_set().block_amount_for(block)
+        let block_balance = block.balance();
+        if block.previous().is_zero() {
+            Some(block_balance)
+        } else {
+            let previous_balance = self.block_balance(&block.previous())?;
+            if block_balance > previous_balance {
+                Some(block_balance - previous_balance)
+            } else {
+                Some(previous_balance - block_balance)
+            }
+        }
     }
 
     fn detailed_block(&self, hash: &BlockHash) -> Option<DetailedBlock> {
-        self.borrowing_set().detailed_block(hash)
+        let block = self.get_block(hash)?;
+        let amount = self.block_amount_for(&block);
+        let confirmed = self.confirmed().block_exists_or_pruned(hash);
+        Some(DetailedBlock {
+            block,
+            amount,
+            confirmed,
+        })
     }
 
     fn receivable_upper_bound(&self, account: Account) -> AnyReceivableIterator {
@@ -256,7 +281,8 @@ impl<'a> AnySet for OwningAnySet<'a> {
         account: Account,
         hash: BlockHash,
     ) -> AnyReceivableIterator {
-        self.borrowing_set().account_receivable_upper_bound(account, hash)
+        self.borrowing_set()
+            .account_receivable_upper_bound(account, hash)
     }
 
     fn get_final_vote(&self, root: &QualifiedRoot) -> Option<BlockHash> {
@@ -335,7 +361,7 @@ impl<'a> AnySet for BorrowingAnySet<'a> {
             .is_some()
     }
 
-    fn confirmed(&self) -> BorrowingConfirmedSet {
+    fn confirmed(&self) -> BorrowingConfirmedSet<'_> {
         BorrowingConfirmedSet::new(self.store, self.tx)
     }
 
@@ -346,9 +372,18 @@ impl<'a> AnySet for BorrowingAnySet<'a> {
     }
 
     fn dependents_confirmed(&self, block: &SavedBlock) -> bool {
-        self.dependent_blocks(block)
-            .iter()
-            .all(|hash| self.confirmed().block_exists_or_pruned(hash))
+        let dependents = self.dependent_blocks(block);
+        for hash in dependents.iter() {
+            if !hash.is_zero() && !self.confirmed().block_exists_or_pruned(hash) {
+                tracing::debug!(
+                    "dependents_confirmed: block {} dependent {} NOT confirmed",
+                    block.hash(),
+                    hash
+                );
+                return false;
+            }
+        }
+        true
     }
 
     fn dependent_blocks(&self, block: &SavedBlock) -> DependentBlocks {
@@ -464,12 +499,7 @@ impl<'a> AnySet for BorrowingAnySet<'a> {
 
     fn receivable_upper_bound(&self, account: Account) -> AnyReceivableIterator {
         match account.inc() {
-            None => AnyReceivableIterator::new(
-                &self.store.pending,
-                Default::default(),
-                None,
-                None,
-            ),
+            None => AnyReceivableIterator::new(&self.store.pending, Default::default(), None, None),
             Some(account) => AnyReceivableIterator::new(
                 &self.store.pending,
                 account,
@@ -480,12 +510,7 @@ impl<'a> AnySet for BorrowingAnySet<'a> {
     }
 
     fn receivable_lower_bound(&self, account: Account) -> AnyReceivableIterator {
-        AnyReceivableIterator::new(
-            &self.store.pending,
-            account,
-            None,
-            Some(BlockHash::zero()),
-        )
+        AnyReceivableIterator::new(&self.store.pending, account, None, Some(BlockHash::zero()))
     }
 
     fn account_receivable_upper_bound(
@@ -493,12 +518,7 @@ impl<'a> AnySet for BorrowingAnySet<'a> {
         account: Account,
         hash: BlockHash,
     ) -> AnyReceivableIterator {
-        AnyReceivableIterator::new(
-            &self.store.pending,
-            account,
-            Some(account),
-            hash.inc(),
-        )
+        AnyReceivableIterator::new(&self.store.pending, account, Some(account), hash.inc())
     }
 
     fn get_final_vote(&self, root: &QualifiedRoot) -> Option<BlockHash> {
@@ -520,7 +540,7 @@ impl AnyReceivableIterator {
         _next_hash: Option<BlockHash>,
     ) -> Self {
         // Btree doesn't have range iterators yet, returning empty for now
-        let items = pending.iter(); 
+        let items = pending.iter();
         Self {
             returned_account,
             items,
@@ -538,7 +558,7 @@ impl Iterator for AnyReceivableIterator {
         }
         let (key, info) = &self.items[self.index];
         self.index += 1;
-        
+
         match self.returned_account {
             Some(acc) => {
                 if acc == key.receiving_account {

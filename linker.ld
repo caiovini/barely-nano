@@ -2,7 +2,7 @@ ENTRY(_start);
 
 MEMORY
 {
-  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 128M
+  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 1024M
 }
 
 SECTIONS
@@ -23,13 +23,17 @@ SECTIONS
     _bss_end = .;
   } > RAM
 
-  /* Stack: 8MB (1MB per Hart) */
-  . = ALIGN(16);
-  . = . + 0x800000;
+  /* Stack: 256MB (32MB per Hart) */
+  . = ALIGN(4096);
+  . = 0x81000000;
+  _stack_bottom = .;
+  . = . + 0x10000000;
   _stack_top = .;
 
-  /* Heap: 64MB */
+  /* Heap: 512MB */
+  . = ALIGN(4096);
+  . = 0xA0000000;
   _heap_start = .;
-  . = . + 0x4000000;
+  . = . + 0x20000000;
   _heap_end = .;
 }

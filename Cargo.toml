@@ -23,7 +23,8 @@ members = [
 	"websocket_client",
 	"websocket_server",
 	"node",
-	"daemon",
+	"rpc_handler",
+	"rpc_messages"
 ]
 resolver = "2"
 

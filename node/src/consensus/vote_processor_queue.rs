@@ -16,7 +16,7 @@ use rsnano_stats::{DetailType, StatType, Stats};
 use super::{RepTier, RepTiers, RepTiersConsumer, VoteProcessorConfig};
 
 pub struct VoteProcessorQueue {
-    data: Mutex<VoteProcessorQueueData>,
+    pub(crate) data: Mutex<VoteProcessorQueueData>,
     condition: Condvar,
     pub config: VoteProcessorConfig,
     stats: Arc<Stats>,
@@ -192,9 +192,9 @@ impl DeadChannelCleanupStep for VoteProcessorQueueCleanup {
     }
 }
 
-struct VoteProcessorQueueData {
-    stopped: bool,
-    queue: FairQueue<
+pub struct VoteProcessorQueueData {
+    pub stopped: bool,
+    pub queue: FairQueue<
         (RepTier, ChannelId),
         (
             Arc<Vote>,
@@ -203,5 +203,5 @@ struct VoteProcessorQueueData {
             Option<BlockHash>, //filter
         ),
     >,
-    rep_tiers: RepTiers,
+    pub rep_tiers: RepTiers,
 }

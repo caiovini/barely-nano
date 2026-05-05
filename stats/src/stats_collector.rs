@@ -120,7 +120,7 @@ impl StatsCollector {
         self.sources.push(Box::new(source));
     }
 
-    pub fn collect(&self) -> MutexGuard<StatsCollection> {
+    pub fn collect(&self) -> MutexGuard<'_, StatsCollection> {
         let mut stats = self.stats.lock();
         for source in &self.sources {
             source.collect_stats(&mut stats);

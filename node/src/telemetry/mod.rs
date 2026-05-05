@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::boxed::Box;

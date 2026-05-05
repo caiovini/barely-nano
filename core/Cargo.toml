@@ -16,9 +16,6 @@ anyhow = { version = "1", default-features = false }
 # cipher = { version = "0.4", default-features = false }
 # ctr = { version = "0", default-features = false }
 tracing = { version = "0.1", default-features = false }
-# ed25519-dalek = ...
-curve25519-dalek = { version = "4", default-features = false }
-blake2 = { version = "0.10", default-features = false }
 hex = { version = "0", default-features = false }
 num = { version = "0", default-features = false }
 num-traits = { version = "0", default-features = false }
@@ -26,7 +23,7 @@ num-format = { version = "0", default-features = false }
 num-derive = { version = "0", default-features = false }
 primitive-types = { version = "0", default-features = false }
 # rust-argon2 = { version = "3", default-features = false }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde = { version = "=1.0.210", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 spin = "0.9"
 static_assertions = "1"

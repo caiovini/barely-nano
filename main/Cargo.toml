@@ -19,8 +19,13 @@ linked_list_allocator = { version = "0.10", default-features = false, features =
 rsnano_node = { path = "../node" }
 rsnano_core = { path = "../core" }
 rsnano_network = { path = "../network" }
+rsnano_ledger = { path = "../ledger" }
 rsnano_nullable_random = { path = "../nullables/random" }
 smoltcp = { version = "0.13", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-tcp", "socket-udp", "socket-dns", "async"] }
 anyhow = { version = "1.0", default-features = false }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+rsnano_rpc_handler = { path = "../rpc_handler" }
+rsnano_rpc_messages = { path = "../rpc_messages" }
+rsnano_rpc_server = { path = "../rpc_server", default-features = false }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }

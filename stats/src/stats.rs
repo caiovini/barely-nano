@@ -6,7 +6,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering, AtomicU32},
     time::Duration,
 };
-use spin::{RwLock, Mutex};
+use spin::Mutex;
 use rsnano_nullable_clock::{Timestamp, SteadyClock};
 
 use anyhow::Result;
@@ -23,7 +23,6 @@ const STATS_MAP_SIZE: usize = 4096;
 const MAX_SAMPLES_PER_TYPE: usize = 16;
 
 pub struct Stats {
-    config: StatsConfig,
     mutables: Arc<StatMutables>,
     enable_logging: bool,
     clock: SteadyClock,
@@ -36,10 +35,9 @@ impl Default for Stats {
 }
 
 impl Stats {
-    pub fn new(config: StatsConfig) -> Self {
+    pub fn new(_config: StatsConfig) -> Self {
         let clock = SteadyClock::default();
         Self {
-            config: config.clone(),
             mutables: Arc::new(StatMutables::new(clock.now())),
             enable_logging: get_env_bool("NANO_LOG_STATS").unwrap_or(false),
             clock,
@@ -203,14 +201,14 @@ impl Stats {
         if let Some(db) = db_guard.as_mut() {
             for (key, val) in updates {
                 let mut db_key = [0u8; 65];
-                db_key[0] = 1; // Stats table
+                db_key[0] = 10; // Stats table
                 db_key[1] = key.stat_type as u8;
                 let detail_bytes = (key.detail as u16).to_le_bytes();
                 db_key[2] = detail_bytes[0];
                 db_key[3] = detail_bytes[1];
                 db_key[4] = key.dir as u8;
 
-                let mut db_val = [0u8; 256];
+                let mut db_val = [0u8; 512];
                 db_val[0..8].copy_from_slice(&val.to_le_bytes());
                 db.insert(db_key, db_val);
             }

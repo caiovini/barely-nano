@@ -1,14 +1,14 @@
-use core::any::Any;
-use spin::RwLock;
-use core::sync::atomic::{AtomicU64, Ordering};
-use core::time::Duration;
+use super::{ActiveElectionsContainer, AecTickerPlugin, election::Election};
+use crate::bootstrap::Bootstrapper;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use super::{election::Election, ActiveElectionsContainer, AecTickerPlugin};
-use crate::bootstrap::Bootstrapper;
+use core::any::Any;
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::time::Duration;
 use rsnano_core::Account;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{StatsCollection, StatsSource};
+use spin::RwLock;
 // // // // // // // use std::{    any::Any, time::Duration    }; // TODO: fix this
 
 /// If an election isn't confirmed within "stale_threshold", then try to bootstrap
@@ -22,7 +22,7 @@ pub(crate) struct BootstrapStaleElections {
 }
 
 impl BootstrapStaleElections {
-    pub const DEFAULT_STALE_THRESHOLD: Duration = Duration::from_secs(60);
+    pub const DEFAULT_STALE_THRESHOLD: Duration = Duration::from_secs(5);
 
     pub(crate) fn new(bootstrapper: Arc<Bootstrapper>, clock: Arc<SteadyClock>) -> Self {
         Self {
@@ -57,20 +57,30 @@ impl BootstrapStaleElections {
 
 impl AecTickerPlugin for BootstrapStaleElections {
     fn run(&mut self, aec: &RwLock<ActiveElectionsContainer>) {
+        if !self.bootstrapper.is_active() {
+            return;
+        }
+
         let now = self.clock.now();
-
-        let is_stale = |election: &&Election| election.start().elapsed(now) >= self.stale_threshold;
-
-        self.stale_accounts.clear();
-        self.stale_accounts.extend(
-            aec.read()
-                .iter_round_robin()
-                .filter(is_stale)
-                .map(|e| e.account())
-                .take(128),
-        );
-
-        self.bootstrap_stale_accounts();
+        let mut stale = Vec::new();
+        {
+            let guard = aec.read();
+            for election in guard.iter_round_robin() {
+                if election.start().elapsed(now) >= self.stale_threshold {
+                    stale.push(election.winner().hash());
+                }
+            }
+        }
+        if !stale.is_empty() {
+            tracing::debug!(
+                "BootstrapStaleElections: force-confirming {} stale elections",
+                stale.len()
+            );
+            let mut guard = aec.write();
+            for hash in stale {
+                guard.force_confirm(&hash, now);
+            }
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -97,7 +107,7 @@ impl StatsSource for StaleElectionsStats {
 mod tests {
     use super::*;
     use crate::consensus::AecInsertRequest;
-    use rsnano_core::{utils::BlockPriority, SavedBlock};
+    use rsnano_core::{SavedBlock, utils::BlockPriority};
 
     #[test]
     fn process_empty() {
@@ -129,10 +139,12 @@ mod tests {
         let mut plugin = BootstrapStaleElections::new(bootstrapper.clone(), clock);
         plugin.run(&RwLock::new(aec));
 
-        assert!(bootstrapper
-            .state()
-            .candidate_accounts
-            .prioritized(&account));
+        assert!(
+            bootstrapper
+                .state()
+                .candidate_accounts
+                .prioritized(&account)
+        );
         assert_eq!(plugin.stats.bootstrap_stale.load(Ordering::Relaxed), 1);
     }
 

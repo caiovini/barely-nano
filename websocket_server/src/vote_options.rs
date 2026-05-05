@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use rsnano_core::Account;

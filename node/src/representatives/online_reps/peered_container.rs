@@ -39,7 +39,6 @@ impl PeeredContainer {
         channel: Arc<Channel>,
         now: Timestamp,
     ) -> InsertResult {
-        tracing::info!("[node] PeeredContainer::update_or_insert");
         let channel_id = channel.channel_id();
         if let Some(rep) = self.by_account.get_mut(&account) {
             // Update if representative channel was changed

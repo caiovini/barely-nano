@@ -1,7 +1,7 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::str::FromStr;
 use rsnano_nullable_env::Env;

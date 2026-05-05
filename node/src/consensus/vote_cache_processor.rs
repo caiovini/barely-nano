@@ -12,7 +12,7 @@ use rsnano_stats::{DetailType, StatType, Stats};
 
 use super::{VoteCache, VoteProcessorConfig, VoteProcessorQueue};
 
-pub(crate) struct VoteCacheProcessor {
+pub struct VoteCacheProcessor {
     state: Arc<Mutex<State>>,
     condition: Arc<Condvar>,
     stats: Arc<Stats>,
@@ -22,7 +22,7 @@ pub(crate) struct VoteCacheProcessor {
 }
 
 impl VoteCacheProcessor {
-    pub(crate) fn new(
+    pub fn new(
         stats: Arc<Stats>,
         vote_cache: Arc<Mutex<VoteCache>>,
         vote_queue: Arc<VoteProcessorQueue>,
@@ -45,21 +45,36 @@ impl VoteCacheProcessor {
 
 impl VoteCacheProcessor {
     pub fn start(&self) {
-        // debug_assert!(self.state.lock().thread.is_none());
-        // let cache_loop = VoteCacheLoop {
-        //     state: self.state.clone(),
-        //     condition: self.condition.clone(),
-        //     stats: self.stats.clone(),
-        //     vote_cache: self.vote_cache.clone(),
-        //     vote_queue: self.vote_queue.clone(),
-        // };
-        //
-        // self.state.lock().thread = Some(
-        //     std::/* /* /* thread::Builder::new()
-        //         .name("Vote cache proc".to_owned())
-        //         .spawn(move || cache_loop.run())
-        //         .unwrap(),
-        // );
+        // ...
+    }
+
+    pub fn run_once(&self) {
+        let triggered = {
+            let mut state = self.state.lock();
+            if state.stopped || state.triggered.is_empty() {
+                return;
+            }
+            let mut triggered = VecDeque::new();
+            core::mem::swap(&mut triggered, &mut state.triggered);
+            triggered
+        };
+
+        //deduplicate
+        let hashes: HashSet<rsnano_core::BlockHash> = triggered.into_iter().collect();
+
+        self.stats.add(
+            StatType::VoteCacheProcessor,
+            DetailType::Processed,
+            hashes.len() as u64,
+        );
+
+        for hash in hashes {
+            let cached = self.vote_cache.lock().find(&hash);
+            for cached_vote in cached {
+                self.vote_queue
+                    .enqueue(cached_vote, None, VoteSource::Cache, Some(hash));
+            }
+        }
     }
 
     pub fn stop(&self) {

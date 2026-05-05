@@ -2,32 +2,18 @@ use crate::{
     block_cementer::BlockCementer,
     block_insertion::{BlockInserter, BlockValidatorFactory},
     vote_verifier::VoteVerifier,
-    AnySet, BlockRollbackPerformer, BorrowingAnySet, BorrowingConfirmedSet, ConfirmedSet,
-    GenerateCacheFlags, LedgerConstants, LedgerSet, OwningAnySet, OwningConfirmedSet,
-    OwningUnconfirmedSet, RepWeightCache, RepWeightsUpdater, RollbackError,
+    AnySet, BlockRollbackPerformer, GenerateCacheFlags, LedgerConstants, LedgerSet, OwningAnySet,
+    OwningConfirmedSet, OwningUnconfirmedSet, RepWeightCache, RepWeightsUpdater, RollbackError,
 };
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 use rsnano_core::{
-    utils::{ContainerInfo, ContainerInfoProvider, UnixTimestamp, SocketAddrV6},
-    Account, AccountInfo, Amount, Block, BlockHash, ConfirmationHeightInfo, Epoch, Link,
-    PendingInfo, PendingKey, PublicKey, QualifiedRoot, Root, SavedBlock,
+    utils::SocketAddrV6, Account, AccountInfo, Amount, Block, BlockHash, ConfirmationHeightInfo,
+    Epoch, Link, PendingInfo, PendingKey, PublicKey, QualifiedRoot, Root, SavedBlock,
 };
-use rsnano_stats::{DetailType, StatType, Stats};
-use rsnano_ledger_store::{
-    BtreeStore, LedgerCache,
-};
-use rsnano_work::WorkThresholds;
-use alloc::{
-    collections::VecDeque,
-    sync::Arc,
-    vec::Vec,
-};
-use hashbrown::HashMap;
-use core::{
-    ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, Ordering},
-};
+use rsnano_ledger_store::BtreeStore;
 use rsnano_nullable_clock::Timestamp;
-use tracing::debug;
+use rsnano_stats::{DetailType, StatType, Stats};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, EnumCount, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -183,6 +169,14 @@ impl Ledger {
         "B-tree"
     }
 
+    pub fn version(&self) -> u32 {
+        1
+    }
+
+    pub fn pruned_count(&self) -> usize {
+        self.store.cache.pruned_count.load(Ordering::SeqCst) as usize
+    }
+
     pub fn genesis(&self) -> &Block {
         &self.constants.genesis_block
     }
@@ -223,17 +217,109 @@ impl Ledger {
         _thread_count: usize,
         _generate_cache: &GenerateCacheFlags,
     ) -> anyhow::Result<()> {
-        self.store.generate_cache();
         let genesis = self.constants.genesis_block.clone();
-        if !self.any().block_exists_or_pruned(&genesis.hash()) {
-            debug!("Genesis block not found, inserting...");
-            self.process_one(&genesis).map_err(|e| anyhow::anyhow!("Could not insert genesis: {:?}", e))?;
-            self.confirm(genesis.hash());
+        let genesis_account = self.constants.genesis_block.account();
+
+        for attempt in 0..2 {
+            self.store.generate_cache();
+
+            // 1. Ensure genesis block exists
+            if !self.any().block_exists_or_pruned(&genesis.hash()) {
+                tracing::info!("Genesis block not found, inserting (attempt {})...", attempt);
+                if let Err(e) = self.process_one(&genesis) {
+                    tracing::error!("Could not insert genesis block! Error: {:?}", e);
+                    if attempt == 0 {
+                        tracing::error!("FATAL: Ledger corruption detected during genesis insertion. Wiping database...");
+                        self.store.wipe();
+                        continue;
+                    } else {
+                        return Err(anyhow::anyhow!("Could not insert genesis: {:?}", e));
+                    }
+                }
+                self.confirm(genesis.hash());
+                let _ = self.store.flush();
+            }
+
+            // 2. Ensure account info exists and is consistent
+            let info = self.any().get_account(&genesis_account);
+            tracing::debug!("Ledger: initial lookup of genesis account: found={}", info.is_some());
+            match info {
+                Some(info) => {
+                    // Check if head block exists
+                    if !self.any().block_exists_or_pruned(&info.head) {
+                        tracing::error!(
+                            "FATAL: Genesis head block {} NOT found in store! (attempt {})",
+                            info.head,
+                            attempt
+                        );
+                        if attempt == 0 {
+                            tracing::error!("Ledger corruption detected. Wiping database...");
+                            self.store.wipe();
+                            continue;
+                        } else {
+                            return Err(anyhow::anyhow!("Genesis head block missing after recovery"));
+                        }
+                    }
+                }
+                None => {
+                    tracing::error!(
+                        "Genesis account info NOT found for account {}! (attempt {})",
+                        genesis_account.encode_account(),
+                        attempt
+                    );
+                    if attempt == 0 {
+                        tracing::error!("Ledger corruption detected. Wiping database...");
+                        self.store.wipe();
+                        continue;
+                    } else {
+                        return Err(anyhow::anyhow!("Genesis account info missing after recovery"));
+                    }
+                }
+            }
+
+            // If we reached here, basic integrity is confirmed
+            if attempt > 0 {
+                tracing::info!("Ledger successfully recovered and initialized.");
+            }
+            break;
         }
+
+        let info = self.any().get_account(&genesis_account).unwrap();
+        tracing::info!(
+            "Genesis account info: head={}, balance={:?}",
+            info.head,
+            info.balance
+        );
+
+        let accounts = self.any().iter_accounts();
+        tracing::info!(
+            "Block Store contains {} blocks:",
+            self.store.cache.block_count.load(Ordering::Relaxed)
+        );
+        // We don't have a good way to iterate blocks in no_std yet if we don't know hashes,
+        // but we know Genesis. Let's trace from Genesis.
+        let mut current = genesis.hash();
+        let mut count = 0;
+        while !current.is_zero() && count < 10 {
+            if let Some(block) = self.any().get_block(&current) {
+                tracing::info!(
+                    "  Block {}: {} (Account: {})",
+                    count,
+                    current,
+                    block.account().encode_account()
+                );
+                current = self.any().block_successor(&current).unwrap_or_default();
+            } else {
+                tracing::warn!("  Block {} ({}) NOT FOUND in store!", count, current);
+                break;
+            }
+            count += 1;
+        }
+
         Ok(())
     }
 
-    pub fn any(&self) -> OwningAnySet {
+    pub fn any(&self) -> OwningAnySet<'_> {
         OwningAnySet::new(&self.store, &self.constants)
     }
 
@@ -281,7 +367,7 @@ impl Ledger {
     }
 
     pub fn backlog_count(&self) -> usize {
-        0
+        self.block_count().saturating_sub(self.confirmed_count())
     }
 
     pub fn account_count(&self) -> usize {
@@ -340,8 +426,7 @@ impl Ledger {
         if !targets.is_empty() {
             while !targets.is_empty() && transaction_write_count < batch_size {
                 let pruning_hash = targets.front().unwrap();
-                let account_pruned_count =
-                    self.pruning_action(pruning_hash, batch_size as u64);
+                let account_pruned_count = self.pruning_action(pruning_hash, batch_size as u64);
                 transaction_write_count += account_pruned_count as usize;
                 targets.pop_front();
             }
@@ -353,7 +438,7 @@ impl Ledger {
         self.pruning_action(target, batch_size as u64) as usize
     }
 
-    fn pruning_action(&self, hash: &BlockHash, batch_size: u64) -> u64 {
+    fn pruning_action(&self, hash: &BlockHash, _batch_size: u64) -> u64 {
         self.stats.inc(StatType::Pruning, DetailType::PruningTarget);
         let mut pruned_count = 0;
         let mut hash = *hash;
@@ -383,7 +468,10 @@ impl Ledger {
     pub fn roll_back(&self, block: &BlockHash) -> Result<usize, RollbackError> {
         let result = self.roll_back_batch(&[*block], usize::MAX, |_| true);
         let rolled_back = result.0[0].rolled_back.len();
-        result.0[0].error.as_ref().map_or(Ok(rolled_back), |e| Err(e.clone()))
+        result.0[0]
+            .error
+            .as_ref()
+            .map_or(Ok(rolled_back), |e| Err(e.clone()))
     }
 
     pub fn roll_back_batch<'a, T, F>(
@@ -401,7 +489,7 @@ impl Ledger {
 
         let mut rolled_back_count = 0;
         let mut results = RollbackResults(Vec::new());
-        
+
         for hash in targets {
             if !can_roll_back(hash) {
                 results.push(RollbackResult {
@@ -439,11 +527,9 @@ impl Ledger {
         results
     }
 
-    fn roll_back_with_tx(
-        &self,
-        block: &BlockHash,
-    ) -> (Vec<SavedBlock>, Option<RollbackError>) {
-        let mut tx = (); let mut performer = BlockRollbackPerformer::new(self, &mut tx);
+    fn roll_back_with_tx(&self, block: &BlockHash) -> (Vec<SavedBlock>, Option<RollbackError>) {
+        let mut tx = ();
+        let mut performer = BlockRollbackPerformer::new(self, &mut tx);
         match performer.roll_back(block) {
             Ok(()) => (performer.rolled_back, None),
             Err(e) => (performer.rolled_back, Some(e)),
@@ -481,17 +567,31 @@ impl Ledger {
                     if let Some(saved_block) =
                         BlockInserter::new(self, &mut (), block, &instructions).insert()
                     {
+                        self.store.cache.block_count.fetch_add(1, Ordering::SeqCst);
+                        tracing::debug!(
+                            "Ledger: processed block {} (Account: {}, Height: {})",
+                            saved_block.hash(),
+                            saved_block.account().encode_account(),
+                            saved_block.height()
+                        );
                         processed.push((Ok(()), Some(saved_block.clone())));
                     } else {
+                        tracing::debug!("Ledger: conflict for block {}", block.hash());
                         processed.push((Err(BlockError::Conflict), None));
                     }
                 }
                 Err(err) => {
+                    tracing::debug!(
+                        "Ledger: validation failed for block {}! Error: {:?}",
+                        block.hash(),
+                        err
+                    );
                     processed.push((Err(err), None));
                 }
             }
         }
 
+        let _ = self.store.flush();
         BatchProcessResult { processed }
     }
 
@@ -517,10 +617,7 @@ impl Ledger {
         }
     }
 
-    fn rollback_competitor(
-        &self,
-        fork_block: &Block,
-    ) -> Vec<SavedBlock> {
+    fn rollback_competitor(&self, fork_block: &Block) -> Vec<SavedBlock> {
         let mut rollback_list = Vec::new();
         let hash = fork_block.hash();
         if let Some(successor) =
@@ -539,10 +636,7 @@ impl Ledger {
         rollback_list
     }
 
-    fn block_successor_by_qualified_root(
-        &self,
-        root: &QualifiedRoot,
-    ) -> Option<BlockHash> {
+    fn block_successor_by_qualified_root(&self, root: &QualifiedRoot) -> Option<BlockHash> {
         if !root.previous.is_zero() {
             self.store.successors.get(&root.previous)
         } else {
@@ -557,15 +651,9 @@ impl Ledger {
         self.confirm_max(hash, 1024 * 128)
     }
 
-    fn confirm_max(
-        &self,
-        target_hash: BlockHash,
-        max_blocks: usize,
-    ) -> Vec<SavedBlock> {
-        BlockCementer::new(&self.store, &self.constants, &self.stats).confirm(
-            target_hash,
-            max_blocks,
-        )
+    fn confirm_max(&self, target_hash: BlockHash, max_blocks: usize) -> Vec<SavedBlock> {
+        BlockCementer::new(&self.store, &self.constants, &self.stats)
+            .confirm(target_hash, max_blocks)
     }
 
     pub fn confirm_batch<'a, O>(
@@ -628,7 +716,10 @@ pub struct RollbackResults(pub Vec<RollbackResult>);
 
 impl RollbackResults {
     pub fn hashes(&self) -> Vec<BlockHash> {
-        self.0.iter().flat_map(|r| r.rolled_back.iter().map(|b| b.hash())).collect()
+        self.0
+            .iter()
+            .flat_map(|r| r.rolled_back.iter().map(|b| b.hash()))
+            .collect()
     }
 
     pub fn roots(&self) -> Vec<rsnano_core::QualifiedRoot> {

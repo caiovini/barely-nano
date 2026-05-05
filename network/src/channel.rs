@@ -17,7 +17,6 @@ use core::{
     time::Duration,
 };
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use spin::Mutex;
 use tracing::debug;
 

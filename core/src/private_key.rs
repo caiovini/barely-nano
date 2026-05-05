@@ -86,46 +86,8 @@ impl PrivateKey {
     }
 
     pub fn sign(&self, data: &[u8]) -> Signature {
-        use blake2::digest::{Update, VariableOutput};
-        use curve25519_dalek::scalar::Scalar;
-        use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
- 
-        let mut hasher = blake2::Blake2bVar::new(64).unwrap();
-        hasher.update(&self.bytes);
-        let mut h = [0u8; 64];
-        hasher.finalize_variable(&mut h).unwrap();
- 
-        h[0] &= 248;
-        h[31] &= 63;
-        h[31] |= 64;
- 
-        let a_scalar = Scalar::from_bytes_mod_order(h[0..32].try_into().unwrap());
-        let a_point = &a_scalar * &ED25519_BASEPOINT_POINT;
-        let prefix = &h[32..64];
- 
-        let mut r_hasher = blake2::Blake2bVar::new(64).unwrap();
-        r_hasher.update(prefix);
-        r_hasher.update(data);
-        let mut r_hash = [0u8; 64];
-        r_hasher.finalize_variable(&mut r_hash).unwrap();
-        let r_scalar = Scalar::from_bytes_mod_order_wide(&r_hash);
-        let r_point = &r_scalar * &ED25519_BASEPOINT_POINT;
-        let r_bytes = r_point.compress();
- 
-        let mut k_hasher = blake2::Blake2bVar::new(64).unwrap();
-        k_hasher.update(r_bytes.as_bytes());
-        k_hasher.update(a_point.compress().as_bytes());
-        k_hasher.update(data);
-        let mut k_hash = [0u8; 64];
-        k_hasher.finalize_variable(&mut k_hash).unwrap();
-        let k_scalar = Scalar::from_bytes_mod_order_wide(&k_hash);
- 
-        let s_scalar = &r_scalar + &(&k_scalar * &a_scalar);
- 
-        let mut signature_bytes = [0u8; 64];
-        signature_bytes[0..32].copy_from_slice(r_bytes.as_bytes());
-        signature_bytes[32..64].copy_from_slice(s_scalar.as_bytes());
-        Signature::from_bytes(signature_bytes)
+        let sig_bytes = tools::ed25519::sign(&self.bytes, data);
+        Signature::from_bytes(sig_bytes)
     }
 
     pub fn account(&self) -> Account {

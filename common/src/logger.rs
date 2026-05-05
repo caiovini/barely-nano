@@ -1,20 +1,17 @@
-use tracing::{Level, Metadata, Subscriber, Event};
-use tracing::span::{Attributes, Id, Record};
 use crate::uart;
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Event, Level, Metadata, Subscriber};
 
 use spin::Mutex;
-static UART_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct UartSubscriber;
 
 impl Subscriber for UartSubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.level() <= &Level::INFO && (
-            metadata.target().contains("node_monitor") || 
-            metadata.target().contains("hello_bare") ||
-            metadata.target().contains("rsnano_node") ||
-            metadata.target().contains("rsnano_network")
-        )
+        metadata.level() <= &Level::DEBUG
+            && (metadata.target().contains("rsnano")
+                || metadata.target().contains("hello_bare")
+                || metadata.target().contains("node_monitor"))
     }
 
     fn new_span(&self, _span: &Attributes<'_>) -> Id {
@@ -26,11 +23,10 @@ impl Subscriber for UartSubscriber {
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        let _guard = UART_LOCK.lock();
-        uart::print(b"[node] ");
+        let _guard = uart::UART_LOCK.lock();
         let mut visitor = UartVisitor;
         event.record(&mut visitor);
-        uart::print(b"\n");
+        uart::print_no_lock(b"\n");
     }
 
     fn enter(&self, _span: &Id) {}
@@ -53,16 +49,16 @@ impl tracing::field::Visit for UartVisitor {
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "message" {
-            uart::print(value.as_bytes());
+            uart::print_no_lock(value.as_bytes());
         } else {
-            uart::print(b" ");
-            uart::print(field.name().as_bytes());
-            uart::print(b"=");
-            uart::print(value.as_bytes());
+            uart::print_no_lock(b" ");
+            uart::print_no_lock(field.name().as_bytes());
+            uart::print_no_lock(b"=");
+            uart::print_no_lock(value.as_bytes());
         }
     }
 }
 
 pub fn init() {
-    tracing::subscriber::set_global_default(UartSubscriber).expect("setting default subscriber failed");
+    let _ = tracing::subscriber::set_global_default(UartSubscriber);
 }

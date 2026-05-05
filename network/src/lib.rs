@@ -9,7 +9,6 @@ mod channel;
 mod channel_stats;
 mod dead_channel_cleanup;
 mod network;
-mod network_stats;
 mod peer_connector;
 pub mod peer_exclusion;
 mod tcp_channel_adapter;
@@ -229,6 +228,12 @@ impl NetworkConfig {
             peer_reachout: core::time::Duration::from_secs(1),
             cached_peer_reachout: core::time::Duration::from_secs(1),
         }
+    }
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self::default_for(rsnano_core::Networks::NanoLiveNetwork)
     }
 }
 

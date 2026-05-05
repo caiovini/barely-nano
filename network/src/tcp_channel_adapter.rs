@@ -6,12 +6,7 @@ use crate::{
 use rsnano_core::utils::{TEST_ENDPOINT_1, TEST_ENDPOINT_2};
 use rsnano_nullable_clock::{SteadyClock, Timestamp};
 use rsnano_nullable_tcp::TcpStream;
-use core::{
-    fmt::Display,
-    time::Duration,
-    future::poll_fn,
-    task::Poll,
-};
+use core::fmt::Display;
 use alloc::sync::{Arc, Weak};
 use alloc::string::ToString;
 use kernel_common::async_rt;

@@ -357,7 +357,7 @@ impl Filesystem for RealFilesystem {
             current_page = next_page;
         }
         
-        let mut val_bytes = [0u8; 256];
+        let mut val_bytes = [0u8; 512];
         val_bytes[0..4].copy_from_slice(&first_page.to_le_bytes());
         btree.insert(key, val_bytes);
         Ok(())

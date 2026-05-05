@@ -27,17 +27,15 @@ impl From<Account> for Blake2Hash {
         Self::from_bytes(*account.as_bytes())
     }
 }
-
-use blake2::digest::{Update, VariableOutput};
  
 pub struct Blake2HashBuilder {
-    hasher: blake2::Blake2bVar,
+    hasher: tools::blake2b::Blake2bHasher,
 }
  
 impl Default for Blake2HashBuilder {
     fn default() -> Self {
         Self {
-            hasher: blake2::Blake2bVar::new(32).expect("invalid hash length"),
+            hasher: tools::blake2b::Blake2bHasher::new(32),
         }
     }
 }
@@ -53,8 +51,9 @@ impl Blake2HashBuilder {
     }
  
     pub fn build(self) -> Blake2Hash {
+        let full = self.hasher.finalize();
         let mut buffer = [0; 32];
-        self.hasher.finalize_variable(&mut buffer).expect("hashing failed");
+        buffer.copy_from_slice(&full[..32]);
         BlockHash::from_bytes(buffer)
     }
 }

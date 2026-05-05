@@ -263,7 +263,7 @@ impl NodeConfig {
             max_work_generate_multiplier: 64_f64,
             max_queued_requests: 512,
             request_aggregator_threads: core::cmp::max(parallelism, 4) as u32,
-            max_unchecked_blocks: 65536,
+            max_unchecked_blocks: 4096,
             rep_crawler_weight_minimum: Amount::decode_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
                 .unwrap(),
             work_peers: Vec::new(),
@@ -310,13 +310,13 @@ impl NodeConfig {
             monitor: Default::default(),
             backlog_scan: Default::default(),
             bounded_backlog: Default::default(),
-            network_duplicate_filter_size: 1024 * 1024,
+            network_duplicate_filter_size: 16384,
             network_duplicate_filter_cutoff: 60,
             network: NetworkConfig {
                 listening_port: peering_port.unwrap_or_default(),
                 ..NetworkConfig::default_for(network)
             },
-            confirmation_history_size: 2048,
+            confirmation_history_size: 512,
             fork_cache_max_size: ForkCache::DEFAULT_MAX_LEN,
             fork_cache_max_forks_per_root: ForkCache::DEFAULT_MAX_FORKS_PER_ROOT,
             bootstrap_stale_threshold: BootstrapStaleElections::DEFAULT_STALE_THRESHOLD,
@@ -368,10 +368,10 @@ pub struct TcpConfig {
 impl TcpConfig {
     pub fn for_dev_network() -> Self {
         Self {
-            max_inbound_connections: 128,
-            max_outbound_connections: 128,
-            max_attempts: 128,
-            max_attempts_per_ip: 128,
+            max_inbound_connections: 32,
+            max_outbound_connections: 32,
+            max_attempts: 32,
+            max_attempts_per_ip: 32,
             connect_timeout: Duration::from_secs(5),
         }
     }
@@ -380,9 +380,9 @@ impl TcpConfig {
 impl Default for TcpConfig {
     fn default() -> Self {
         Self {
-            max_inbound_connections: 128,
-            max_outbound_connections: 128,
-            max_attempts: 60,
+            max_inbound_connections: 32,
+            max_outbound_connections: 32,
+            max_attempts: 16,
             max_attempts_per_ip: 1,
             connect_timeout: Duration::from_secs(60),
         }

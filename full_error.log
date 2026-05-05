@@ -1,1 +1,0 @@
-/home/cvini/.asdf/shims/cargo build -p hello-bare --release --target riscv64gc-unknown-none-elf

@@ -162,6 +162,22 @@ impl UncheckedMap {
     pub fn set_satisfied_observer(&self, callback: Box<dyn Fn(&UncheckedInfo) + Send>) {
         self.mutable.lock().satisfied_callback = Some(callback);
     }
+
+    pub fn run_once(&self) {
+        let mut lock = self.mutable.lock();
+        if !lock.buffer.is_empty() {
+            let len = lock.buffer.len();
+            let mut back_buffer_lock = self.thread.back_buffer.lock();
+            core::mem::swap(&mut lock.buffer, back_buffer_lock.deref_mut());
+            lock.writing_back_buffer = true;
+            drop(lock);
+            tracing::debug!("UncheckedMap: processing {} triggers", len);
+            self.thread.process_queries(&back_buffer_lock);
+            lock = self.mutable.lock();
+            lock.writing_back_buffer = false;
+            back_buffer_lock.clear();
+        }
+    }
 }
 
 impl ContainerInfoProvider for UncheckedMap {
@@ -240,7 +256,7 @@ impl UncheckedMapThread {
         }
     }
 
-    fn process_queries(&self, back_buffer: &VecDeque<HashOrAccount>) {
+    pub fn process_queries(&self, back_buffer: &VecDeque<HashOrAccount>) {
         for item in back_buffer {
             self.query_impl(item);
         }

@@ -14,7 +14,7 @@ use spin::{ RwLock };
 // // // // // // // use std::{    time::Duration    }; // TODO: fix this
 
 /// Creates votes for blocks within the AEC
-pub(crate) struct AecVoter {
+pub struct AecVoter {
     aec: Arc<RwLock<ActiveElectionsContainer>>,
     vote_generators: Arc<VoteGenerators>,
     clock: Arc<SteadyClock>,
@@ -24,7 +24,7 @@ pub(crate) struct AecVoter {
 }
 
 impl AecVoter {
-    pub(crate) fn new(
+    pub fn new(
         aec: Arc<RwLock<ActiveElectionsContainer>>,
         vote_generators: Arc<VoteGenerators>,
         clock: Arc<SteadyClock>,

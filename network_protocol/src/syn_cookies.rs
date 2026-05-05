@@ -5,7 +5,7 @@ use hashbrown::HashMap;
 use alloc::vec::Vec;
 
 use anyhow::Result;
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
     Account, Signature,
@@ -39,9 +39,8 @@ impl SynCookies {
         let ip_addr = endpoint.ip();
         let mut lock = self.data.lock();
 
-        if lock.cookies.contains_key(endpoint) {
-            tracing::info!("[node] SynCookies: already has cookie for endpoint");
-            return None;
+        if let Some(info) = lock.cookies.get(endpoint) {
+            return Some(info.cookie);
         }
 
         let ip_cookies = lock.cookies_per_ip.entry(*ip_addr).or_default();
@@ -49,7 +48,6 @@ impl SynCookies {
             *ip_cookies += 1;
             let mut cookie = [0u8; 32];
             rsnano_nullable_random::NullableRng::rng().fill_bytes(&mut cookie);
-            tracing::info!("[node] SynCookies: assigned new cookie");
             lock.cookies.insert(
                 *endpoint,
                 SynCookieInfo {

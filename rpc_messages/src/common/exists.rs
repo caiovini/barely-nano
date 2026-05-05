@@ -1,3 +1,7 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use super::primitives::RpcBoolNumber;
 use serde::{Deserialize, Serialize};
 

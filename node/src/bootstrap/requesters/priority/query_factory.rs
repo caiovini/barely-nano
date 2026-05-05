@@ -3,15 +3,15 @@ use super::{
     pull_type_decider::{PullType, PullTypeDecider},
 };
 use crate::bootstrap::{
-    state::{BootstrapState, PriorityResult},
     AscPullQuerySpec,
+    state::{BootstrapState, PriorityResult},
 };
+use alloc::sync::Arc;
 use rsnano_core::{Account, BlockHash, HashOrAccount};
 use rsnano_ledger::{AnySet, ConfirmedSet, Ledger, LedgerSet};
 use rsnano_messages::{AscPullReqType, BlocksReqPayload, HashType};
 use rsnano_network::Channel;
 use rsnano_nullable_clock::Timestamp;
-use alloc::sync::Arc;
 
 /// Creates a query for the next priority account
 pub(super) struct QueryFactory {
@@ -46,6 +46,13 @@ impl QueryFactory {
         }
         let (head, confirmed_frontier) = self.get_account_info(&next.account);
         let pull_type = self.pull_type_decider.decide_pull_type();
+
+        tracing::debug!(
+            "QueryFactory: next account={}, head={}, pull_type={:?}",
+            next.account.encode_account(),
+            head,
+            pull_type
+        );
 
         Some(self.create_priority_query(&next, channel, pull_type, head, confirmed_frontier))
     }

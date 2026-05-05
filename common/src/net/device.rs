@@ -24,8 +24,13 @@ impl<'a> Device for VirtioNetDevice<'a> {
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         match self.driver.receive() {
             Ok(buf) => {
-                crate::uart::print(b".");
-                let rx_token = VirtioRxToken { buf: buf.packet().to_vec() };
+                let packet = buf.packet();
+                if packet.len() < 14 {
+                    // Discard too-short packets to prevent panics in smoltcp wire layer
+                    let _ = self.driver.recycle_rx_buffer(buf);
+                    return None;
+                }
+                let rx_token = VirtioRxToken { buf: packet.to_vec() };
                 let _ = self.driver.recycle_rx_buffer(buf);
                 let tx_token = VirtioTxToken { driver: &mut self.driver };
                 Some((rx_token, tx_token))
@@ -35,7 +40,7 @@ impl<'a> Device for VirtioNetDevice<'a> {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        crate::uart::print(b">");
+
         Some(VirtioTxToken { driver: &mut self.driver })
     }
 
@@ -78,6 +83,11 @@ impl<'b, 'a> TxToken for VirtioTxToken<'b, 'a> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
+        if len == 0 {
+             // smoltcp should not do this, but we'll be safe
+             let mut empty = [0u8; 0];
+             return f(&mut empty);
+        }
         let mut tx_buf = self.driver.new_tx_buffer(len);
         let result = f(tx_buf.packet_mut());
         let _ = self.driver.send(tx_buf);

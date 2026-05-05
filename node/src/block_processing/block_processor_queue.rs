@@ -101,11 +101,13 @@ impl BlockProcessorQueue {
             return None;
         }
 
-        if !queue.cool_down {
-            let batch = queue.process_queue.next_batch();
-            if !batch.is_empty() {
-                return Some(batch);
-            }
+        if queue.cool_down {
+            return None;
+        }
+
+        let batch = queue.process_queue.next_batch();
+        if !batch.is_empty() {
+            return Some(batch);
         }
         None
     }

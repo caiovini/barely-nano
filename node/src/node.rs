@@ -16,6 +16,7 @@ use kernel_common::async_rt;
 use rsnano_core::{
     utils::{
         backpressure_channel, ContainerInfo, ContainerInfoFactory, ContainerInfoProvider, Peer,
+        Tickable,
     },
     Account, Amount, Block, BlockHash, Networks, NodeId, PrivateKey, QualifiedRoot, Root,
     SavedBlock, Vote, VoteError, WorkNonce,
@@ -102,7 +103,7 @@ pub struct Node {
     pub network: Arc<RwLock<Network>>,
     pub telemetry: Arc<Telemetry>,
     pub bootstrap_server: Arc<BootstrapServer>,
-    online_weight_calculation: Arc<OnlineWeightCalculation>,
+    pub online_weight_calculation: Arc<Mutex<OnlineWeightCalculation>>,
     pub online_reps: Arc<Mutex<OnlineReps>>,
     rep_tiers_calculator: Arc<RepTiersCalculator>,
     pub rep_tiers: Arc<CurrentRepTiers>,
@@ -116,12 +117,12 @@ pub struct Node {
     pub vote_generators: Arc<VoteGenerators>,
     pub active: Arc<RwLock<ActiveElectionsContainer>>,
     pub vote_processor: Arc<VoteProcessor>,
-    vote_cache_processor: Arc<VoteCacheProcessor>,
+    pub vote_cache_processor: Arc<VoteCacheProcessor>,
     pub rep_crawler: Arc<RepCrawler>,
     pub tcp_listener: Arc<TcpListener>,
     pub election_schedulers: Arc<ElectionSchedulers>,
     pub request_aggregator: Arc<RequestAggregator>,
-    pub backlog_scan: BacklogScan,
+    pub backlog_scan: Arc<Mutex<BacklogScan>>,
     bounded_backlog: Arc<BoundedBacklog>,
     pub bootstrapper: Arc<Bootstrapper>,
     pub local_block_broadcaster: Arc<LocalBlockBroadcaster>,
@@ -130,7 +131,7 @@ pub struct Node {
     ledger_pruning: Arc<LedgerPruning>,
     pub peer_connector: Arc<PeerConnector>,
     peer_cache_updater: Arc<PeerCacheUpdater>,
-    peer_cache_connector: Arc<PeerCacheConnector>,
+    pub peer_cache_connector: Arc<Mutex<PeerCacheConnector>>,
     pub inbound_message_queue: Arc<InboundMessageQueue>,
     monitor: Arc<Mutex<NodeMonitor>>,
     stopped: AtomicBool,
@@ -144,15 +145,15 @@ pub struct Node {
     receivable_search: ReceivableSearch,
     block_flooder: BlockFlooder,
     vote_rebroadcaster: VoteRebroadcaster,
-    pub aec_ticker: Arc<AecTicker>,
+    pub aec_ticker: Arc<Mutex<AecTicker>>,
     pub recently_cemented: Arc<Mutex<BoundedVecDeque<ConfirmedElection>>>,
     pub stats_collector: StatsCollector,
     container_info_factory: ContainerInfoFactory,
     wallet_reps_checker: Arc<WalletRepsChecker>,
     winner_block_broadcaster: Arc<Mutex<WinnerBlockBroadcaster>>,
-    block_rate_calculator: Arc<BlockRateCalculator>,
+    block_rate_calculator: Arc<Mutex<BlockRateCalculator>>,
     block_rates: Arc<CurrentBlockRates>,
-    pub aec_voter: Arc<AecVoter>,
+    pub aec_voter: Mutex<AecVoter>,
     pub dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
 }
 
@@ -183,6 +184,17 @@ impl NodeArgs {
 }
 
 impl Node {
+    pub fn tick(&self) {
+        self.backlog_scan.lock().run_once();
+        self.bounded_backlog.run_once();
+        self.bounded_backlog.run_scan_once();
+        self.election_schedulers.run_once();
+        self.unchecked.run_once();
+
+        let cancel_token = rsnano_core::utils::CancellationToken::new();
+        self.block_rate_calculator.lock().tick(&cancel_token);
+    }
+
     pub fn tick_monitor(&self) {
         let mut guard = self.monitor.lock();
         let cancel_token = rsnano_core::utils::CancellationToken::new();
@@ -521,6 +533,18 @@ impl Node {
 
         let confirm_req_sender = ConfirmReqSender::new(stats.clone(), steady_clock.clone());
 
+        let bootstrapper = Arc::new(Bootstrapper::new(
+            block_processor_queue.clone(),
+            ledger.clone(),
+            stats.clone(),
+            network.clone(),
+            message_sender.clone(),
+            global_config.node_config.bootstrap.clone(),
+            steady_clock.clone(),
+        ));
+        bootstrapper.initialize(&network_params.ledger.genesis_account);
+
+        let bootstrapper_w = Arc::downgrade(&bootstrapper);
         let election_schedulers = Arc::new(ElectionSchedulers::new(
             config.clone(),
             network_params.network.clone(),
@@ -531,6 +555,13 @@ impl Node {
             confirming_set.clone(),
             online_reps.clone(),
             steady_clock.clone(),
+            Box::new(move || {
+                if let Some(b) = bootstrapper_w.upgrade() {
+                    b.is_active()
+                } else {
+                    false
+                }
+            }),
         ));
         ledger_event_processor_plugins.push(Box::new(ElectionSchedulersPlugin::new(
             election_schedulers.clone(),
@@ -619,13 +650,14 @@ impl Node {
         ));
 
 
-        let mut backlog_scan =
+        let backlog_scan =
             BacklogScan::new(Default::default(), ledger.clone(), steady_clock.clone());
+        let backlog_scan = Arc::new(Mutex::new(backlog_scan));
 
         //  TODO: Hook this direclty in the schedulers
         let schedulers_w = Arc::downgrade(&election_schedulers);
         let ledger_l = ledger.clone();
-        backlog_scan.on_unconfirmed_found(move |batch| {
+        backlog_scan.lock().on_unconfirmed_found(move |batch| {
             if let Some(schedulers) = schedulers_w.upgrade() {
                 let any = ledger_l.any();
                 for info in batch {
@@ -667,7 +699,7 @@ impl Node {
 
             // Activate accounts with unconfirmed blocks
             let backlog_w = Arc::downgrade(&bounded_backlog);
-            backlog_scan.on_unconfirmed_found(move |batch| {
+            backlog_scan.lock().on_unconfirmed_found(move |batch| {
                 if let Some(backlog) = backlog_w.upgrade() {
                     backlog.activate_batch(batch);
                 }
@@ -675,7 +707,7 @@ impl Node {
 
             // Erase accounts with all confirmed blocks
             let backlog_w = Arc::downgrade(&bounded_backlog);
-            backlog_scan.on_up_to_date(move |batch| {
+            backlog_scan.lock().on_up_to_date(move |batch| {
                 if let Some(backlog) = backlog_w.upgrade() {
                     backlog.erase_accounts(batch);
                 }
@@ -686,31 +718,24 @@ impl Node {
         let conf_time_stats = track_conf_times.stats();
         ledger_event_processor_plugins.push(track_conf_times);
 
-        let bootstrapper = Arc::new(Bootstrapper::new(
-            block_processor_queue.clone(),
-            ledger.clone(),
-            stats.clone(),
-            network.clone(),
-            message_sender.clone(),
-            global_config.node_config.bootstrap.clone(),
-            steady_clock.clone(),
-        ));
-        bootstrapper.initialize(&network_params.ledger.genesis_account);
 
-        let mut aec_ticker = AecTicker::new(active_elections.clone(), steady_clock.clone());
-
-        aec_ticker.add_plugin(ConfirmationSolicitorPlugin {
-            message_flooder: message_flooder.clone(),
-            online_reps: online_reps.clone(),
-            winner_block_broadcaster: winner_block_broadcaster.clone(),
-            confirm_req_sender,
-        });
-
-        let mut bootstrap_stale =
-            BootstrapStaleElections::new(bootstrapper.clone(), steady_clock.clone());
-        bootstrap_stale.set_stale_threshold(config.bootstrap_stale_threshold);
-        let bootstrap_stale_stats = bootstrap_stale.stats.clone();
-        aec_ticker.add_plugin(bootstrap_stale);
+        let aec_ticker = Arc::new(Mutex::new(AecTicker::new(active_elections.clone(), steady_clock.clone())));
+        let bootstrap_stale_stats;
+        {
+            let mut guard = aec_ticker.lock();
+            guard.add_plugin(ConfirmationSolicitorPlugin {
+                message_flooder: message_flooder.clone(),
+                online_reps: online_reps.clone(),
+                winner_block_broadcaster: winner_block_broadcaster.clone(),
+                confirm_req_sender,
+            });
+            
+            let mut bootstrap_stale =
+                BootstrapStaleElections::new(bootstrapper.clone(), steady_clock.clone());
+            bootstrap_stale.set_stale_threshold(config.bootstrap_stale_threshold);
+            bootstrap_stale_stats = bootstrap_stale.stats.clone();
+            guard.add_plugin(bootstrap_stale);
+        }
 
         let local_block_broadcaster = Arc::new(LocalBlockBroadcaster::new(
             config.local_block_broadcaster.clone(),
@@ -998,6 +1023,7 @@ impl Node {
             online_reps.clone(),
             active_elections.clone(),
             block_rates.clone(),
+            bootstrapper.clone(),
         )));
 
         let mut wallet_reps_checker = WalletRepsChecker::new(wallets.wallet_reps.clone());
@@ -1117,7 +1143,7 @@ impl Node {
         stats_collector.add_source(vote_rebroadcaster.stats.clone());
         stats_collector.add_source(election_schedulers.clone());
         // stats_collector.add_source(network.clone());
-        stats_collector.add_source(backlog_scan.stats());
+        stats_collector.add_source(backlog_scan.lock().stats());
         // stats_collector.add_source(handshake_stats);
         stats_collector.add_source(inbound_message_queue.clone());
         stats_collector.add_source(bootstrap_stale_stats);
@@ -1161,7 +1187,7 @@ impl Node {
             is_nulled,
             steady_clock,
             peer_cache_updater: Arc::new(peer_cache_updater),
-            peer_cache_connector: Arc::new(peer_cache_connector),
+            peer_cache_connector: Arc::new(Mutex::new(peer_cache_connector)),
             peer_connector,
             node_id: node_id_key,
             workers,
@@ -1177,7 +1203,7 @@ impl Node {
             config,
             flags,
             bootstrap_server,
-            online_weight_calculation: Arc::new(online_weight_calculation),
+            online_weight_calculation: Arc::new(Mutex::new(online_weight_calculation)),
             online_reps,
             rep_tiers_calculator: Arc::new(rep_tiers_calculator),
             rep_tiers,
@@ -1215,15 +1241,15 @@ impl Node {
             receivable_search,
             block_flooder,
             vote_rebroadcaster,
-            aec_ticker: Arc::new(aec_ticker),
+            aec_ticker,
             recently_cemented,
             stats_collector,
             container_info_factory: container_info,
             wallet_reps_checker: Arc::new(wallet_reps_checker),
             winner_block_broadcaster,
-            block_rate_calculator: Arc::new(block_rate_calculator),
+            block_rate_calculator: Arc::new(Mutex::new(block_rate_calculator)),
             block_rates,
-            aec_voter: Arc::new(aec_voter),
+            aec_voter: Mutex::new(aec_voter),
             dead_channel_cleanup,
         }
     }
@@ -1416,7 +1442,7 @@ impl Node {
         }
 
         // In bare-metal we spawn async tasks instead of starting TimerThreads
-        // self.block_rate_calculator.start(Duration::from_millis(500));
+        // Block rate calculator is now ticked in Node::tick
         
         // self.online_weight_calculation
         //     .run_once_then_start(OnlineReps::default_interval_for(
@@ -1426,7 +1452,7 @@ impl Node {
         // self.wallet_reps_checker.start(if is_dev_network {
         //     Duration::from_millis(500)
         // } else {
-        //     Duration::from_secs(60)
+        //     Duration::from_secs(5)
         // });
 
         self.network_threads.lock().start();
@@ -1478,7 +1504,7 @@ impl Node {
         // self.request_aggregator.start();
         self.confirming_set.start();
         self.election_schedulers.start();
-        self.backlog_scan.start();
+        self.backlog_scan.lock().start();
         if self.config.enable_bounded_backlog {
             self.bounded_backlog.start();
         }
@@ -1498,10 +1524,12 @@ impl Node {
         });
         */
 
+/*
         if !self.config.network.peer_reachout.is_zero() {
-            self.peer_cache_connector
-                .start(self.config.network.cached_peer_reachout);
+            self.peer_cache_connector.lock()
+                .tick(&rsnano_core::utils::CancellationToken::new());
         }
+*/
 
         let cleanup = self.dead_channel_cleanup.clone();
         let stats = self.stats.clone();
@@ -1509,7 +1537,7 @@ impl Node {
         async_rt::spawn(async move {
             let mut last_cleanup = clock.now();
             let mut last_stats_flush = clock.now();
-            let cleanup_interval = core::time::Duration::from_secs(60);
+            let cleanup_interval = core::time::Duration::from_secs(5);
             let stats_interval = core::time::Duration::from_secs(10);
             loop {
                 let now = clock.now();
@@ -1557,7 +1585,7 @@ impl Node {
         // Cancels ongoing work generation tasks, which may be blocking other threads
         // No tasks may wait for work generation in I/O threads, or termination signal capturing will be unable to call node::stop()
         self.work_factory.stop();
-        self.backlog_scan.stop();
+        self.backlog_scan.lock().stop();
         self.bootstrapper.stop();
         self.bounded_backlog.stop();
         self.rep_crawler.stop();

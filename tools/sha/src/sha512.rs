@@ -1,18 +1,15 @@
-//! SHA-512 implementation optimized for RISC-V.
-//! Uses Zbb and Zvkb extensions for performance.
-
-// use core::arch::asm;
 use core::convert::TryInto;
+use core::iter::Iterator;
 
 const K: [u64; 80] = [
     0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
-    0x3956c25bf345b51a, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
-    0xd807aa98a3030242, 0x12835b01457065b9, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
-    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71232, 0xc19bf174cf692694,
+    0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
+    0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
+    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
     0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
     0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
     0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
-    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e5970,
+    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
     0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
     0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
     0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
@@ -27,21 +24,22 @@ const K: [u64; 80] = [
     0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
 ];
 
+
 pub struct Sha512Hasher {
-    state: [u64; 8],
+    h: [u64; 8],
     buffer: [u8; 128],
     buf_len: usize,
-    total_len: u128,
+    total_len: u64,
 }
 
 impl Sha512Hasher {
     pub fn new() -> Self {
         Self {
-            state: [
+            h: [
                 0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
                 0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
             ],
-            buffer: [0u8; 128],
+            buffer: [0; 128],
             buf_len: 0,
             total_len: 0,
         }
@@ -49,16 +47,13 @@ impl Sha512Hasher {
 
     pub fn update(&mut self, mut data: &[u8]) {
         while !data.is_empty() {
-            if self.buf_len < 128 {
-                let space = 128 - self.buf_len;
-                let n = core::cmp::min(data.len(), space);
-                self.buffer[self.buf_len..self.buf_len + n].copy_from_slice(&data[..n]);
-                self.buf_len += n;
-                data = &data[n..];
-            }
+            let n = core::cmp::min(data.len(), 128 - self.buf_len);
+            self.buffer[self.buf_len..self.buf_len + n].copy_from_slice(&data[..n]);
+            self.buf_len += n;
+            data = &data[n..];
             if self.buf_len == 128 {
                 let block = self.buffer;
-                self.compress(&block);
+                self.process_block(&block);
                 self.total_len += 128;
                 self.buf_len = 0;
             }
@@ -66,36 +61,42 @@ impl Sha512Hasher {
     }
 
     pub fn finalize(mut self) -> [u8; 64] {
-        self.total_len += self.buf_len as u128;
-        
-        let mut pad = [0u8; 256];
-        pad[..self.buf_len].copy_from_slice(&self.buffer[..self.buf_len]);
-        pad[self.buf_len] = 0x80;
-        
-        let bit_len = self.total_len * 8;
-        let pad_len = if self.buf_len < 112 { 128 } else { 256 };
-        
-        let len_bytes = bit_len.to_be_bytes();
-        pad[pad_len - 16..pad_len].copy_from_slice(&len_bytes);
-        
-        self.compress(&pad[0..128].try_into().unwrap());
-        if pad_len == 256 {
-            self.compress(&pad[128..256].try_into().unwrap());
+        let bit_len = (self.total_len as u128 + self.buf_len as u128) * 8;
+        self.buffer[self.buf_len] = 0x80;
+        self.buf_len += 1;
+
+        if self.buf_len > 112 {
+            while self.buf_len < 128 {
+                self.buffer[self.buf_len] = 0;
+                self.buf_len += 1;
+            }
+            let block = self.buffer;
+            self.process_block(&block);
+            self.buf_len = 0;
         }
+
+        while self.buf_len < 112 {
+            self.buffer[self.buf_len] = 0;
+            self.buf_len += 1;
+        }
+
+        let len_bytes = bit_len.to_be_bytes();
+        self.buffer[112..128].copy_from_slice(&len_bytes);
+        let block = self.buffer;
+        self.process_block(&block);
 
         let mut out = [0u8; 64];
         for i in 0..8 {
-            let word = self.state[i];
-            out[i * 8..(i + 1) * 8].copy_from_slice(&word.to_be_bytes());
+            out[i * 8..i * 8 + 8].copy_from_slice(&self.h[i].to_be_bytes());
         }
         out
     }
 
-    fn compress(&mut self, block: &[u8; 128]) {
+    fn process_block(&mut self, block: &[u8; 128]) {
         let mut w = [0u64; 80];
-        for i in 0..16 {
-            let off = i * 8;
-            w[i] = u64::from_be_bytes(block[off..off + 8].try_into().unwrap());
+        for (i, chunk) in block.chunks_exact(8).enumerate().take(16) {
+            let chunk_array: &[u8; 8] = chunk.try_into().unwrap();
+            w[i] = u64::from_be_bytes(*chunk_array);
         }
 
         for i in 16..80 {
@@ -104,41 +105,43 @@ impl Sha512Hasher {
             w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
         }
 
-        let mut a = self.state[0];
-        let mut b = self.state[1];
-        let mut c = self.state[2];
-        let mut d = self.state[3];
-        let mut e = self.state[4];
-        let mut f = self.state[5];
-        let mut g = self.state[6];
-        let mut h = self.state[7];
+        let mut a = self.h[0];
+        let mut b = self.h[1];
+        let mut c = self.h[2];
+        let mut d = self.h[3];
+        let mut e = self.h[4];
+        let mut f = self.h[5];
+        let mut g = self.h[6];
+        let mut h = self.h[7];
 
         for i in 0..80 {
             let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let t1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            
             let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
             let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
+            let t2 = s0.wrapping_add(maj);
 
             h = g;
             g = f;
             f = e;
-            e = d.wrapping_add(temp1);
+            e = d.wrapping_add(t1);
             d = c;
             c = b;
             b = a;
-            a = temp1.wrapping_add(temp2);
+            a = t1.wrapping_add(t2);
         }
 
-        self.state[0] = self.state[0].wrapping_add(a);
-        self.state[1] = self.state[1].wrapping_add(b);
-        self.state[2] = self.state[2].wrapping_add(c);
-        self.state[3] = self.state[3].wrapping_add(d);
-        self.state[4] = self.state[4].wrapping_add(e);
-        self.state[5] = self.state[5].wrapping_add(f);
-        self.state[6] = self.state[6].wrapping_add(g);
-        self.state[7] = self.state[7].wrapping_add(h);
+        self.h[0] = self.h[0].wrapping_add(a);
+        self.h[1] = self.h[1].wrapping_add(b);
+        self.h[2] = self.h[2].wrapping_add(c);
+        self.h[3] = self.h[3].wrapping_add(d);
+        self.h[4] = self.h[4].wrapping_add(e);
+        self.h[5] = self.h[5].wrapping_add(f);
+        self.h[6] = self.h[6].wrapping_add(g);
+        self.h[7] = self.h[7].wrapping_add(h);
+
     }
 }
 

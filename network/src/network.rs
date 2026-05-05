@@ -1,14 +1,14 @@
 use crate::{
     bandwidth_limiter::BandwidthLimiter, channel_stats::ChannelStats,
-    utils::{into_core_addr, map_address_to_subnetwork}, Channel, ChannelDirection, ChannelId, ChannelMode,
+    utils::into_core_addr, Channel, ChannelDirection, ChannelId, ChannelMode,
     DataReceiver, DataReceiverFactory, NetworkConfig, TrafficType,
 };
 use rsnano_core::NodeId;
 use rsnano_nullable_clock::{SteadyClock, Timestamp};
 use rsnano_nullable_random::NullableRng;
 use core::{
-    net::{Ipv6Addr, SocketAddrV6},
-    sync::atomic::{AtomicBool, Ordering},
+    net::SocketAddrV6,
+    sync::atomic::Ordering,
     time::Duration,
 };
 use alloc::sync::Arc;
@@ -18,18 +18,21 @@ use hashbrown::HashMap;
 use rand::seq::SliceRandom;
 use num_traits::Float;
 use tracing::debug;
+
 pub struct Network {
     channels: HashMap<ChannelId, Arc<Channel>>,
+    attempts: HashMap<SocketAddrV6, Timestamp>,
     next_channel_id: usize,
     stopped: core::sync::atomic::AtomicBool,
     clock: Arc<SteadyClock>,
     limiter: Arc<BandwidthLimiter>,
     stats: Arc<ChannelStats>,
-    data_receiver_factory: Box<dyn DataReceiverFactory>,
+    config: NetworkConfig,
     listening_port: u16,
     loopback: Arc<Channel>,
     pub protocol: rsnano_core::ProtocolInfo,
     on_new_realtime_channel_callback: Option<Arc<dyn Fn(Arc<Channel>) + Send + Sync>>,
+    data_receiver_factory: Option<Box<dyn DataReceiverFactory>>,
 }
 
 impl Network {
@@ -37,7 +40,7 @@ impl Network {
         clock: Arc<SteadyClock>,
         limiter: Arc<BandwidthLimiter>,
         stats: Arc<ChannelStats>,
-        data_receiver_factory: Box<dyn DataReceiverFactory>,
+        config: NetworkConfig,
     ) -> Self {
         let loopback = Arc::new(Channel::new(
             ChannelId::LOOPBACK,
@@ -51,12 +54,14 @@ impl Network {
         ));
         Self {
             channels: HashMap::new(),
+            attempts: HashMap::new(),
             next_channel_id: 1,
             stopped: core::sync::atomic::AtomicBool::new(false),
             clock,
             limiter,
             stats,
-            data_receiver_factory,
+            data_receiver_factory: None,
+            config,
             listening_port: 0,
             loopback,
             protocol: rsnano_core::ProtocolInfo::default(),
@@ -68,17 +73,21 @@ impl Network {
         &self.loopback
     }
 
-    pub fn new_from_config(_config: NetworkConfig) -> Self {
-        Self::new_test_instance()
-    }
-
-    pub fn new_test_instance() -> Self {
-        use crate::NullDataReceiverFactory;
+    pub fn new_from_config(config: NetworkConfig) -> Self {
         Self::new(
             Arc::new(SteadyClock::new_null()),
             Arc::new(BandwidthLimiter::default()),
             Arc::new(ChannelStats::default()),
-            Box::new(NullDataReceiverFactory::new()),
+            config,
+        )
+    }
+
+    pub fn new_test_instance() -> Self {
+        Self::new(
+            Arc::new(SteadyClock::new_null()),
+            Arc::new(BandwidthLimiter::default()),
+            Arc::new(ChannelStats::default()),
+            NetworkConfig::default(),
         )
     }
 
@@ -91,6 +100,10 @@ impl Network {
 
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
+    }
+
+    pub fn iter_channels(&self) -> impl Iterator<Item = &Arc<Channel>> {
+        self.channels.values()
     }
 
     pub fn available_channels(&self) -> Vec<Arc<Channel>> {
@@ -112,6 +125,16 @@ impl Network {
             return Err(NetworkError::Stopped);
         }
 
+        if direction == ChannelDirection::Inbound && !self.is_inbound_slot_available() {
+            debug!("Rejecting inbound connection: max connections reached ({})", self.config.max_inbound_connections);
+            return Err(NetworkError::MaxConnections);
+        }
+
+        if direction == ChannelDirection::Outbound && !self.is_outbound_slot_available() {
+            debug!("Rejecting outbound connection: max connections reached ({})", self.config.max_outbound_connections);
+            return Err(NetworkError::MaxConnections);
+        }
+
         let channel_id = ChannelId::from(self.next_channel_id);
         self.next_channel_id += 1;
 
@@ -126,7 +149,7 @@ impl Network {
             self.stats.clone(),
         ));
 
-        let receiver = self.data_receiver_factory.create_receiver_for(channel.clone());
+        let receiver = self.data_receiver_factory.as_ref().expect("DataReceiverFactory not set").create_receiver_for(channel.clone());
         self.channels.insert(channel_id, channel.clone());
 
         Ok((channel, receiver))
@@ -147,8 +170,18 @@ impl Network {
     }
 
     pub fn is_inbound_slot_available(&self) -> bool {
-        // Placeholder for real logic
-        true
+        self.count_by_direction(ChannelDirection::Inbound) < self.config.max_inbound_connections
+    }
+
+    pub fn is_outbound_slot_available(&self) -> bool {
+        (self.count_by_direction(ChannelDirection::Outbound) + self.attempts.len()) < self.config.max_outbound_connections
+    }
+
+    fn count_by_direction(&self, direction: ChannelDirection) -> usize {
+        self.channels
+            .values()
+            .filter(|c| c.direction() == direction)
+            .count()
     }
 
     pub fn set_listening_port(&mut self, port: u16) {
@@ -159,25 +192,34 @@ impl Network {
         self.listening_port
     }
 
-    pub fn add_outbound_attempt(&mut self, _peer: SocketAddrV6, _now: Timestamp) -> Result<(), NetworkError> {
-        // Placeholder
+    pub fn add_outbound_attempt(&mut self, peer: SocketAddrV6, now: Timestamp) -> Result<(), NetworkError> {
+        if !self.is_outbound_slot_available() {
+            debug!("Rejecting outbound attempt to {}: max connections/attempts reached ({})", peer, self.config.max_outbound_connections);
+            return Err(NetworkError::MaxConnections);
+        }
+        if self.attempts.contains_key(&peer) {
+            return Err(NetworkError::DuplicateConnection);
+        }
+        if self.find_channel(&peer).is_some() {
+            return Err(NetworkError::DuplicateConnection);
+        }
+        self.attempts.insert(peer, now);
         Ok(())
     }
 
-    pub fn remove_attempt(&mut self, _peer: &SocketAddrV6) {
-        // Placeholder
+    pub fn remove_attempt(&mut self, peer: &SocketAddrV6) {
+        self.attempts.remove(peer);
     }
 
     pub fn connect_error(&self, peer: SocketAddrV6, e: anyhow::Error) {
         debug!("Connection to {} failed: {}", peer, e);
     }
 
-    pub fn attempt_timeout(&self, _peer: SocketAddrV6) {
-        // Placeholder
+    pub fn attempt_timeout(&mut self, peer: SocketAddrV6) {
+        self.attempts.remove(&peer);
     }
 
     pub fn accept_failure(&self) {
-        // Placeholder
     }
 
     pub fn find_node_id(&self, node_id: &NodeId) -> Option<Arc<Channel>> {
@@ -189,7 +231,7 @@ impl Network {
 
     pub fn find_channel(&self, endpoint: &SocketAddrV6) -> Option<Arc<Channel>> {
         self.channels.values().find(|c: &&Arc<Channel>| {
-            c.mode() == ChannelMode::Realtime && c.is_alive() && c.peer_addr() == *endpoint
+            (c.mode() == ChannelMode::Realtime || c.mode() == ChannelMode::Undefined) && c.is_alive() && c.peer_addr() == *endpoint
         }).cloned()
     }
 
@@ -198,6 +240,15 @@ impl Network {
     }
 
     pub fn add_channel(&mut self, channel: Arc<Channel>) {
+        if channel.direction() == ChannelDirection::Inbound && !self.is_inbound_slot_available() {
+            debug!("add_channel rejected inbound: limit reached");
+            return;
+        }
+        if channel.direction() == ChannelDirection::Outbound && !self.is_outbound_slot_available() {
+            debug!("add_channel rejected outbound: limit reached");
+            return;
+        }
+
         self.channels.insert(channel.channel_id(), channel.clone());
         if channel.mode() == crate::ChannelMode::Realtime {
             if let Some(callback) = &self.on_new_realtime_channel_callback {
@@ -205,8 +256,9 @@ impl Network {
             }
         }
     }
+
     pub fn set_data_receiver_factory(&mut self, factory: Box<dyn DataReceiverFactory>) {
-        self.data_receiver_factory = factory;
+        self.data_receiver_factory = Some(factory);
     }
 
     pub fn random_channels(&self, count: usize) -> Vec<Arc<Channel>> {
@@ -254,8 +306,7 @@ impl Network {
     }
 
     pub fn sorted_channels(&self) -> Vec<Arc<Channel>> {
-        let mut result: Vec<_> = self.channels.values().cloned().collect();
-        // Just return them as is for now
+        let result: Vec<_> = self.channels.values().cloned().collect();
         result
     }
 
@@ -284,7 +335,6 @@ impl Network {
     }
 
     pub fn perma_ban(&mut self, _addr: SocketAddrV6) {
-        // TODO: implement
     }
 
     pub fn count_by_mode(&self, mode: ChannelMode) -> usize {
@@ -348,6 +398,7 @@ impl Network {
     }
 }
 
+#[repr(C, align(16))]
 #[derive(Default)]
 pub struct ChannelsInfo {
     pub total: usize,

@@ -1,7 +1,11 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{common::CountArgs, RpcCommand};
 use rsnano_core::{BlockHash, JsonBlock};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 impl RpcCommand {
     pub fn unchecked(count: u64) -> Self {

@@ -150,7 +150,6 @@ impl OnlineReps {
 
     /// Returns the quorum required for confirmation
     pub fn quorum_delta(&self) -> Amount {
-        tracing::info!("[node] OnlineReps::quorum_delta");
         let weight = max(self.online_weight(), self.trended_or_minimum_weight());
 
         // Using a larger container to ensure maximum precision
@@ -229,7 +228,8 @@ impl OnlineReps {
     /// This can happen for directly connected or indirectly connected reps.
     /// Returns whether it is a rep which has more than min weight
     pub fn vote_observed(&mut self, rep_account: PublicKey, now: Timestamp) -> bool {
-        if self.rep_weights.weight(&rep_account) < self.representative_weight_minimum {
+        let weight = self.rep_weights.weight(&rep_account);
+        if weight < self.representative_weight_minimum && self.online_weight != Amount::zero() {
             return false;
         }
 
@@ -261,7 +261,6 @@ impl OnlineReps {
     }
 
     pub fn calculate_online_weight(&mut self) {
-        tracing::info!("[node] OnlineReps::calculate_online_weight");
         let mut current = Amount::zero();
         let rep_weights = self.rep_weights.read();
         for account in self.online_reps.iter() {

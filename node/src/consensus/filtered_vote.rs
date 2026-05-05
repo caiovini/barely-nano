@@ -10,6 +10,14 @@ pub struct ReceivedVote {
     pub source: VoteSource,
     pub channel: Option<Arc<Channel>>,
 }
+impl core::fmt::Debug for ReceivedVote {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ReceivedVote")
+            .field("vote", &self.vote)
+            .field("source", &self.source)
+            .finish()
+    }
+}
 
 impl ReceivedVote {
     pub fn new(vote: Arc<Vote>, source: VoteSource, channel: Option<Arc<Channel>>) -> Self {

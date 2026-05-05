@@ -25,7 +25,7 @@ pub struct VoteCacheConfig {
 impl Default for VoteCacheConfig {
     fn default() -> Self {
         Self {
-            max_size: 1024 * 64,
+            max_size: 4096,
             max_voters: 64,
             age_cutoff: Duration::from_secs(15 * 60),
         }

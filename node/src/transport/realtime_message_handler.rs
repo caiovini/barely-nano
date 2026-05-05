@@ -68,7 +68,6 @@ impl RealtimeMessageHandler {
             message.message_type().into(),
             Direction::In,
         );
-        tracing::info!("Received message: {:?} from {}", message.message_type(), channel.peer_addr());
 
         match message {
             Message::Keepalive(keepalive) => {
@@ -143,7 +142,7 @@ impl RealtimeMessageHandler {
                     true => VoteSource::Rebroadcast,
                     false => VoteSource::Live,
                 };
-
+                
                 let added = self.vote_processor_queue.enqueue(
                     Arc::new(ack.vote().clone()),
                     Some(channel.clone()),

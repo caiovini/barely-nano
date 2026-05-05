@@ -1,15 +1,18 @@
+use crate::utils::LazyLock;
+use crate::utils::{Condvar, JoinHandle};
+use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::ToString;
-use spin::{ Mutex, RwLock };
-use crate::utils::{Condvar, JoinHandle};
-use core::sync::atomic::{ AtomicU64, Ordering };
-use crate::utils::LazyLock;
+
+use core::sync::atomic::{AtomicU64, Ordering};
+use spin::{Mutex, RwLock};
+use tracing::debug;
 
 use rsnano_core::{
-    utils::ContainerInfo, Account, AccountInfo, Amount, BlockHash, ConfirmationHeightInfo,
-    SavedBlock,
+    Account, AccountInfo, Amount, BlockHash, ConfirmationHeightInfo, SavedBlock,
+    utils::ContainerInfo,
 };
 use rsnano_ledger::{AnySet, ConfirmedSet};
 use rsnano_nullable_clock::SteadyClock;
@@ -17,12 +20,12 @@ use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 use rsnano_stats::{DetailType, StatType, Stats, StatsCollection, StatsSource};
 
 use super::{
-    bucket_stats::BucketStats, prio_bucket_count, prio_bucket_index, Bucket, Bucketing,
-    PriorityBucketConfig,
+    Bucket, Bucketing, PriorityBucketConfig, bucket_stats::BucketStats, prio_bucket_count,
+    prio_bucket_index,
 };
 use crate::consensus::{
-    election_schedulers::priority::{BucketInsertError, Eviction},
     ActiveElectionsContainer,
+    election_schedulers::priority::{BucketInsertError, Eviction},
 };
 
 pub struct PriorityScheduler {
@@ -36,6 +39,7 @@ pub struct PriorityScheduler {
     aec: Arc<RwLock<ActiveElectionsContainer>>,
     activate_successors_listener: OutputListenerMt<SavedBlock>,
     activations_per_bucket: Vec<AtomicU64>,
+    is_bootstrap_active: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl PriorityScheduler {
@@ -44,6 +48,7 @@ impl PriorityScheduler {
         stats: Arc<Stats>,
         active_elections: Arc<RwLock<ActiveElectionsContainer>>,
         clock: Arc<SteadyClock>,
+        is_bootstrap_active: Box<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         let mut buckets = Vec::with_capacity(prio_bucket_count());
         let mut activations_per_bucket = Vec::with_capacity(prio_bucket_count());
@@ -63,6 +68,7 @@ impl PriorityScheduler {
             aec: active_elections,
             activate_successors_listener: Default::default(),
             activations_per_bucket,
+            is_bootstrap_active,
         }
     }
 
@@ -84,22 +90,33 @@ impl PriorityScheduler {
     }
 
     pub fn contains(&self, hash: &BlockHash) -> bool {
-        self.buckets
-            .lock()
-            .iter()
-            .any(|b| b.contains(hash))
+        self.buckets.lock().iter().any(|b| b.contains(hash))
     }
 
     pub fn activate(&self, any: &impl AnySet, account: &Account) {
         debug_assert!(!account.is_zero());
         if let Some(account_info) = any.get_account(account) {
             let conf_info = any.confirmed().get_conf_info(account).unwrap_or_default();
-
             if conf_info.height < account_info.block_count {
-                self.activate_with_info(any, &account_info, &conf_info);
-                return;
+                debug!(
+                    "PriorityScheduler: activating account {} (height: {}, total: {})",
+                    account.encode_account(),
+                    conf_info.height,
+                    account_info.block_count
+                );
+                self.activate_with_info(any, account, &account_info, &conf_info);
+            } else {
+                debug!(
+                    "PriorityScheduler: account {} is up to date",
+                    account.encode_account()
+                );
             }
-        };
+        } else {
+            debug!(
+                "PriorityScheduler: account {} not found in ledger",
+                account.encode_account()
+            );
+        }
 
         self.stats
             .inc(StatType::ElectionScheduler, DetailType::ActivateSkip);
@@ -108,6 +125,7 @@ impl PriorityScheduler {
     pub fn activate_with_info(
         &self,
         any: &impl AnySet,
+        account: &Account,
         account_info: &AccountInfo,
         conf_info: &ConfirmationHeightInfo,
     ) {
@@ -127,12 +145,22 @@ impl PriorityScheduler {
         };
 
         let Some(block) = any.get_block(&next_unconfirmed_hash) else {
+            tracing::debug!(
+                "PriorityScheduler: next unconfirmed block {} NOT FOUND for account {} (head was {})!",
+                next_unconfirmed_hash,
+                account.encode_account(),
+                account_info.head
+            );
             return;
         };
 
-        if !any.dependents_confirmed(&block) {
+        if !(self.is_bootstrap_active)() && !any.dependents_confirmed(&block) {
             self.stats
                 .inc(StatType::ElectionScheduler, DetailType::ActivateFailed);
+            tracing::debug!(
+                "PriorityScheduler: activation failed for block {} - dependents not confirmed",
+                next_unconfirmed_hash
+            );
             return;
         }
 
@@ -142,6 +170,11 @@ impl PriorityScheduler {
             let mut buckets = self.buckets.lock();
             let (bucket, bucket_index) = self.find_bucket(&mut buckets, priority.balance);
             self.activations_per_bucket[bucket_index].fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                "PriorityScheduler: block {} added to bucket {}",
+                next_unconfirmed_hash,
+                bucket_index
+            );
             bucket.insert(priority, block.into())
         };
 
@@ -208,7 +241,7 @@ impl PriorityScheduler {
         buckets.iter().any(|b| b.available(&aec))
     }
 
-    fn run_one(&self) {
+    pub fn run_one(&self) {
         self.stats
             .inc(StatType::ElectionScheduler, DetailType::Loop);
 
@@ -219,8 +252,17 @@ impl PriorityScheduler {
 
         while inserted {
             inserted = false;
+            let activated_before = self.bucket_stats.activate_success.load(Ordering::Relaxed);
             for bucket in buckets.iter_mut().rev() {
                 bucket.activate(&mut aec, now, &self.bucket_stats);
+            }
+            let activated_after = self.bucket_stats.activate_success.load(Ordering::Relaxed);
+            if activated_after > activated_before {
+                tracing::debug!(
+                    "PriorityScheduler: activated {} blocks",
+                    activated_after - activated_before
+                );
+                inserted = true;
             }
         }
     }
@@ -267,17 +309,7 @@ pub trait PrioritySchedulerExt {
 
 impl PrioritySchedulerExt for Arc<PriorityScheduler> {
     fn start(&self) {
-        // debug_assert!(self.thread.lock().is_none());
-        //
-        // let self_l = Arc::clone(&self);
-        // *self.thread.lock() = Some(
-        //     std::thread::Builder::new()
-        //         .name("Sched Priority".to_string())
-        //         .spawn(Box::new(move || {
-        //             self_l.run();
-        //         }))
-        //         .unwrap(),
-        // );
+        *self.stopped.lock() = false;
     }
 }
 
@@ -347,6 +379,6 @@ mod tests {
         let stats = Arc::new(Stats::default());
         let active_elections = Arc::new(RwLock::new(ActiveElectionsContainer::default()));
         let clock = Arc::new(SteadyClock::new_null());
-        PriorityScheduler::new(config, stats, active_elections, clock)
+        PriorityScheduler::new(config, stats, active_elections, clock, Box::new(|| false))
     }
 }

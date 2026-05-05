@@ -10,19 +10,19 @@ rsnano_messages = { path = "../messages" }
 rsnano_network = { path = "../network" }
 rsnano_node = { path = "../node" }
 rsnano_ledger = { path = "../ledger" }
-rsnano_rpc_client = { path = "../rpc_client" }
 rsnano_nullable_clock = { path = "../nullables/clock" }
 rsnano_rpc_messages = { path = "../rpc_messages" }
-rsnano_store_lmdb = { path = "../store_lmdb" }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["net"] }
-anyhow = "1"
-axum = "0.8"
-toml = "0.9"
-tracing = "0.1"
-itertools = "0.14"
-indexmap = "2"
+rsnano_rpc_handler = { path = "../rpc_handler" }
+serde = { version = "=1.0.210", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+anyhow = { version = "1", default-features = false }
+tracing = { version = "0.1", default-features = false }
+itertools = { version = "0.14", default-features = false }
+indexmap = { version = "2", default-features = false, features = ["serde"] }
+
+[features]
+default = []
+
 
 [dev-dependencies]
 test_helpers = { path = "../tools/test_helpers" }

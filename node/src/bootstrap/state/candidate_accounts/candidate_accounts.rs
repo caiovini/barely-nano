@@ -22,8 +22,8 @@ impl Default for CandidateAccountsConfig {
     fn default() -> Self {
         Self {
             consideration_count: 4,
-            priorities_max: 256 * 1024,
-            blocking_max: 256 * 1024,
+            priorities_max: 4 * 1024,
+            blocking_max: 4 * 1024,
             blocking_decay: Duration::from_secs(60 * 15),
             cooldown: Duration::from_secs(3),
         }

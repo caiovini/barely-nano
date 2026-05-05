@@ -99,6 +99,10 @@ impl BlockProcessor {
             // join_handle.join().unwrap(); */ */ */ */ */
         }
     }
+
+    pub fn total_queue_len(&self) -> usize {
+        self.queue.total_queue_len()
+    }
 }
 
 impl Drop for BlockProcessor {
@@ -123,7 +127,6 @@ impl BlockProcessorLoop {
     #[allow(dead_code)]
     pub fn run(&mut self) {
         while let Some(blocks) = self.queue.pop_blocking() {
-            tracing::info!("Block Processor: processing batch of {} blocks", blocks.len());
             self.backlog_waiter.wait_for_backlog();
 
             if self.queue.stopped() {
@@ -136,7 +139,6 @@ impl BlockProcessorLoop {
 
     pub fn run_once(&mut self) {
         if let Some(blocks) = self.queue.pop() {
-            tracing::info!("Block Processor: processing batch of {} blocks", blocks.len());
             self.backlog_waiter.wait_for_backlog();
             self.process.process_blocks(blocks);
         }

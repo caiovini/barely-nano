@@ -1,0 +1,13 @@
+use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::string::ToString;
+use alloc::vec;
+use crate::RpcCommandHandler;
+use rsnano_rpc_messages::{AccountWeightArgs, WeightDto};
+
+impl RpcCommandHandler {
+    pub(crate) fn account_weight(&self, args: AccountWeightArgs) -> WeightDto {
+        let weight = self.node.ledger.any().weight_exact(args.account.into());
+        WeightDto::new(weight)
+    }
+}

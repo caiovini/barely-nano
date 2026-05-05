@@ -71,6 +71,32 @@ impl ManualScheduler {
         self.notify();
     }
 
+    pub fn run_once(&self) {
+        let mut guard = self.mutex.lock();
+        if !guard.stopped && guard.predicate() {
+            self.stats
+                .inc(StatType::ElectionScheduler, DetailType::Loop);
+
+            let block = guard.queue.pop_front().unwrap();
+            drop(guard);
+
+            let hash = block.hash();
+            let priority = self.ledger.any().block_priority(&block);
+            self.stats
+                .inc(StatType::ElectionScheduler, DetailType::InsertManual);
+
+            let now = self.clock.now();
+
+            let mut aec = self.active_elections.write();
+            if aec
+                .insert(AecInsertRequest::new_manual(block, priority), now)
+                .is_ok()
+            {
+                aec.transition_active(&hash);
+            }
+        }
+    }
+
     #[allow(dead_code)]
     fn run(&self) {
         let mut guard = self.mutex.lock();
@@ -135,16 +161,7 @@ pub trait ManualSchedulerExt {
 
 impl ManualSchedulerExt for Arc<ManualScheduler> {
     fn start(&self) {
-        // debug_assert!(self.thread.lock().is_none());
-        // let self_l = Arc::clone(self);
-        // *self.thread.lock() = Some(
-        //     std::thread::Builder::new()
-        //         .name("Sched Manual".to_string())
-        //         .spawn(Box::new(move || {
-        //             self_l.run();
-        //         }))
-        //         .unwrap(),
-        // )
+        self.mutex.lock().stopped = false;
     }
 }
 

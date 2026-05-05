@@ -1,7 +1,11 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{RpcBool, RpcCommand, RpcU64};
 use rsnano_core::{Account, Amount, BlockHash};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 impl RpcCommand {
     pub fn ledger(ledger_args: LedgerArgs) -> Self {
@@ -108,7 +112,7 @@ pub struct LedgerAccountInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
 
     use crate::{
         ledger::{LedgerAccountInfo, LedgerArgs, LedgerResponse},

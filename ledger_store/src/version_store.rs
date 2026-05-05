@@ -1,4 +1,3 @@
-use kernel_common::storage::DB;
 
 pub struct BtreeVersionStore {}
 impl BtreeVersionStore {

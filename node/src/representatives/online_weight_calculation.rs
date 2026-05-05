@@ -1,12 +1,12 @@
-use core::time::Duration;
-use rsnano_nullable_clock::Timestamp as Instant;
-use alloc::sync::Arc;
 use super::{OnlineReps, OnlineWeightSampler};
+use alloc::sync::Arc;
+use core::time::Duration;
 use rsnano_core::utils::{CancellationToken, Tickable};
 use rsnano_nullable_clock::SteadyClock;
-use spin::{ Mutex };
+use rsnano_nullable_clock::Timestamp as Instant;
+use spin::Mutex;
 // // // // // // // use std::{    time::Duration, time::Instant    }; // TODO: fix this
-use tracing::info;
+use tracing::debug;
 
 pub struct OnlineWeightCalculation {
     sampler: OnlineWeightSampler,
@@ -33,7 +33,7 @@ impl OnlineWeightCalculation {
 
     fn calculate_trended_weight(&mut self) {
         let result = self.sampler.calculate_trend();
-        info!(
+        debug!(
             "Trended weight updated: {}, samples: {}",
             result.trended.format_balance(0),
             result.sample_count

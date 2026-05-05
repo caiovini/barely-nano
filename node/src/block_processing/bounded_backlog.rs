@@ -65,6 +65,7 @@ impl BoundedBacklog {
                 config: config.clone(),
                 bucket_count: prio_bucket_count(),
                 scan_limiter: Mutex::new(TokenBucket::new(config.scan_rate)),
+                last_scan: BlockHash::zero(),
             }),
             config,
             stats,
@@ -92,21 +93,15 @@ impl BoundedBacklog {
     }
 
     pub fn start(&self) {
-        debug_assert!(self.thread.lock().is_none());
+        // No threads in bare-metal
+    }
 
-        // let backlog_impl = self.backlog_impl.clone();
-        // let handle = std::thread::Builder::new()
-        //     .name("Bounded backlog".to_owned())
-        //     .spawn(move || backlog_impl.run())
-        //     .unwrap();
-        // *self.thread.lock() = Some(handle);
+    pub fn run_once(&self) {
+        self.backlog_impl.run_once();
+    }
 
-        // let backlog_impl = self.backlog_impl.clone();
-        // let handle = std::thread::Builder::new()
-        //     .name("Bounded b scan".to_owned())
-        //     .spawn(move || backlog_impl.run_scan())
-        //     .unwrap();
-        // *self.scan_thread.lock() = Some(handle);
+    pub fn run_scan_once(&self) {
+        self.backlog_impl.run_scan_once();
     }
 
     pub fn stop(&self) {
@@ -263,6 +258,82 @@ struct BoundedBacklogImpl {
 }
 
 impl BoundedBacklogImpl {
+    fn run_once(&self) {
+        let mut guard = self.mutex.lock();
+        if guard.stopped || !guard.predicate() {
+            return;
+        }
+
+        self.stats.inc(StatType::BoundedBacklog, DetailType::Loop);
+
+        let backlog = self.ledger.backlog_count() as u64;
+        let target_count = if backlog > self.config.max_backlog {
+            backlog - self.config.max_backlog as u64
+        } else {
+            0
+        };
+
+        let can_roll_back = self.can_roll_back.read();
+        let targets = guard.gather_targets(
+            min(target_count as usize, self.config.batch_size),
+            &*can_roll_back,
+        );
+
+        if !targets.is_empty() {
+            drop(guard);
+            self.stats.add(
+                StatType::BoundedBacklog,
+                DetailType::GatheredTargets,
+                targets.len() as u64,
+            );
+
+            let processed = self.roll_back(&targets, target_count as usize, &*can_roll_back);
+            guard = self.mutex.lock();
+            for hash in &processed {
+                guard.index.erase_hash(hash);
+            }
+        }
+    }
+
+    fn run_scan_once(&self) {
+        let mut guard = self.mutex.lock();
+        if guard.stopped {
+            return;
+        }
+
+        if !guard
+            .scan_limiter
+            .lock()
+            .try_consume(self.config.batch_size, self.clock.now())
+        {
+            return;
+        }
+
+        self.stats
+            .inc(StatType::BoundedBacklog, DetailType::LoopScan);
+
+        let last = guard.last_scan;
+        let batch = guard.index.next(&last, self.config.batch_size);
+        
+        if batch.is_empty() {
+            guard.last_scan = BlockHash::zero();
+            return;
+        }
+
+        drop(guard);
+        {
+            let unconfirmed = self.ledger.unconfirmed();
+            let mut last_hash = last;
+            for hash in batch {
+                self.stats
+                    .inc(StatType::BoundedBacklog, DetailType::Scanned);
+                self.update(&unconfirmed, &hash);
+                last_hash = hash;
+            }
+            self.mutex.lock().last_scan = last_hash;
+        }
+    }
+
     fn run(&self) {
         let mut guard = self.mutex.lock();
         while !guard.stopped {
@@ -414,6 +485,7 @@ struct BacklogData {
     config: BoundedBacklogConfig,
     bucket_count: usize,
     scan_limiter: Mutex<TokenBucket>,
+    last_scan: BlockHash,
 }
 
 impl BacklogData {

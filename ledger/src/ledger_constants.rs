@@ -37,13 +37,7 @@ static LIVE_GENESIS_DATA: &str = r###"{
 	"signature": "9F0C933C8ADE004D808EA1985FA746A7E95BA2A38F867640F53EC8F180BDFE9E2C1268DEAD7C2664F356E37ABA362BC58E46DBA03E523A7B5A19E4B6EB12BB02"
     }"###;
 
-pub fn get_ledger_constants_stub() -> LedgerConstants {
-    LedgerConstants::new(WorkThresholds::publish_dev().clone(), Networks::NanoDevNetwork)
-}
 
-pub fn get_dev_genesis_block() -> SavedBlock {
-    get_ledger_constants_stub().genesis_block
-}
 
 pub const DEV_GENESIS_ACCOUNT: Account = Account::from_bytes([
     0x3B, 0x5D, 0x1A, 0x42, 0x3D, 0x8D, 0xF4, 0x3E, 0x4E, 0x01, 0x83, 0x0F, 0x0B, 0x6E, 0x1A, 0x07,

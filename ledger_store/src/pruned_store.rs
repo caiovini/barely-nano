@@ -20,7 +20,7 @@ impl BtreePrunedStore {
 
     pub fn put(&self, hash: &BlockHash) {
         let key = self.make_key(hash);
-        let value = [1u8; 256]; // Just store '1' to indicate pruned
+        let value = [1u8; 512]; // Just store '1' to indicate pruned
         
         let mut lock = DB.lock();
         if let Some(db) = lock.as_mut() {

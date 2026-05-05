@@ -1,4 +1,3 @@
-use rand::seq::IteratorRandom;
 use rsnano_messages::Keepalive;
 use rsnano_network::{ChannelId, DeadChannelCleanupStep};
 use hashbrown::HashMap;
@@ -27,6 +26,10 @@ impl LatestKeepalives {
     }
 
     pub fn insert(&mut self, channel_id: ChannelId, keepalive: Keepalive) {
+        if channel_id.as_usize() > 1_000_000 {
+            tracing::warn!("LatestKeepalives::insert: ignoring suspicious channel_id: {:#x}", channel_id.as_usize());
+            return;
+        }
         while self.len() >= self.max_len {
             self.pop_random();
         }
@@ -39,7 +42,6 @@ impl LatestKeepalives {
 
     //TODO: randomize
     pub fn pop_random(&mut self) -> Option<Keepalive> {
-        tracing::info!("[node] LatestKeepalives::pop_random");
         let channel_id = *self.entries.keys().next()?;
         self.entries.remove(&channel_id)
     }

@@ -115,7 +115,7 @@ mod tests {
         let mut fixture = create_fixture();
 
         let spec = AscPullQuerySpec::new_test_instance();
-        let channel_id = spec.channel.channel_id();
+        let channel_id = spec.channel.channel_id().as_usize();
         let mut state = BootstrapState::default();
 
         let id = fixture.query_sender.send(spec, &mut state);

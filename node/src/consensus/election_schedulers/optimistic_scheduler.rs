@@ -202,6 +202,24 @@ impl OptimisticScheduler {
         }
     }
 
+    pub fn run_once(&self) {
+        if self.stopped.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let mut guard = self.candidates.lock();
+        if self.predicate(&guard) {
+            let any = self.ledger.any();
+
+            while self.predicate(&guard) {
+                let (account, time) = guard.pop_front().unwrap();
+                drop(guard);
+                self.run_one(&any, account, time);
+                guard = self.candidates.lock();
+            }
+        }
+    }
+
     fn run_one(&self, any: &impl AnySet, account: Account, _time: Instant) {
         let Some(head) = any.account_head(&account) else {
             return;
@@ -246,17 +264,7 @@ pub trait OptimisticSchedulerExt {
 
 impl OptimisticSchedulerExt for Arc<OptimisticScheduler> {
     fn start(&self) {
-        // debug_assert!(self.thread.lock().is_none());
-        // self.stopped.store(false, Ordering::SeqCst);
-        // let self_l = Arc::clone(self);
-        // *self.thread.lock() = Some(
-        //     std::/* /* /* thread::Builder::new()
-        //         .name("Sched Opt".to_string())
-        //         .spawn(Box::new(move || {
-        //             self_l.run();
-        //         }))
-        //         .unwrap(),
-        // );
+        self.stopped.store(false, Ordering::SeqCst);
     }
 }
 

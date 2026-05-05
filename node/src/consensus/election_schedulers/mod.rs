@@ -9,12 +9,12 @@ pub use hinted_scheduler::*;
 pub use manual_scheduler::*;
 pub use optimistic_scheduler::*;
 
-use alloc::sync::Arc;
-use spin::{ Mutex, RwLock};
+use alloc::{boxed::Box, sync::Arc};
+use spin::{Mutex, RwLock};
 
 use rsnano_core::{
-    utils::{ContainerInfo, ContainerInfoProvider},
     Account, AccountInfo, BlockHash, ConfirmationHeightInfo, Networks, SavedBlock,
+    utils::{ContainerInfo, ContainerInfoProvider},
 };
 use rsnano_ledger::{AnySet, Ledger};
 use rsnano_nullable_clock::SteadyClock;
@@ -52,6 +52,7 @@ impl ElectionSchedulers {
         confirming_set: Arc<ConfirmingSet>,
         online_reps: Arc<Mutex<OnlineReps>>,
         clock: Arc<SteadyClock>,
+        is_bootstrap_active: Box<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         let hinted = Arc::new(HintedScheduler::new(
             config.hinted_scheduler.clone(),
@@ -86,6 +87,7 @@ impl ElectionSchedulers {
             stats.clone(),
             active_elections.clone(),
             clock,
+            is_bootstrap_active,
         ));
 
         Self {
@@ -124,6 +126,7 @@ impl ElectionSchedulers {
             confirming_set,
             online_reps,
             clock,
+            Box::new(|| false),
         )
     }
 
@@ -145,7 +148,14 @@ impl ElectionSchedulers {
     ) {
         self.optimistic.activate(account, account_info, conf_info);
         self.priority
-            .activate_with_info(any, account_info, conf_info);
+            .activate_with_info(any, account, account_info, conf_info);
+    }
+
+    pub fn run_once(&self) {
+        self.priority.run_one();
+        self.optimistic.run_once();
+        self.hinted.run_once();
+        self.manual.run_once();
     }
 
     pub fn activate_accounts_with_fresh_blocks(&self, processed: &[ProcessedResult]) {
@@ -181,16 +191,10 @@ impl ElectionSchedulers {
     }
 
     pub fn start(&self) {
-        if self.config.enable_hinted_scheduler {
-            self.hinted.start();
-        }
+        self.priority.start();
+        self.optimistic.start();
+        self.hinted.start();
         self.manual.start();
-        if self.config.enable_optimistic_scheduler {
-            self.optimistic.start();
-        }
-        if self.config.enable_priority_scheduler {
-            self.priority.start();
-        }
     }
 
     pub fn track_notify(&self) -> Arc<OutputTrackerMt<()>> {

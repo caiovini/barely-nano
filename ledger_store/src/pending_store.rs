@@ -17,7 +17,7 @@ impl BtreePendingStore {
         key_bytes[0] = Self::TABLE_ID;
         key_bytes[1..65].copy_from_slice(&key.to_bytes());
 
-        let mut val_bytes = [0u8; 256];
+        let mut val_bytes = [0u8; 512];
         let mut stream = MutStreamAdapter::new(&mut val_bytes);
         info.serialize(&mut stream);
 

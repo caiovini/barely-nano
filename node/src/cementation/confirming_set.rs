@@ -1,16 +1,16 @@
+use crate::utils::{Condvar, JoinHandle};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use hashbrown::{ HashSet };
-use spin::{ Mutex };
-use core::sync::atomic::{ AtomicBool, Ordering };
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
+use hashbrown::HashSet;
 use rsnano_nullable_clock::{SteadyClock, Timestamp as Instant};
-use crate::utils::{Condvar, JoinHandle};
+use spin::Mutex;
 
 use rsnano_core::{
-    utils::{BackpressureSender, ContainerInfo, ContainerInfoProvider},
     BlockHash, SavedBlock,
+    utils::{BackpressureSender, ContainerInfo, ContainerInfoProvider},
 };
 use rsnano_ledger::{CementingObserver, Ledger};
 use rsnano_stats::{DetailType, StatType, Stats};
@@ -18,7 +18,7 @@ use rsnano_stats::{DetailType, StatType, Stats};
 use super::ordered_entries::OrderedEntries;
 use crate::{
     block_processing::{LedgerEvent, ProcessedResult},
-    consensus::{election::ConfirmedElection, ConfirmedElectionsCache},
+    consensus::{ConfirmedElectionsCache, election::ConfirmedElection},
     utils::{ThreadPool, ThreadPoolImpl},
 };
 
@@ -46,9 +46,9 @@ impl Default for ConfirmingSetConfig {
     fn default() -> Self {
         Self {
             batch_size: 256,
-            max_blocks: 16 * 1024,
+            max_blocks: 2048,
             max_queued_notifications: 8,
-            max_deferred: 16 * 1024,
+            max_deferred: 2048,
             deferred_age_cutoff: Duration::from_secs(15 * 60),
         }
     }
@@ -293,6 +293,7 @@ impl ConfirmingSetThread {
         };
 
         if added {
+            tracing::debug!("ConfirmingSet: block {} added to confirming set", hash);
             self.condition.notify_all();
             self.stats.inc(StatType::ConfirmingSet, DetailType::Insert);
         } else {
@@ -403,7 +404,7 @@ impl ConfirmingSetThread {
     }
 
     fn run_batch(&self, batch: VecDeque<CementingEntry>) {
-        tracing::info!("[node] ConfirmingSetThread::run_batch, batch size: {}", batch.len());
+        tracing::debug!("ConfirmingSet: processing batch of {} blocks", batch.len());
         let mut notifier = CementedNotifier::new(self);
         self.ledger.confirm_batch(
             batch.iter().map(|i| &i.confirmation_root),

@@ -1,0 +1,22 @@
+[package]
+name = "rsnano_rpc_handler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rsnano_core = { path = "../core" }
+rsnano_stats = { path = "../stats" }
+rsnano_node = { path = "../node" }
+rsnano_ledger = { path = "../ledger" }
+rsnano_network = { path = "../network" }
+rsnano_rpc_messages = { path = "../rpc_messages" }
+serde = { version = "=1.0.210", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+anyhow = { version = "1", default-features = false }
+tracing = { version = "0.1", default-features = false }
+spin = "0.9"
+hashbrown = { version = "0.14", default-features = false, features = ["serde", "ahash", "alloc"] }
+indexmap = { version = "2.5", default-features = false, features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync"] }

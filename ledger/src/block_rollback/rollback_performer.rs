@@ -88,7 +88,7 @@ impl<'a> BlockRollbackPerformer<'a> {
         planner.roll_back_head_block()
     }
 
-    fn any(&self) -> BorrowingAnySet {
+    fn any(&self) -> BorrowingAnySet<'_> {
         BorrowingAnySet {
             constants: &self.ledger.constants,
             store: &self.ledger.store,

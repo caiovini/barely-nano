@@ -1,0 +1,3608 @@
+/home/cvini/.asdf/shims/cargo build -p hello-bare --release --target riscv64gc-unknown-none-elf
+warning: unstable feature specified for `-Ctarget-feature`: `v`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: unstable feature specified for `-Ctarget-feature`: `zvkb`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: unstable feature specified for `-Ctarget-feature`: `zicbom`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: `rsnano_sha` (lib) generated 3 warnings
+warning: `rsnano_output_tracker` (lib) generated 3 warnings (3 duplicates)
+warning: `kernel-common` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_nullable_random` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_nullable_clock` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_core` (lib) generated 3 warnings (3 duplicates)
+warning: field `cache` is never read
+  --> ledger_store/src/account_store.rs:12:5
+   |
+11 | pub struct BtreeAccountStore {
+   |            ----------------- field in this struct
+12 |     cache: Arc<LedgerCache>,
+   |     ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rsnano_work` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_stats` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_nullable_tcp` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_ledger_store` (lib) generated 4 warnings (3 duplicates)
+warning: `rsnano_nullable_fs` (lib) generated 3 warnings (3 duplicates)
+warning: unused imports: `future::poll_fn` and `task::Poll`
+  --> network/src/tcp_network_adapter.rs:11:5
+   |
+11 |     future::poll_fn,
+   |     ^^^^^^^^^^^^^^^
+12 |     task::Poll,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `alloc::string::ToString`
+  --> network/src/tcp_network_adapter.rs:15:5
+   |
+15 | use alloc::string::ToString;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `info`
+  --> network/src/tcp_network_adapter.rs:18:21
+   |
+18 | use tracing::{warn, info};
+   |                     ^^^^
+
+warning: field `clock` is never read
+  --> network/src/network.rs:27:5
+   |
+22 | pub struct Network {
+   |            ------- field in this struct
+...
+27 |     clock: Arc<SteadyClock>,
+   |     ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `connect_timeout` is never read
+  --> network/src/peer_connector.rs:15:5
+   |
+14 | pub struct PeerConnector {
+   |            ------------- field in this struct
+15 |     connect_timeout: Duration,
+   |     ^^^^^^^^^^^^^^^
+
+warning: use of `async fn` in public traits is discouraged as auto trait bounds cannot be specified
+   --> network/src/lib.rs:119:5
+    |
+119 |     async fn read(&self, buffer: &mut [u8], count: usize) -> anyhow::Re...
+    |     ^^^^^
+    |
+    = note: you can suppress this lint if you plan to use the trait only in your own code, or do not care about auto traits like `Send` on the `Future`
+    = note: `#[warn(async_fn_in_trait)]` on by default
+help: you can alternatively desugar to a normal `fn` that returns `impl Future` and add any desired bounds such as `Send`, but these cannot be relaxed without a breaking API change
+    |
+119 -     async fn read(&self, buffer: &mut [u8], count: usize) -> anyhow::Result<()>;
+119 +     fn read(&self, buffer: &mut [u8], count: usize) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    |
+
+warning: unused variable: `accounts`
+   --> ledger/src/ledger.rs:269:13
+    |
+269 |         let accounts = self.any().iter_accounts();
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_accounts`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rsnano_messages` (lib) generated 3 warnings (3 duplicates)
+warning: `rsnano_network` (lib) generated 9 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_network` to apply 3 suggestions)
+warning: `rsnano_ledger` (lib) generated 4 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_ledger` to apply 1 suggestion)
+warning: `rsnano_websocket_messages` (lib) generated 3 warnings (3 duplicates)
+warning: unused `#[macro_use]` import
+ --> network_protocol/src/lib.rs:5:1
+  |
+5 | #[macro_use]
+  | ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `#[macro_use]` import
+ --> network_protocol/src/lib.rs:8:1
+  |
+8 | #[macro_use]
+  | ^^^^^^^^^^^^
+
+   Compiling rsnano_rpc_messages v0.1.0 (/home/cvini/rust-workspace/hello-riscv/rpc_messages)
+warning: `rsnano_network_protocol` (lib) generated 5 warnings (3 duplicates)
+warning: `rsnano_nullable_http_client` (lib) generated 3 warnings (3 duplicates)
+warning: unused `#[macro_use]` import
+ --> node/src/lib.rs:4:1
+  |
+4 | #[macro_use]
+  | ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `info`
+  --> node/src/block_processing/backlog_scan.rs:15:22
+   |
+15 | use tracing::{debug, info};
+   |                      ^^^^
+
+warning: type `cps_limiter::CpsLimiter` is more private than the item `aec_voter::AecVoter::new`
+  --> node/src/consensus/vote_generation/aec_voter.rs:27:5
+   |
+27 | /     pub fn new(
+28 | |         aec: Arc<RwLock<ActiveElectionsContainer>>,
+29 | |         vote_generators: Arc<VoteGenerators>,
+30 | |         clock: Arc<SteadyClock>,
+31 | |         network: Networks,
+32 | |         cps_limiter: CpsLimiter,
+33 | |     ) -> Self {
+   | |_____________^ associated function `aec_voter::AecVoter::new` is reachable at visibility `pub`
+   |
+note: but type `cps_limiter::CpsLimiter` is only usable at visibility `pub(crate)`
+  --> node/src/consensus/vote_generation/cps_limiter.rs:11:1
+   |
+11 | pub(crate) struct CpsLimiter {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `node::NodeArgs` is more private than the item `node::Node::new_with_args`
+   --> node/src/node.rs:203:5
+    |
+203 |     pub fn new_with_args(args: NodeArgs) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `node::Node::new_with_args` is reachable at visibility `pub`
+    |
+note: but type `node::NodeArgs` is only usable at visibility `pub(crate)`
+   --> node/src/node.rs:159:1
+    |
+159 | pub(crate) struct NodeArgs {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DistributedWorkClient` is more private than the item `work_factory::WorkFactory::new`
+  --> node/src/work/work_factory.rs:43:5
+   |
+43 | /     pub fn new(
+44 | |         work_pool: WorkPool,
+45 | |         _work_client: DistributedWorkClient,
+46 | |         work_peers: Vec<Peer>,
+47 | |         _timeout: Duration,
+48 | |     ) -> Self {
+   | |_____________^ associated function `work_factory::WorkFactory::new` is reachable at visibility `pub`
+   |
+note: but type `DistributedWorkClient` is only usable at visibility `pub(crate)`
+  --> node/src/work/distributed_work_client.rs:5:1
+   |
+ 5 | pub(crate) struct DistributedWorkClient {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `add` is never used
+   --> node/src/aec_event_processor.rs:165:12
+    |
+164 | impl AecEventProcessor {
+    | ---------------------- method in this implementation
+165 |     pub fn add(&mut self, handler: impl AecEventHandler + Send + 'stati...
+    |            ^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `top`, `next`, and `len_of_bucket` are never used
+   --> node/src/block_processing/backlog_index.rs:111:12
+    |
+ 37 | impl BacklogIndex {
+    | ----------------- methods in this implementation
+...
+111 |     pub fn top(
+    |            ^^^
+...
+126 |     pub fn next(&self, last: &BlockHash, count: usize) -> Vec<BlockHash> {
+    |            ^^^^
+...
+145 |     pub fn len_of_bucket(&self, bucket_index: usize) -> usize {
+    |            ^^^^^^^^^^^^^
+
+warning: field `last_run` is never read
+  --> node/src/block_processing/backlog_scan.rs:57:5
+   |
+48 | pub struct BacklogScan {
+   |            ----------- field in this struct
+...
+57 |     last_run: rsnano_core::utils::UnixMillisTimestamp,
+   |     ^^^^^^^^
+
+warning: method `predicate` is never used
+   --> node/src/block_processing/backlog_scan.rs:180:8
+    |
+ 60 | impl BacklogScan {
+    | ---------------- method in this implementation
+...
+180 |     fn predicate(&self, flags: &BacklogScanFlags) -> bool {
+    |        ^^^^^^^^^
+
+warning: method `should_wait` is never used
+   --> node/src/block_processing/block_processor_queue.rs:242:12
+    |
+229 | impl BlockProcessorQueueImpl {
+    | ---------------------------- method in this implementation
+...
+242 |     pub fn should_wait(&self) -> bool {
+    |            ^^^^^^^^^^^
+
+warning: fields `config`, `stats`, and `clock` are never read
+   --> node/src/block_processing/bounded_backlog.rs:257:5
+    |
+254 | struct BoundedBacklogImpl {
+    |        ------------------ fields in this struct
+...
+257 |     config: BoundedBacklogConfig,
+    |     ^^^^^^
+258 |     stats: Arc<Stats>,
+    |     ^^^^^
+...
+261 |     clock: Arc<SteadyClock>,
+    |     ^^^^^
+
+warning: methods `run`, `roll_back`, `run_scan`, and `update` are never used
+   --> node/src/block_processing/bounded_backlog.rs:266:8
+    |
+265 | impl BoundedBacklogImpl {
+    | ----------------------- methods in this implementation
+266 |     fn run(&self) {
+    |        ^^^
+...
+323 |     fn roll_back(
+    |        ^^^^^^^^^
+...
+357 |     fn run_scan(&self) {
+    |        ^^^^^^^^
+...
+401 |     fn update(&self, unconfirmed: &impl LedgerSet, hash: &BlockHash) {
+    |        ^^^^^^
+
+warning: fields `ledger`, `config`, `bucket_count`, and `scan_limiter` are never read
+   --> node/src/block_processing/bounded_backlog.rs:413:5
+    |
+409 | struct BacklogData {
+    |        ----------- fields in this struct
+...
+413 |     ledger: Arc<Ledger>,
+    |     ^^^^^^
+414 |     config: BoundedBacklogConfig,
+    |     ^^^^^^
+415 |     bucket_count: usize,
+    |     ^^^^^^^^^^^^
+416 |     scan_limiter: Mutex<TokenBucket>,
+    |     ^^^^^^^^^^^^
+
+warning: methods `predicate`, `gather_targets`, and `bucket_threshold` are never used
+   --> node/src/block_processing/bounded_backlog.rs:420:8
+    |
+419 | impl BacklogData {
+    | ---------------- methods in this implementation
+420 |     fn predicate(&self) -> bool {
+    |        ^^^^^^^^^
+...
+430 |     fn gather_targets(
+    |        ^^^^^^^^^^^^^^
+...
+452 |     fn bucket_threshold(&self) -> usize {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: field `thread` is never read
+  --> node/src/block_processing/unchecked_map.rs:19:5
+   |
+17 | pub struct UncheckedMap {
+   |            ------------ field in this struct
+18 |     join_handle: Mutex<Option<JoinHandle<()>>>,
+19 |     thread: Arc<UncheckedMapThread>,
+   |     ^^^^^^
+
+warning: field `config` is never read
+  --> node/src/bootstrap/bootstrap_server.rs:45:5
+   |
+44 | pub struct BootstrapServer {
+   |            --------------- field in this struct
+45 |     config: BootstrapServerConfig,
+   |     ^^^^^^
+
+warning: method `run_timeouts` is never used
+   --> node/src/bootstrap/bootstrapper.rs:220:8
+    |
+102 | impl Bootstrapper {
+    | ----------------- method in this implementation
+...
+220 |     fn run_timeouts(&self) {
+    |        ^^^^^^^^^^^^
+
+warning: fields `throttle_wait` and `state_changed` are never read
+  --> node/src/bootstrap/requesters/bootstrap_promise_runner.rs:13:9
+   |
+11 | pub(crate) struct BootstrapPromiseRunner {
+   |                   ---------------------- fields in this struct
+12 |     pub state: Arc<Mutex<BootstrapState>>,
+13 |     pub throttle_wait: Duration,
+   |         ^^^^^^^^^^^^^
+14 |     pub state_changed: Arc<Condvar>,
+   |         ^^^^^^^^^^^^^
+
+warning: associated items `INITIAL_INTERVAL`, `run`, `stopped`, and `wait` are never used
+  --> node/src/bootstrap/requesters/bootstrap_promise_runner.rs:19:11
+   |
+18 | impl BootstrapPromiseRunner {
+   | --------------------------- associated items in this implementation
+19 |     const INITIAL_INTERVAL: Duration = Duration::from_millis(5);
+   |           ^^^^^^^^^^^^^^^^
+20 |
+21 |     pub fn run<P, T>(&self, mut promise: P) -> Option<T>
+   |            ^^^
+...
+49 |     fn stopped(&self) -> bool {
+   |        ^^^^^^^
+...
+53 |     fn wait(&self, duration: Duration) {
+   |        ^^^^
+
+warning: method `set_request_timeout` is never used
+  --> node/src/bootstrap/requesters/query_sender.rs:53:12
+   |
+29 | impl QuerySender {
+   | ---------------- method in this implementation
+...
+53 |     pub fn set_request_timeout(&mut self, timeout: Duration) {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `log_bootstrap_weights` is never used
+  --> node/src/consensus/bootstrap_weights.rs:59:15
+   |
+59 | pub(crate) fn log_bootstrap_weights(weight_cache: &RepWeightCache) {
+   |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `config` is never read
+  --> node/src/consensus/election_schedulers/mod.rs:39:5
+   |
+33 | pub struct ElectionSchedulers {
+   |            ------------------ field in this struct
+...
+39 |     config: NodeConfig,
+   |     ^^^^^^
+
+warning: type alias `FxHashMap` is never used
+  --> node/src/consensus/vote_cache.rs:15:6
+   |
+15 | type FxHashMap<K, V> = HashMap<K, V>;
+   |      ^^^^^^^^^
+
+warning: type alias `FxHashSet` is never used
+  --> node/src/consensus/vote_cache.rs:16:6
+   |
+16 | type FxHashSet<T> = HashSet<T>;
+   |      ^^^^^^^^^
+
+warning: fields `config`, `cache`, `next_id`, `last_cleanup`, and `stats` are never read
+  --> node/src/consensus/vote_cache.rs:36:5
+   |
+35 | pub struct VoteCache {
+   |            --------- fields in this struct
+36 |     config: VoteCacheConfig,
+   |     ^^^^^^
+37 |     cache: CacheEntryCollection,
+   |     ^^^^^
+38 |     next_id: usize,
+   |     ^^^^^^^
+39 |     last_cleanup: Instant,
+   |     ^^^^^^^^^^^^
+40 |     stats: Arc<Stats>,
+   |     ^^^^^
+
+warning: multiple methods are never used
+  --> node/src/consensus/vote_cache.rs:56:12
+   |
+55 | impl CacheEntryCollection {
+   | ------------------------- methods in this implementation
+56 |     pub fn contains(&self, _hash: &BlockHash) -> bool { false }
+   |            ^^^^^^^^
+57 |     pub fn insert(&mut self, _entry: CacheEntry) {}
+   |            ^^^^^^
+58 |     pub fn modify_by_hash<F>(&mut self, _hash: &BlockHash, _f: F) -> boo...
+   |            ^^^^^^^^^^^^^^
+59 |     pub fn len(&self) -> usize { 0 }
+   |            ^^^
+60 |     pub fn pop_front(&mut self) -> Option<CacheEntry> { None }
+   |            ^^^^^^^^^
+61 |     pub fn get_by_hash(&self, _hash: &BlockHash) -> Option<&CacheEntry> ...
+   |            ^^^^^^^^^^^
+62 |     pub fn remove_by_hash(&mut self, _hash: &BlockHash) -> Option<CacheE...
+   |            ^^^^^^^^^^^^^^
+63 |     pub fn clear(&mut self) {}
+   |            ^^^^^
+64 |     pub fn iter(&self) -> impl Iterator<Item = &CacheEntry> { core::iter...
+   |            ^^^^
+65 |     pub fn iter_by_tally_desc(&self) -> impl Iterator<Item = &CacheEntry...
+   |            ^^^^^^^^^^^^^^^^^^
+66 |     pub fn is_empty(&self) -> bool { true }
+   |            ^^^^^^^^
+
+warning: fields `config`, `vote_generators`, and `ledger` are never read
+  --> node/src/consensus/vote_generation/request_aggregator.rs:47:5
+   |
+46 | pub struct RequestAggregator {
+   |            ----------------- fields in this struct
+47 |     config: RequestAggregatorConfig,
+   |     ^^^^^^
+48 |     stats: Arc<Stats>,
+49 |     vote_generators: Arc<VoteGenerators>,
+   |     ^^^^^^^^^^^^^^^
+50 |     ledger: Arc<Ledger>,
+   |     ^^^^^^
+
+warning: field `block_when_empty` is never read
+  --> node/src/consensus/vote_rebroadcast/queue.rs:63:5
+   |
+58 | pub(crate) struct VoteRebroadcastQueue {
+   |                   -------------------- field in this struct
+...
+63 |     block_when_empty: bool,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: method `dequeue_blocking` is never used
+   --> node/src/consensus/vote_rebroadcast/queue.rs:124:12
+    |
+ 66 | impl VoteRebroadcastQueue {
+    | ------------------------- method in this implementation
+...
+124 |     pub fn dequeue_blocking(&self) -> Option<(RepTier, Arc<Vote>)> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: method `dequeue` is never used
+   --> node/src/consensus/vote_rebroadcast/queue.rs:255:8
+    |
+195 | impl QueueImpl {
+    | -------------- method in this implementation
+...
+255 |     fn dequeue(&mut self) -> Option<(RepTier, Arc<Vote>)> {
+    |        ^^^^^^^
+
+warning: fields `message_flooder`, `history`, `rep_weights`, `clock`, `stats`, and `last_rep_weight_update` are never read
+  --> node/src/consensus/vote_rebroadcast/rebroadcast_processor.rs:20:5
+   |
+19 | pub(super) struct RebroadcastProcessor {
+   |                   -------------------- fields in this struct
+20 |     message_flooder: MessageFlooder,
+   |     ^^^^^^^^^^^^^^^
+21 |     history: RebroadcastHistory,
+   |     ^^^^^^^
+22 |     rep_weights: Arc<RepWeightCache>,
+   |     ^^^^^^^^^^^
+23 |     clock: Arc<SteadyClock>,
+   |     ^^^^^
+24 |     stats: Arc<RebroadcastStats>,
+   |     ^^^^^
+25 |     last_rep_weight_update: Timestamp,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `rebroadcast`, `create_ack_message`, and `update_stats` are never used
+  --> node/src/consensus/vote_rebroadcast/rebroadcast_processor.rs:46:12
+   |
+28 | impl RebroadcastProcessor {
+   | ------------------------- methods in this implementation
+...
+46 |     pub fn rebroadcast(&mut self, tier: RepTier, vote: &Vote) -> bool {
+   |            ^^^^^^^^^^^
+...
+93 |     fn create_ack_message(&self, vote: &Vote) -> Message {
+   |        ^^^^^^^^^^^^^^^^^^
+...
+97 |     fn update_stats(&self, vote: &Vote, tier: RepTier) {
+   |        ^^^^^^^^^^^^
+
+warning: fields `config` and `processing_threads` are never read
+  --> node/src/transport/message_processor.rs:33:5
+   |
+32 | pub struct MessageProcessor {
+   |            ---------------- fields in this struct
+33 |     config: NodeConfig,
+   |     ^^^^^^
+34 |     processing_threads: Vec<JoinHandle<()>>,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: fields `interval`, `start_type`, `cancel_token`, `task`, `next_wait_duration`, and `clock` are never read
+   --> node/src/utils/timer_thread.rs:121:5
+    |
+120 | struct TimerLoop<T: Tickable> {
+    |        --------- fields in this struct
+121 |     interval: Duration,
+    |     ^^^^^^^^
+122 |     start_type: TimerStartType,
+    |     ^^^^^^^^^^
+123 |     cancel_token: CancellationToken,
+    |     ^^^^^^^^^^^^
+124 |     task: T,
+    |     ^^^^
+125 |     next_wait_duration: Duration,
+    |     ^^^^^^^^^^^^^^^^^^
+126 |     clock: Arc<SteadyClock>,
+    |     ^^^^^
+
+warning: methods `run` and `run_one` are never used
+   --> node/src/utils/timer_thread.rs:130:8
+    |
+129 | impl<T: Tickable> TimerLoop<T> {
+    | ------------------------------ methods in this implementation
+130 |     fn run(&mut self) {
+    |        ^^^
+...
+146 |     fn run_one(&mut self) {
+    |        ^^^^^^^
+
+warning: field `work_thresholds` is never read
+  --> node/src/wallets/wallet.rs:14:5
+   |
+11 | pub struct Wallet {
+   |            ------ field in this struct
+...
+14 |     work_thresholds: WorkThresholds,
+   |     ^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> node/src/wallets/wallets.rs:31:5
+   |
+28 | pub struct Wallets {
+   |            ------- fields in this struct
+...
+31 |     ledger: Arc<Ledger>,
+   |     ^^^^^^
+32 |     work_factory: Arc<WorkFactory>,
+   |     ^^^^^^^^^^^^
+33 |     work_thresholds: WorkThresholds,
+   |     ^^^^^^^^^^^^^^^
+34 |     network_params: NetworkParams,
+   |     ^^^^^^^^^^^^^^
+35 |     pub delayed_work: Mutex<HashMap<Account, Root>>,
+36 |     workers: Arc<dyn ThreadPool>,
+   |     ^^^^^^^
+37 |     block_processor_queue: Arc<BlockProcessorQueue>,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+38 |     pub wallet_reps: Arc<Mutex<WalletRepresentatives>>,
+39 |     online_reps: Arc<Mutex<OnlineReps>>,
+   |     ^^^^^^^^^^^
+40 |     kdf: KeyDerivationFunction,
+   |     ^^^
+41 |     confirming_set: Arc<ConfirmingSet>,
+   |     ^^^^^^^^^^^^^^
+
+warning: method `generate_work` is never used
+ --> node/src/work/distributed_work_client.rs:8:18
+  |
+7 | impl DistributedWorkClient {
+  | -------------------------- method in this implementation
+8 |     pub async fn generate_work(
+  |                  ^^^^^^^^^^^^^
+
+warning: field `work_peers` is never read
+  --> node/src/work/work_factory.rs:38:5
+   |
+36 | pub struct WorkFactory {
+   |            ----------- field in this struct
+37 |     pub local_work_pool: WorkPool,
+38 |     work_peers: Mutex<Vec<Peer>>,
+   |     ^^^^^^^^^^
+
+warning: `rsnano_node` (lib) generated 42 warnings (3 duplicates) (run `cargo fix --lib -p rsnano_node` to apply 1 suggestion)
+error[E0425]: cannot find type `DefaultHashBuilder` in crate `hashbrown`
+  --> rpc_messages/src/lib.rs:24:63
+   |
+24 | pub type IndexMap<K, V> = indexmap::IndexMap<K, V, hashbrown::DefaultHashBuilder>;
+   |                                                               ^^^^^^^^^^^^^^^^^^ not found in `hashbrown`
+   |
+help: consider importing this type alias
+   |
+ 5 + use hashbrown::hash_map::DefaultHashBuilder;
+   |
+help: if you import `DefaultHashBuilder`, refer to it directly
+   |
+24 - pub type IndexMap<K, V> = indexmap::IndexMap<K, V, hashbrown::DefaultHashBuilder>;
+24 + pub type IndexMap<K, V> = indexmap::IndexMap<K, V, DefaultHashBuilder>;
+   |
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/lib.rs:5:5
+  |
+5 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/lib.rs:6:5
+  |
+6 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/lib.rs:8:5
+  |
+8 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/mod.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/mod.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/mod.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/mod.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/account.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/account.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/account.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/accounts.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/accounts.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/accounts.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/accounts_with_amounts.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/accounts_with_amounts.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/accounts_with_amounts.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/accounts_with_amounts.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/address_with_port.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/address_with_port.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/address_with_port.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/amount.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/amount.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/amount.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/amount.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/block.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/block.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/block.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/block.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/blocks.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/blocks.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/blocks.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/count.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/count.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/count.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/count.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/destroyed.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/destroyed.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/destroyed.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/destroyed.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/error.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/error.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/error.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/exists.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/exists.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/exists.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/exists.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/frontiers.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/frontiers.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/frontiers.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/hash.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/hash.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/hash.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/hash.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/hashes.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/hashes.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/hashes.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/key_pair.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/key_pair.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/key_pair.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/key_pair.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/locked.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/locked.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/locked.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/locked.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/moved.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/moved.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/moved.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/moved.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/primitives.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/primitives.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/primitives.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/public_key.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/public_key.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/public_key.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/public_key.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/removed.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/removed.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/removed.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/removed.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/started.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/started.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/started.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/started.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/success.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/success.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/success.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/valid.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/valid.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/valid.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/valid.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/common/wallet.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/common/wallet.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/common/wallet.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/common/wallet.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/mod.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/mod.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/mod.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/mod.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/account_balance.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/account_balance.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/account_balance.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/account_balance.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/account_block_count.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/account_block_count.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/account_block_count.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/account_block_count.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/account_history.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/account_history.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/account_info.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/account_info.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/account_info.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/account_info.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/account_representative.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/account_representative.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/account_representative.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/account_representative.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/account_weight.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/account_weight.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/account_weight.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/account_weight.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/accounts_balances.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/accounts_balances.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/accounts_balances.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/accounts_frontiers.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/accounts_frontiers.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/accounts_frontiers.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/accounts_receivable.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/accounts_receivable.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/accounts_receivable.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/accounts_representatives.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/accounts_representatives.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/available_supply.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/available_supply.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/available_supply.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/available_supply.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/block_account.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/block_account.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/block_account.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/block_account.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/block_confirm.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/block_confirm.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/block_confirm.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/block_confirm.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/block_count.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/block_count.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/block_count.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/block_count.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/block_info.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/block_info.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/block_info.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/blocks.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/blocks.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/blocks.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/blocks_info.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/blocks_info.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/blocks_info.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/chain.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/chain.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/chain.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/chain.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/delegators.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/delegators.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/delegators.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/delegators.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/delegators_count.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/delegators_count.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/delegators_count.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/delegators_count.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/frontier_count.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/frontier_count.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/frontier_count.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/frontier_count.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/frontiers.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/frontiers.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/frontiers.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/frontiers.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/ledger.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/ledger.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/ledger.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/ledger.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/representatives.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/representatives.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/representatives.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/representatives.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/successors.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/successors.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/successors.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/successors.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/unopened.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/unopened.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/unopened.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/unopened.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/ledger/weight.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/ledger/weight.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/ledger/weight.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/ledger/weight.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/mod.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/mod.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/mod.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/mod.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/active_difficulty.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/active_difficulty.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/active_difficulty.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/block_create.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/block_create.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/block_create.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/block_create.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/bootstrap.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/bootstrap.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/bootstrap.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/bootstrap_any.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/bootstrap_any.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/bootstrap_any.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/bootstrap_lazy.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/bootstrap_lazy.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/bootstrap_lazy.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/confirmation_active.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/confirmation_active.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/confirmation_active.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/confirmation_history.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/confirmation_history.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/confirmation_history.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/confirmation_info.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/confirmation_info.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/confirmation_info.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/confirmation_info.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/confirmation_quorum.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/confirmation_quorum.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/confirmation_quorum.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/keepalive.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/keepalive.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/keepalive.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/node_id.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/node_id.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/node_id.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/node_id.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/peers.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/peers.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/peers.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/populate_backlog.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/populate_backlog.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/populate_backlog.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/populate_backlog.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/process.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/process.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/process.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/process.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/receivable.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/receivable.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/receivable.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/receivable_exists.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/receivable_exists.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/receivable_exists.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/receivable_exists.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/representatives_online.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/representatives_online.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/representatives_online.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/republish.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/republish.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/republish.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/republish.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/sign.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/sign.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/sign.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/sign.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/stats.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/stats.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/stats.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/stats.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/stats_clear.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/stats_clear.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/stats_clear.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/stats_clear.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/stop.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/stop.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/stop.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/stop.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/telemetry.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/telemetry.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `UnixMillisTimestamp`
+ --> rpc_messages/src/node/telemetry.rs:9:50
+  |
+9 | use rsnano_core::utils::{Ipv6Addr, SocketAddrV6, UnixMillisTimestamp};
+  |                                                  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/unchecked.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/unchecked.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/unchecked.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/unchecked.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/unchecked_clear.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/unchecked_clear.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/unchecked_clear.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/unchecked_clear.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/unchecked_get.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/unchecked_get.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/unchecked_get.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/unchecked_get.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/unchecked_keys.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/unchecked_keys.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/unchecked_keys.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/uptime.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/uptime.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/uptime.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/uptime.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/version.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/version.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/version.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/work_cancel.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/work_cancel.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/work_cancel.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/work_cancel.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/work_generate.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/work_generate.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/work_generate.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/work_generate.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/work_peer_add.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/work_peer_add.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/work_peer_add.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/work_peer_add.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/work_peers.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/node/work_peers.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/work_peers.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/node/work_validate.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/node/work_validate.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/node/work_validate.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/mod.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/mod.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/mod.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/mod.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/account_get.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/account_get.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/account_get.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/account_get.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/account_key.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/account_key.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/account_key.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/account_key.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/block_hash.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/block_hash.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/block_hash.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/block_hash.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/deterministic_key.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/deterministic_key.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/deterministic_key.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/deterministic_key.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/key_create.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/key_create.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/key_create.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/key_create.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/key_expand.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/key_expand.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/key_expand.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/key_expand.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/nano_to_raw.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/nano_to_raw.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/nano_to_raw.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/nano_to_raw.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/raw_to_nano.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/raw_to_nano.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/utils/raw_to_nano.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/raw_to_nano.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/utils/validate_account_number.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/utils/validate_account_number.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/utils/validate_account_number.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/mod.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/mod.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/mod.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/account_create.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/account_create.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/account_create.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/account_create.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/account_list.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/account_list.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/account_list.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/account_list.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/account_move.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/account_move.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/account_move.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/account_remove.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/account_remove.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/account_remove.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/account_remove.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/accounts_create.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/accounts_create.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/accounts_create.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/accounts_create.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/password_change.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/password_change.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/password_change.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/password_enter.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/password_enter.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/password_enter.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/password_valid.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/password_valid.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/password_valid.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/password_valid.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/receive.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/receive.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/receive.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/receive.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/receive_minimum.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/receive_minimum.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/receive_minimum.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/receive_minimum.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/search_receivable.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/search_receivable.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/search_receivable.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/search_receivable.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/search_receivable_all.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/search_receivable_all.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/search_receivable_all.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/search_receivable_all.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/send.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/send.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/send.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_add.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_add.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_add.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_add.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_add_watch.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_add_watch.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_add_watch.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_balances.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_balances.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_balances.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_balances.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_change_seed.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_change_seed.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_change_seed.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_contains.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_contains.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_contains.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_contains.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_create.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_create.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_create.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_create.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_destroy.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_destroy.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_destroy.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_destroy.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_export.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_export.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_export.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_frontiers.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_frontiers.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_frontiers.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_frontiers.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_history.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_history.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_history.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_info.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_info.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_info.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_info.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_ledger.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_ledger.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_ledger.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_ledger.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_lock.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_lock.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_lock.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_lock.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_locked.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_locked.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_locked.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_locked.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_receivable.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_receivable.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_receivable.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_receivable.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_representative.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_representative.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_representative.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_representative.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_representative_set.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_representative_set.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_republish.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_republish.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_republish.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_republish.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_with_account.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_with_account.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_with_account.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_with_account.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_with_count.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_with_count.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_with_count.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_with_count.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_with_password.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_with_password.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_with_password.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/wallet_work_get.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/wallet_work_get.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/wallet_work_get.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/wallet_work_get.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/work_get.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/work_get.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/work_get.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/work_get.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::borrow::ToOwned`
+ --> rpc_messages/src/wallets/work_set.rs:1:5
+  |
+1 | use alloc::borrow::ToOwned;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+ --> rpc_messages/src/wallets/work_set.rs:2:5
+  |
+2 | use alloc::vec::Vec;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::String`
+ --> rpc_messages/src/wallets/work_set.rs:3:5
+  |
+3 | use alloc::string::String;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::string::ToString`
+ --> rpc_messages/src/wallets/work_set.rs:4:5
+  |
+4 | use alloc::string::ToString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `rsnano_rpc_messages` (lib) generated 502 warnings (3 duplicates)
+error: could not compile `rsnano_rpc_messages` (lib) due to 1 previous error; 502 warnings emitted
+make: *** [Makefile:32: build-smode] Error 101

@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 rsnano_core = { path = "../core" }
 rsnano_messages = { path = "../messages" }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-indexmap = { version = "2", features = ["serde"] }
+serde = { version = "=1.0.210", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+indexmap = { version = "2", default-features = false, features = ["serde"] }
+hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc", "inline-more"] }
+serde_derive = "=1.0.210"

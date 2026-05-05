@@ -30,7 +30,7 @@ mod builders;
 pub use builders::*;
 
 use crate::{
-    utils::{BufferWriter, Deserialize, MemoryStream, Stream, UnixMillisTimestamp},
+    utils::{BufferWriter, Deserialize, MemoryStream, Serialize, Stream, UnixMillisTimestamp},
     Account, Amount, BlockHash, Epoch, Epochs, Link, PrivateKey, PublicKey, QualifiedRoot, Root,
     Signature, WorkNonce,
 };
@@ -258,6 +258,14 @@ impl Block {
         let block_type =
             BlockType::from_u8(stream.read_u8()?).ok_or_else(|| anyhow!("invalid block type"))?;
         Self::deserialize_block_type(block_type, stream)
+    }
+}
+
+impl Serialize for Block {
+    fn serialize(&self, stream: &mut dyn BufferWriter) {
+        let block_type = self.block_type() as u8;
+        stream.write_u8_safe(block_type);
+        self.serialize_without_block_type(stream);
     }
 }
 
@@ -559,6 +567,13 @@ impl Deref for SavedBlock {
 impl DerefMut for SavedBlock {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.block
+    }
+}
+
+impl Serialize for SavedBlock {
+    fn serialize(&self, stream: &mut dyn BufferWriter) {
+        self.block.serialize(stream);
+        self.sideband.serialize(stream, self.block.block_type());
     }
 }
 

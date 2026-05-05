@@ -1,17 +1,18 @@
+use crate::utils::{Condvar, JoinHandle};
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
-use spin::{ Mutex, MutexGuard };
-use crate::utils::{Condvar, JoinHandle};
-use core::sync::atomic::{ AtomicU64, Ordering };
-use core::time::Duration;
 use core::cmp::max;
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::time::Duration;
+use spin::{Mutex, MutexGuard};
 
 use rsnano_core::{Account, AccountInfo, ConfirmationHeightInfo};
 use rsnano_ledger::{AnySet, ConfirmedSet, Ledger};
 use rsnano_network::token_bucket::TokenBucket;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{StatsCollection, StatsSource};
+use tracing::{debug, info};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BacklogScanConfig {
@@ -52,6 +53,8 @@ pub struct BacklogScan {
     /** Thread that runs the backlog implementation logic. The thread always runs, even if
      *  backlog population is disabled, so that it can service a manual trigger (e.g. via RPC). */
     thread: Option<JoinHandle<()>>,
+    next_account: Account,
+    last_run: rsnano_core::utils::UnixMillisTimestamp,
 }
 
 impl BacklogScan {
@@ -84,6 +87,8 @@ impl BacklogScan {
             flags,
             condition,
             thread: None,
+            next_account: Account::zero(),
+            last_run: rsnano_core::utils::UnixMillisTimestamp::ZERO,
         }
     }
 
@@ -103,6 +108,40 @@ impl BacklogScan {
             .push(Box::new(callback));
     }
 
+    pub fn run_once(&mut self) {
+        let mut flags = self.flags.lock();
+        if let Some(loop_val) = &self.scan_loop {
+            if flags.triggered || loop_val.config.enabled {
+                self.stats.looped.fetch_add(1, Ordering::Relaxed);
+                flags.triggered = false;
+
+                let ledger = loop_val.ledger.clone();
+                let batch_size = loop_val.config.batch_size;
+
+                let next = self.next_account;
+                let result = BacklogScanLoop::scan_batch(&ledger, next, batch_size);
+                if !result.unconfirmed.is_empty() || !result.fully_confirmed.is_empty() {
+                    tracing::debug!(
+                        "BacklogScan: found {} unconfirmed and {} fully confirmed accounts (next: {})",
+                        result.unconfirmed.len(),
+                        result.fully_confirmed.len(),
+                        result.next.encode_account()
+                    );
+                    for unconf in &result.unconfirmed {
+                        tracing::debug!("  Unconfirmed: {}", unconf.account.encode_account());
+                    }
+                }
+                self.next_account = if result.done {
+                    Account::zero()
+                } else {
+                    result.next
+                };
+                self.add_stats(&result);
+                self.notify_observers(result);
+            }
+        }
+    }
+
     fn scan_loop_mut(&mut self) -> &mut BacklogScanLoop {
         self.scan_loop
             .as_mut()
@@ -110,19 +149,7 @@ impl BacklogScan {
     }
 
     pub fn start(&mut self) {
-        let _scan_loop = self
-            .scan_loop
-            .take()
-            .expect("Tried to start backlog scan twice");
-
-        // self.thread = Some(
-        //     std::/* /* thread::Builder::new()
-        //         .name("Backlog scan".to_owned())
-        //         .spawn(move || {
-        //             scan_loop.run();
-        //         })
-        //         .unwrap(),
-        // );
+        self.trigger();
     }
 
     pub fn stop(&mut self) {
@@ -139,6 +166,7 @@ impl BacklogScan {
 
     /** Manually trigger backlog population */
     pub fn trigger(&self) {
+        tracing::debug!("Backlog scan triggered");
         {
             let mut lock = self.flags.lock();
             lock.triggered = true;
@@ -148,6 +176,30 @@ impl BacklogScan {
 
     pub fn stats(&self) -> Arc<BacklogScanStats> {
         self.stats.clone()
+    }
+
+    fn predicate(&self, flags: &BacklogScanFlags) -> bool {
+        if let Some(loop_val) = &self.scan_loop {
+            flags.triggered || loop_val.config.enabled
+        } else {
+            false
+        }
+    }
+
+    fn add_stats(&self, result: &BacklogScanResult) {
+        self.stats
+            .scanned
+            .fetch_add(result.len() as u64, Ordering::Relaxed);
+
+        self.stats
+            .activated
+            .fetch_add(result.unconfirmed.len() as u64, Ordering::Relaxed);
+    }
+
+    fn notify_observers(&self, result: BacklogScanResult) {
+        if let Some(loop_val) = &self.scan_loop {
+            loop_val.notify_observers(result);
+        }
     }
 }
 
@@ -212,9 +264,17 @@ impl BacklogScanLoop {
             done = result.done;
             next = result.next;
             self.add_stats(&result);
+            if !result.unconfirmed.is_empty() {
+                debug!(
+                    "BacklogScan: found {} unconfirmed accounts (next: {})",
+                    result.unconfirmed.len(),
+                    result.next.encode_account()
+                );
+            }
             self.notify_observers(result);
             flags = self.flags.lock();
         }
+        debug!("BacklogScan: full scan finished");
         flags
     }
 

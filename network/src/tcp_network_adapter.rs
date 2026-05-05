@@ -3,7 +3,7 @@ use crate::{
     Network, NetworkError, ReceiveResult, TcpChannelAdapter,
 };
 use rsnano_core::utils::NULL_ENDPOINT;
-use rsnano_nullable_clock::{SteadyClock, Timestamp};
+use rsnano_nullable_clock::SteadyClock;
 use rsnano_nullable_tcp::TcpStream;
 use core::{
     net::{SocketAddr, SocketAddrV6},
@@ -12,9 +12,10 @@ use core::{
     task::Poll,
 };
 use alloc::sync::Arc;
+use alloc::string::ToString;
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
-use tracing::{debug, warn};
+use tracing::{warn, info};
 use kernel_common::async_rt;
 
 /// Connects the Network to TcpStreams
@@ -93,78 +94,66 @@ impl TcpNetworkAdapter {
             .lock()
             .insert(channel_id, channel_adapter.clone());
 
-        tracing::info!("[node] Connection established! Peer: {}, Direction: {:?}", peer_addr, direction);
-        tracing::info!("[node] Spawning receiver task...");
-
         let adapter_l = channel_adapter.clone();
         async_rt::spawn(async move {
-            tracing::info!("[node] Receiver task started for {}", peer_addr);
+
             let channel_l = adapter_l.channel.clone();
             let mut buffer = [0u8; 1024];
-            let mut total_bytes = 0usize;
 
             loop {
                 if channel_l.is_closed() {
                     return;
                 }
 
-                poll_fn(|_cx| {
-                    if channel_l.is_cancelled() {
-                        Poll::Ready(())
-                    } else {
-                        Poll::Ready(())
-                    }
-                }).await;
-
+                // Wait for data
                 match adapter_l.readable().await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::info!("[node] Stream not readable: {:?} ({})", e, channel_l.peer_addr());
+                    Ok(()) => {
+                    }
+                    Err(_e) => {
                         return;
                     }
                 }
 
-                let read_count = match adapter_l.try_read(&mut buffer) {
-                    Ok(n) => {
-                        if n > 0 {
-                            total_bytes += n;
+                let read_result = adapter_l.try_read(&mut buffer);
+                match read_result {
+                    Ok(read_count) => {
+                        if read_count == 0 {
+                            break;
                         }
-                        n
+
+                        let new_data = &buffer[..read_count];
+                        match receiver.receive(new_data) {
+                            ReceiveResult::Continue => {}
+                            ReceiveResult::Abort => {
+                                tracing::info!("Receiver task: receiver requested Abort, exiting");
+                                break;
+                            }
+                            ReceiveResult::Pause => {
+                                loop {
+                                    async_rt::yield_now().await;
+                                    for _ in 0..100 { core::hint::spin_loop(); }
+                                    if channel_l.is_cancelled() { break; }
+                                    match receiver.try_unpause() {
+                                        ReceiveResult::Continue => break,
+                                        ReceiveResult::Abort => {
+                                            return;
+                                        }
+                                        ReceiveResult::Pause => {}
+                                    }
+                                }
+                            }
+                        }
                     },
                     Err(e) => {
                         let msg = alloc::format!("{:?}", e);
                         if msg.contains("Would block") {
                             continue;
                         }
-                        tracing::error!("[node] Error reading buffer: {:?} ({})", e, channel_l.peer_addr());
                         return;
-                    }
-                };
-
-                if read_count == 0 {
-                    tracing::info!("[node] EOF (0 bytes) from {}", channel_l.peer_addr());
-                    break;
-                }
-
-                let new_data = &buffer[..read_count];
-
-                match receiver.receive(new_data) {
-                    ReceiveResult::Continue => {}
-                    ReceiveResult::Abort => break,
-                    ReceiveResult::Pause => {
-                        loop {
-                            async_rt::yield_now().await;
-                            for _ in 0..100 { core::hint::spin_loop(); }
-                            if channel_l.is_cancelled() { break; }
-                            match receiver.try_unpause() {
-                                ReceiveResult::Continue => break,
-                                ReceiveResult::Abort => return,
-                                ReceiveResult::Pause => {}
-                            }
-                        }
                     }
                 }
             }
+            channel_l.close();
         });
 
         Ok(channel_adapter.channel.clone())
@@ -185,11 +174,11 @@ impl TcpNetworkAdapter {
     }
 
     pub fn connect_error(&self, peer: SocketAddrV6, e: anyhow::Error) {
-        self.network.read().connect_error(peer, e);
+        self.network.write().connect_error(peer, e);
     }
 
     pub fn attempt_timeout(&self, peer: SocketAddrV6) {
-        self.network.read().attempt_timeout(peer);
+        self.network.write().attempt_timeout(peer);
     }
 
     pub fn accept_failure(&self) {

@@ -71,6 +71,7 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
                     return PollResult::Progress;
                 }
                 self.stats.queries_overfill.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!("ChannelWaiter: waiting for running queries (count: {})", boot_state.running_queries.len());
             }
             ChannelWaitState::WaitLimiter => {
                 // Wait until more requests can be sent
@@ -79,11 +80,16 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
                     return PollResult::Progress;
                 }
                 self.stats.rate_limit.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!("ChannelWaiter: rate limited");
             }
             ChannelWaitState::WaitChannel => {
                 // Wait until a channel is available
                 let network = self.network.read();
                 let channel_ids = Self::candidate_channels(&network);
+
+                if channel_ids.is_empty() {
+                    tracing::debug!("ChannelWaiter: no realtime channels available");
+                }
 
                 if let Some(channel_id) = boot_state.scoring.channel(channel_ids) {
                     if let Some(channel) = network.get(channel_id) {
@@ -92,6 +98,7 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
                     }
                 }
                 self.stats.no_candidate.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!("ChannelWaiter: no candidate channel found by scoring");
             }
         }
 

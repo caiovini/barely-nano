@@ -95,6 +95,10 @@ impl FrontierScan {
         // TODO port the detailed container info from nano_node
         [("total_processed", self.total_accounts_processed(), 0)].into()
     }
+
+    pub fn is_done(&self) -> bool {
+        self.heads.iter().all(|h| h.processed_full_range)
+    }
 }
 
 #[derive(PartialEq, Eq, Debug)]

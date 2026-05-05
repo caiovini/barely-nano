@@ -14,69 +14,24 @@ impl PublicKey {
     }
 
     pub fn verify(&self, message: &[u8], signature: &Signature) -> anyhow::Result<()> {
-        use blake2::digest::{Update, VariableOutput};
-        use curve25519_dalek::edwards::CompressedEdwardsY;
-        use curve25519_dalek::scalar::Scalar;
-        use curve25519_dalek::edwards::EdwardsPoint;
- 
-        let public_key_bytes = self.as_bytes();
-        let signature_bytes = signature.as_bytes();
-        let r_bytes = &signature_bytes[0..32];
-        let s_bytes = &signature_bytes[32..64];
- 
-        let a = CompressedEdwardsY(*public_key_bytes)
-            .decompress()
-            .ok_or_else(|| anyhow!("invalid public key"))?;
-        
-        let r_bytes_32: [u8; 32] = r_bytes.try_into().unwrap();
-        let r = CompressedEdwardsY(r_bytes_32)
-            .decompress()
-            .ok_or_else(|| anyhow!("invalid signature R"))?;
- 
-        let s = Scalar::from_bytes_mod_order(s_bytes.try_into().unwrap());
- 
-        let mut hasher = blake2::Blake2bVar::new(64).unwrap();
-        hasher.update(r_bytes);
-        hasher.update(public_key_bytes);
-        hasher.update(message);
-        let mut k_bytes = [0u8; 64];
-        hasher.finalize_variable(&mut k_bytes).unwrap();
-        let k = Scalar::from_bytes_mod_order_wide(&k_bytes);
-        tracing::debug!("Signature K hash: {:X?}", k_bytes);
- 
-        // Check if s*B == R + k*A  =>  R == s*B - k*A
-        let check_r = EdwardsPoint::vartime_double_scalar_mul_basepoint(&k, &-a, &s);
-        let check_r_bytes = check_r.compress();
- 
-        if check_r_bytes.as_bytes() == r_bytes {
+        if tools::ed25519::verify(self.as_bytes(), message, signature.as_bytes()) {
             Ok(())
         } else {
+            let signature_bytes = signature.as_bytes();
             tracing::error!("Signature verification failed!");
-            tracing::error!("Expected R: {:X?}", r_bytes);
-            tracing::error!("Actual R:   {:X?}", check_r_bytes.as_bytes());
+            tracing::error!("Msg: {:X?}", message);
+            tracing::error!("Expected R: {:X?}", &signature_bytes[0..32]);
+            tracing::error!("A: {:X?}", self.as_bytes());
+            tracing::error!("S: {:X?}", &signature_bytes[32..64]);
             Err(anyhow!("bad signature"))
         }
     }
 }
- 
+
 impl TryFrom<&RawKey> for PublicKey {
     type Error = anyhow::Error;
     fn try_from(prv: &RawKey) -> Result<Self, Self::Error> {
-        use blake2::digest::{Update, VariableOutput};
-        use curve25519_dalek::scalar::Scalar;
-        use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
- 
-        let mut hasher = blake2::Blake2bVar::new(64).unwrap();
-        hasher.update(prv.as_bytes());
-        let mut h = [0u8; 64];
-        hasher.finalize_variable(&mut h).unwrap();
- 
-        h[0] &= 248;
-        h[31] &= 63;
-        h[31] |= 64;
- 
-        let a_scalar = Scalar::from_bytes_mod_order(h[0..32].try_into().unwrap());
-        let a_point = &a_scalar * &ED25519_BASEPOINT_POINT;
-        Ok(PublicKey::from_bytes(*a_point.compress().as_bytes()))
+        let pub_bytes = tools::ed25519::derive_public_key(prv.as_bytes());
+        Ok(PublicKey::from_bytes(pub_bytes))
     }
 }

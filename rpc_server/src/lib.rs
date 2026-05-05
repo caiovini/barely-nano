@@ -1,8 +1,5 @@
-pub(crate) mod command_handler;
-mod config;
-mod server;
-mod toml;
+#![no_std]
+extern crate alloc;
 
-pub use config::*;
-pub use server::*;
-pub use toml::*;
+pub mod bare_metal;
+

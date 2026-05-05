@@ -24,7 +24,6 @@ impl OnlineContainer {
 
     /// Returns `true` if it was a new insert and `false` if an entry for that account was already present
     pub fn insert(&mut self, rep: PublicKey, now: Timestamp) -> bool {
-        tracing::info!("[node] OnlineContainer::insert");
         let new_insert = if let Some(time) = self.by_account.get_mut(&rep) {
             let old_time = *time;
             *time = now;

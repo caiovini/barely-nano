@@ -210,6 +210,13 @@ impl Bootstrapper {
             .prioritized(account)
     }
 
+    pub fn run_once(&self) {
+        let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
+        let mut state = self.state.lock();
+        cleanup.cleanup(&mut state);
+        self.state_changed.notify_all();
+    }
+
     fn run_timeouts(&self) {
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
         let mut state = self.state.lock();
@@ -227,7 +234,6 @@ impl Bootstrapper {
     /// Process `asc_pull_ack` message coming from network
     pub fn process(&self, message: AscPullAck, channel_id: ChannelId) {
         let now = self.clock.now();
-        tracing::info!("Bootstrapper: processing AscPullAck from channel {}", channel_id);
         let result = self.response_handler.process(message, channel_id, now);
         match result {
             Ok(info) => {
@@ -274,6 +280,24 @@ impl Bootstrapper {
         for account in accounts {
             guard.candidate_accounts.unblock(account, None);
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        let guard = self.state.lock();
+        let active = guard.candidate_accounts.priority_len() > 0
+            || guard.candidate_accounts.blocked_len() > 0
+            || guard.running_queries.len() > 0
+            || !guard.frontier_scan.is_done();
+        
+        if active {
+             tracing::debug!("Bootstrapper is active: prio={}, blocked={}, queries={}, frontier_done={}",
+                guard.candidate_accounts.priority_len(),
+                guard.candidate_accounts.blocked_len(),
+                guard.running_queries.len(),
+                guard.frontier_scan.is_done()
+            );
+        }
+        active
     }
 }
 

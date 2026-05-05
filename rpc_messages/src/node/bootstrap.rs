@@ -1,6 +1,10 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::RpcU16;
 use serde::{Deserialize, Serialize};
-use std::net::Ipv6Addr;
+use rsnano_core::utils::Ipv6Addr;
 
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BootstrapArgs {
@@ -45,7 +49,8 @@ impl BootstrapArgsBuilder {
 mod tests {
     use crate::{node::BootstrapArgs, RpcCommand};
     use serde_json::{from_str, to_string_pretty};
-    use std::{net::Ipv6Addr, str::FromStr};
+    use core::str::FromStr;
+    use rsnano_core::utils::Ipv6Addr;
 
     #[test]
     fn serialize_bootstrap_command_id_none() {

@@ -22,8 +22,6 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use rsnano_nullable_clock::{SteadyClock, Timestamp};
 use alloc::string::String;
-use alloc::format;
-use alloc::borrow::ToOwned;
 
 pub use core::net::{Ipv6Addr, SocketAddrV6};
 

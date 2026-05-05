@@ -1,4 +1,4 @@
-use crate::{ledger_constants::get_ledger_constants_stub, AnySet, Ledger, LedgerSet};
+use crate::{AnySet, Ledger, LedgerSet};
 use rsnano_core::{
     Account, AccountInfo, Amount, Block, BlockHash, ChangeBlockArgs, Epoch, Link, OpenBlockArgs,
     PendingInfo, PendingKey, PrivateKey, PublicKey, ReceiveBlockArgs, SavedBlock, SendBlockArgs,
@@ -15,7 +15,7 @@ impl<'a> LedgerInserter<'a> {
         Self { ledger }
     }
 
-    pub fn genesis(&self) -> LedgerBlockInserter {
+    pub fn genesis(&self) -> LedgerBlockInserter<'_> {
         LedgerBlockInserter {
             ledger: self.ledger,
             key: &DEV_GENESIS_KEY,
@@ -211,7 +211,7 @@ impl<'a> LedgerBlockInserter<'a> {
             previous: info.head,
             representative: info.representative,
             balance: info.balance,
-            link: *get_ledger_constants_stub().epochs.link(Epoch::Epoch1).unwrap(),
+            link: *self.ledger.constants.epochs.link(Epoch::Epoch1).unwrap(),
             work: WorkNonce::new(u64::MAX),
         }
         .into();

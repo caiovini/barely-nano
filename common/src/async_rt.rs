@@ -10,25 +10,30 @@ use alloc::{
 use core::{
     future::Future,
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU8, Ordering},
     task::{Context, Poll, Waker},
 };
 use spin::Mutex;
+
+/// Task states
+const STATE_IDLE: u8 = 0;
+const STATE_QUEUED: u8 = 1;
+const STATE_SUSPENDED: u8 = 2;
 
 /// A type-erased future that outputs `()`.
 type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 /// A task submitted to the executor.
-struct Task {
+pub struct Task {
     future: Mutex<Option<TaskFuture>>,
-    is_queued: AtomicBool,
+    state: AtomicU8,
 }
 
 impl Task {
     fn new(future: impl Future<Output = ()> + Send + 'static) -> Arc<Self> {
         Arc::new(Self {
             future: Mutex::new(Some(Box::pin(future))),
-            is_queued: AtomicBool::new(true),
+            state: AtomicU8::new(STATE_QUEUED),
         })
     }
 }
@@ -39,8 +44,9 @@ impl Wake for Task {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        if !self.is_queued.swap(true, Ordering::SeqCst) {
-            // tracing::info!("[boot] Task wake: re-queueing task");
+        // Only queue if it's currently IDLE or SUSPENDED
+        let prev = self.state.swap(STATE_QUEUED, Ordering::SeqCst);
+        if prev != STATE_QUEUED {
             if let Some(executor) = EXECUTOR.lock().as_ref() {
                 executor.run_queue.lock().push_back(self.clone());
             }
@@ -48,10 +54,10 @@ impl Wake for Task {
     }
 }
 
-/// A minimal single-threaded executor for bare-metal `#![no_std]`.
+/// A minimal multicore-safe executor for bare-metal.
 #[derive(Clone)]
 pub struct Executor {
-    run_queue: Arc<Mutex<VecDeque<Arc<Task>>>>,
+    pub run_queue: Arc<Mutex<VecDeque<Arc<Task>>>>,
 }
 
 impl Executor {
@@ -61,44 +67,64 @@ impl Executor {
         }
     }
 
-    /// Spawns a new asynchronous task.
-    pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let task = Task::new(future);
+    pub fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let task = Arc::new(Task {
+            future: Mutex::new(Some(Box::pin(future))),
+            state: AtomicU8::new(STATE_QUEUED),
+        });
         self.run_queue.lock().push_back(task);
     }
 
-    /// Runs all currently queued tasks until the queue is empty.
-    /// Does not sleep; returns immediately when no tasks are ready.
     pub fn run_ready_tasks(&self) {
-        let mut count = self.run_queue.lock().len();
-        while count > 0 {
-            let task = {
-                let mut queue = self.run_queue.lock();
-                queue.pop_front()
-            };
-            
-            let Some(task) = task else { break; };
-            count -= 1;
-            
-            // Unmark as queued so a waker can re-queue it.
-            task.is_queued.store(false, Ordering::SeqCst);
+        while self.run_once() {}
+    }
 
-            let mut future_slot = task.future.lock();
-            if let Some(mut future) = future_slot.take() {
-                let waker = Waker::from(task.clone());
-                let mut context = Context::from_waker(&waker);
+    pub fn run_once(&self) -> bool {
+        let task = {
+            let mut run_queue = self.run_queue.lock();
+            run_queue.pop_front()
+        };
 
-                match future.as_mut().poll(&mut context) {
-                    Poll::Ready(()) => {
-                        // Task is complete, future is dropped.
-                    }
-                    Poll::Pending => {
-                        // Task is pending, put it back.
-                        *future_slot = Some(future);
-                    }
-                }
+        let Some(task) = task else { return false; };
+
+        // Mark as IDLE before polling. If a waker triggers during poll,
+        // it will transition it back to QUEUED.
+        task.state.store(STATE_IDLE, Ordering::SeqCst);
+
+        let waker = Waker::from(task.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future_guard = task.future.lock();
+        let future = match future_guard.as_mut() {
+            Some(f) => f,
+            None => return true,
+        };
+
+        let poll = future.as_mut().poll(&mut cx);
+
+        match poll {
+            Poll::Ready(_) => {
+                *future_guard = None;
+            }
+            Poll::Pending => {
+                // If no waker was triggered during poll, the state is still IDLE.
+                // Transition to SUSPENDED.
+                let _ = task.state.compare_exchange(
+                    STATE_IDLE,
+                    STATE_SUSPENDED,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
             }
         }
+        true
+    }
+
+    pub fn wake_all(&self) {
+        // This is only used as a fallback if hardware events don't trigger wakers correctly.
     }
 
     pub fn task_count(&self) -> usize {
@@ -106,7 +132,6 @@ impl Executor {
     }
 }
 
-/// A global singleton for spawning tasks easily.
 pub static EXECUTOR: Mutex<Option<Executor>> = Mutex::new(None);
 
 pub fn spawn(future: impl Future<Output = ()> + Send + 'static) {
@@ -163,3 +188,5 @@ pub fn sleep(duration: core::time::Duration) -> Sleep {
         target_ticks: crate::clint::mtime() + ticks,
     }
 }
+
+pub const FREQ: u64 = crate::clint::FREQ;

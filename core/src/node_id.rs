@@ -3,7 +3,6 @@ use serde::de::{Unexpected, Visitor};
 use core::fmt::Display;
 use core::str::FromStr;
 use alloc::string::ToString;
-use alloc::borrow::ToOwned;
 
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Default, PartialOrd, Ord)]
 pub struct NodeId([u8; 32]);

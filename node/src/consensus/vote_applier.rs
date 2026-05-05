@@ -59,7 +59,9 @@ impl VoteApplier {
         let voter_weight = self.rep_weights.weight(&vote.voter);
 
         if !self.is_dev_network && voter_weight <= minimum_pr_weight {
-            // Ignore votes from reps below min PR weight!
+            // Even if weight is too low, we still notify observers (like RepCrawler)
+            // so they can track that this representative is active and responsive.
+            self.notify_vote_processed(vote, voter_weight, &HashMap::new());
             return vote
                 .filtered_blocks()
                 .map(|h| (*h, Err(VoteError::Indeterminate)))

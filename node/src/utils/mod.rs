@@ -9,10 +9,7 @@ mod timer_thread;
 mod bounded_vec_deque;
 
 
-use blake2::{
-    digest::{Update, VariableOutput},
-    Blake2bVar,
-};
+use rsnano_sha::blake2b::Blake2bHasher;
 
 
 pub(crate) use backpressure_event_processor::{
@@ -54,23 +51,22 @@ pub fn get_env_or_default_bool(name: &str, default: bool) -> bool {
 }
 
 pub fn blake2b_256_hash(data: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = Blake2bVar::new(32).unwrap();
+    let mut hasher = Blake2bHasher::new(32);
     for chunk in data {
         hasher.update(chunk);
     }
+    let full = hasher.finalize();
     let mut result = [0u8; 32];
-    hasher.finalize_variable(&mut result).unwrap();
+    result.copy_from_slice(&full[..32]);
     result
 }
 
 pub fn blake2b_512_hash(data: &[&[u8]]) -> [u8; 64] {
-    let mut hasher = Blake2bVar::new(64).unwrap();
+    let mut hasher = Blake2bHasher::new(64);
     for chunk in data {
         hasher.update(chunk);
     }
-    let mut result = [0u8; 64];
-    hasher.finalize_variable(&mut result).unwrap();
-    result
+    hasher.finalize()
 }
 
 pub struct MemoryStream<'a> {
@@ -114,11 +110,12 @@ pub fn random_u64() -> u64 {
 }
 
 pub fn hash_pow(data: &[u8], work: u64) -> u64 {
-    let mut hasher = Blake2bVar::new(8).unwrap();
+    let mut hasher = Blake2bHasher::new(8);
     hasher.update(&work.to_le_bytes());
     hasher.update(data);
+    let full = hasher.finalize();
     let mut buffer = [0; 8];
-    hasher.finalize_variable(&mut buffer).unwrap();
+    buffer.copy_from_slice(&full[..8]);
     u64::from_ne_bytes(buffer)
 }
 

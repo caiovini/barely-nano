@@ -1,8 +1,6 @@
 use crate::{TcpNetworkAdapter, utils::CancellationToken};
-use core::future::pending;
 use alloc::sync::Arc;
 use kernel_common::async_rt;
-use tracing::debug;
 
 pub struct TcpListener {
     network_adapter: Arc<TcpNetworkAdapter>,
@@ -42,10 +40,9 @@ impl TcpListener {
                 };
 
                 if let Some(handle) = handle {
-                    tracing::info!("TCP Listener: accepted inbound connection");
                     let async_stream = ::kernel_common::net::async_tcp::AsyncTcpStream::new(handle);
                     let stream = ::rsnano_nullable_tcp::TcpStream::new(async_stream);
-                    network_adapter.add(stream, crate::ChannelDirection::Inbound);
+                    let _ = network_adapter.add(stream, crate::ChannelDirection::Inbound);
                 } else {
                     ::kernel_common::async_rt::sleep(core::time::Duration::from_millis(10)).await;
                 }

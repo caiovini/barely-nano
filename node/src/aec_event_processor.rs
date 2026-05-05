@@ -1,30 +1,30 @@
-use alloc::sync::Arc;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use spin::{ Mutex, RwLock };
 use crate::utils::SyncSender;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use spin::{Mutex, RwLock};
 
 use tracing::debug;
 
-use rsnano_core::{utils::MemoryStream, Block, VoteError, VoteSource};
+use rsnano_core::{Block, VoteError, VoteSource, utils::MemoryStream};
 use rsnano_messages::NetworkFilter;
 use rsnano_network::ChannelId;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{Sample, Stats};
 
 use crate::{
+    NodeEvent,
     block_processing::{BlockContext, BlockProcessorQueue, BlockSource},
     cementation::ConfirmingSet,
     consensus::{
-        aggregate_vote_results, election_schedulers::ElectionSchedulers, ActiveElectionsContainer,
-        AecCooldownReason, AecEvent, BootstrapElectionActivator, ForkProcessor, LocalVotesRemover,
-        ReceivedVote, VoteCache, VoteCacheProcessor, VoteProcessor, VoteRebroadcastQueue,
-        WinnerBlockBroadcaster,
+        ActiveElectionsContainer, AecCooldownReason, AecEvent, BootstrapElectionActivator,
+        ForkProcessor, LocalVotesRemover, ReceivedVote, VoteCache, VoteCacheProcessor,
+        VoteProcessor, VoteRebroadcastQueue, WinnerBlockBroadcaster, aggregate_vote_results,
+        election_schedulers::ElectionSchedulers,
     },
     recently_cemented_inserter::RecentlyCementedInserter,
     representatives::{OnlineReps, RepCrawler},
     utils::BackpressureEventProcessor,
-    NodeEvent,
 };
 
 pub(crate) trait AecEventHandler {
@@ -71,6 +71,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
     }
 
     fn process(&mut self, event: AecEvent) {
+        tracing::debug!("AecEventProcessor: processing event {:?}", event);
         for plugin in &mut self.plugins {
             plugin.handle(&event)
         }
@@ -176,7 +177,10 @@ impl AecEventProcessor {
         // Track rep weight voting on live elections
         let mut should_observe = matches!(
             result,
-            Ok(()) | Err(VoteError::Replay) | Err(VoteError::Ignored)
+            Ok(())
+                | Err(VoteError::Replay)
+                | Err(VoteError::Ignored)
+                | Err(VoteError::Indeterminate)
         );
 
         // Ignore republished votes when rep crawling

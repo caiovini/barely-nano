@@ -20,7 +20,7 @@ impl BtreeSuccessorStore {
 
     pub fn put(&self, block: &BlockHash, successor: &BlockHash) {
         let key = self.make_key(block);
-        let mut value = [0u8; 256];
+        let mut value = [0u8; 512];
         value[..32].copy_from_slice(successor.as_bytes());
         
         let mut lock = DB.lock();
@@ -40,7 +40,11 @@ impl BtreeSuccessorStore {
         None
     }
 
-    pub fn del(&self, _hash: &BlockHash) {
-        // B-tree currently doesn't support delete.
+    pub fn del(&self, hash: &BlockHash) {
+        let key = self.make_key(hash);
+        let mut lock = DB.lock();
+        if let Some(db) = lock.as_mut() {
+            db.delete(key);
+        }
     }
 }

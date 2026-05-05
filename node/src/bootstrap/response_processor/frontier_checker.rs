@@ -51,7 +51,9 @@ impl<'a> FrontierChecker<'a> {
                     pending += 1;
                     accounts.push(frontier.account);
                 }
-                FrontierCheckResult::UnknownAccount | FrontierCheckResult::UpToDate => {}
+                _ => {
+                    
+                }
             }
         }
 

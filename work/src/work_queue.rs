@@ -117,7 +117,7 @@ impl WorkQueueCoordinator {
         self.should_stop.load(Ordering::Relaxed)
     }
 
-    pub fn lock_work_queue(&self) -> MutexGuard<WorkQueue> {
+    pub fn lock_work_queue(&self) -> MutexGuard<'_, WorkQueue> {
         self.work_queue.lock()
     }
 

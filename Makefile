@@ -22,7 +22,7 @@ run-mmode: build-mmode disk.img
 	  -kernel $(KERNEL_MMODE) \
 	  -netdev user,id=n0,hostfwd=tcp::7076-:7076,hostfwd=tcp::7075-:7075 \
 	  -device virtio-net-device,netdev=n0 \
-	  -drive file=disk.img,if=none,format=raw,id=hd0 \
+	  -drive file=disk.img,if=none,format=raw,id=hd0,cache=writethrough \
 	  -device virtio-blk-device,drive=hd0,queue-size=128
 
 # ── S-mode (default) ─────────────────────────────────────────────────────────
@@ -34,14 +34,14 @@ build-smode:
 run-smode: build-smode disk.img
 	qemu-system-riscv64 \
 	  -machine virt \
-	  -smp 1 \
-	  -m 512M \
+	  -smp 8 \
+	  -m 1G \
 	  -cpu rv64,v=true,zvkb=true,zbb=true,zicbom=true \
 	  -nographic \
 	  -kernel $(KERNEL_SMODE) \
 	  -netdev user,id=n0,hostfwd=tcp::7076-:7076,hostfwd=tcp::7075-:7075 \
 	  -device virtio-net-device,netdev=n0 \
-	  -drive file=disk.img,if=none,format=raw,id=hd0 \
+	  -drive file=disk.img,if=none,format=raw,id=hd0,cache=writethrough \
 	  -device virtio-blk-device,drive=hd0,queue-size=128
 
 kill:

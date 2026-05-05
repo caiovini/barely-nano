@@ -46,11 +46,10 @@ impl<'a> NetworkContext<'a> {
         };
 
         if is_established {
-            crate::uart::print(b"[net] accept_peering: Established connection detected!\n");
             let established_socket = self.sockets.remove(self.peering_handle);
             
-            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65536]);
-            let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65536]);
+            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
+            let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
             let mut new_listener = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
             let _ = new_listener.listen(7075);
             self.peering_handle = self.sockets.add(new_listener);
@@ -61,14 +60,15 @@ impl<'a> NetworkContext<'a> {
         }
     }
 
-    pub fn poll(&mut self, mtime: u64) {
+    pub fn poll(&mut self, mtime: u64) -> bool {
         let timestamp = Instant::from_micros((mtime / 10) as i64);
-        let _ = self.iface.poll(timestamp, &mut self.device, &mut self.sockets);
+        let res = self.iface.poll(timestamp, &mut self.device, &mut self.sockets);
+        res != smoltcp::iface::PollResult::None
     }
 
     pub fn create_tcp_socket(&mut self) -> smoltcp::iface::SocketHandle {
-        let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65536]);
-        let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65536]);
+        let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
+        let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
         let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
         self.sockets.add(tcp_socket)
     }
@@ -151,7 +151,9 @@ pub fn init_virtio_net<'a>() -> Option<NetworkContext<'a>> {
                             let mut config = Config::new(hardware_addr);
                             config.random_seed = 0x12345678;
 
-                            let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
+                            let mtime = crate::clint::mtime();
+                            let start_ts = Instant::from_micros((mtime / 10) as i64);
+                            let mut iface = Interface::new(config, &mut device, start_ts);
                             iface.update_ip_addrs(|ip_addrs| {
                                 ip_addrs.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)), 24)).unwrap();
                                 ip_addrs.push(IpCidr::new(IpAddress::Ipv6(Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), 64)).unwrap();
@@ -164,13 +166,13 @@ pub fn init_virtio_net<'a>() -> Option<NetworkContext<'a>> {
                             let icmp_socket = IcmpSocket::new(icmp_rx_buffer, icmp_tx_buffer);
                             sockets.add(icmp_socket);
 
-                            let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 65536]);
-                            let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 65536]);
+                            let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 32768]);
+                            let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 32768]);
                             let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
                             let tcp_handle = sockets.add(tcp_socket);
 
-                            let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 65536]);
-                            let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 65536]);
+                            let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 32768]);
+                            let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 32768]);
                             let mut tcp_peering = TcpSocket::new(tcp_rx_buffer_2, tcp_tx_buffer_2);
                             let _ = tcp_peering.listen(7075);
                             let peering_handle = sockets.add(tcp_peering);

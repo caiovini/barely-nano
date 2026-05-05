@@ -1,7 +1,11 @@
+use alloc::borrow::ToOwned;
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::{common::WalletRpcMessage, RpcCommand};
 use rsnano_core::{Account, WalletId, WorkNonce};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 impl RpcCommand {
     pub fn wallet_work_get(wallet: WalletId) -> Self {
@@ -25,7 +29,7 @@ mod tests {
     use super::*;
     use rsnano_core::{Account, WalletId, WorkNonce};
     use serde_json::to_string_pretty;
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
 
     #[test]
     fn serialize_wallet_work_get_command() {

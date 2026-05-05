@@ -16,9 +16,9 @@ impl BtreePeerStore {
         key
     }
 
-    pub fn put(&self, endpoint: SocketAddrV6, timestamp: SystemTime) {
+    pub fn put(&self, endpoint: SocketAddrV6, _timestamp: SystemTime) {
         let key = self.make_key(&endpoint);
-        let mut value = [0u8; 256];
+        let value = [0u8; 512];
         // value[0..8].copy_from_slice(&timestamp.as_secs().to_be_bytes());
         
         let mut lock = DB.lock();
@@ -46,7 +46,7 @@ impl BtreePeerStore {
     }
 
     pub fn iter(&self) -> Vec<(SocketAddrV6, SystemTime)> {
-        let mut result = Vec::new();
+        let result = Vec::new();
         // Simplified iteration for now
         result
     }

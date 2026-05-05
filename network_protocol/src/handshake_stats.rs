@@ -1,6 +1,4 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
-use rsnano_messages::MessageType;
-use strum::IntoEnumIterator;
+use core::sync::atomic::AtomicUsize;
 
 pub struct HandshakeStats {
     pub handshakes_sent: AtomicUsize,

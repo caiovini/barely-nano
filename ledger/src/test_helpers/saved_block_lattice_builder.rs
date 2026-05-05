@@ -61,7 +61,7 @@ impl SavedBlockLatticeBuilder {
         self.now = self.now + Duration::from_secs(1);
     }
 
-    pub fn genesis(&mut self) -> SavedAccountChainBuilder {
+    pub fn genesis(&mut self) -> SavedAccountChainBuilder<'_> {
         self.account(&DEV_GENESIS_KEY)
     }
 

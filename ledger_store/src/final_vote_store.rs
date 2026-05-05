@@ -20,7 +20,7 @@ impl BtreeFinalVoteStore {
 
     pub fn put(&self, root: &QualifiedRoot, hash: &BlockHash) {
         let key = self.make_key(root);
-        let mut value = [0u8; 256];
+        let mut value = [0u8; 512];
         value[..32].copy_from_slice(hash.as_bytes());
         
         let mut lock = DB.lock();
