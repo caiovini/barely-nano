@@ -3,7 +3,7 @@ use rsnano_core::{
     Account, ConfirmationHeightInfo,
 };
 use alloc::boxed::Box;
-use kernel_common::storage::DB;
+use kernel_common::storage::{SHARDS, get_shard_index, SHARD_COUNT};
 use kernel_common::storage::btree::KEY_SIZE;
 
 pub struct BtreeConfirmationHeightStore {}
@@ -24,19 +24,22 @@ impl BtreeConfirmationHeightStore {
 
     pub fn put(&self, account: &Account, info: &ConfirmationHeightInfo) {
         let key = self.make_key(account);
-        let mut value = [0u8; 512];
-        let mut adapter = MutStreamAdapter::new(&mut value);
+        let mut buffer = [0u8; 512];
+        let mut adapter = MutStreamAdapter::new(&mut buffer);
         info.serialize(&mut adapter);
+        let len = adapter.bytes_written();
         
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.insert(key, value);
+            db.insert(key, &buffer[0..len]);
         }
     }
 
     pub fn get(&self, account: &Account) -> Option<ConfirmationHeightInfo> {
         let key = self.make_key(account);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             if let Some(value) = db.search(&key) {
                 let mut stream = BufferReader::new(&value);
@@ -48,7 +51,8 @@ impl BtreeConfirmationHeightStore {
 
     pub fn exists(&self, account: &Account) -> bool {
         let key = self.make_key(account);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.search(&key).is_some()
         } else {
@@ -56,25 +60,33 @@ impl BtreeConfirmationHeightStore {
         }
     }
 
-    pub fn iter(&self) -> alloc::vec::Vec<(Account, ConfirmationHeightInfo)> {
-        let mut results = alloc::vec::Vec::new();
-        let mut start_key = [0u8; KEY_SIZE];
-        start_key[0] = Self::TABLE_ID;
+    pub fn for_each<F>(&self, start: Account, mut f: F)
+    where
+        F: FnMut(Account, ConfirmationHeightInfo),
+    {
+        let start_key = self.make_key(&start);
 
-        let mut lock = DB.lock();
-        if let Some(db) = lock.as_mut() {
-            let mut it = db.iter(start_key);
-            while let Some((key, value)) = it.next_kv() {
-                if key[0] != Self::TABLE_ID {
-                    break;
-                }
-                let account = Account::from_bytes(key[1..33].try_into().unwrap());
-                let mut stream = BufferReader::new(&value);
-                if let Ok(info) = ConfirmationHeightInfo::deserialize(&mut stream) {
-                    results.push((account, info));
+        for i in 0..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                let mut it = db.iter(start_key);
+                while let Some((key, value)) = it.next_kv() {
+                    if key[0] != Self::TABLE_ID {
+                        break;
+                    }
+                    let account = Account::from_bytes(key[1..33].try_into().unwrap());
+                    let mut stream = BufferReader::new(&value);
+                    if let Ok(info) = ConfirmationHeightInfo::deserialize(&mut stream) {
+                        f(account, info);
+                    }
                 }
             }
         }
+    }
+
+    pub fn iter(&self) -> alloc::vec::Vec<(Account, ConfirmationHeightInfo)> {
+        let mut results = alloc::vec::Vec::new();
+        self.for_each(Account::zero(), |acc, info| results.push((acc, info)));
         results
     }
 
@@ -84,22 +96,30 @@ impl BtreeConfirmationHeightStore {
         range: core::ops::RangeFrom<Account>,
     ) -> Box<dyn Iterator<Item = (Account, ConfirmationHeightInfo)>> {
         let mut results = alloc::vec::Vec::new();
-        let start_key = self.make_key(&range.start);
+        self.for_each(range.start, |acc, info| results.push((acc, info)));
+        Box::new(results.into_iter())
+    }
 
-        let mut lock = DB.lock();
-        if let Some(db) = lock.as_mut() {
-            let mut it = db.iter(start_key);
-            while let Some((key, value)) = it.next_kv() {
-                if key[0] != Self::TABLE_ID {
-                    break;
-                }
-                let account = Account::from_bytes(key[1..33].try_into().unwrap());
-                let mut stream = BufferReader::new(&value);
-                if let Ok(info) = ConfirmationHeightInfo::deserialize(&mut stream) {
-                    results.push((account, info));
+    pub fn sum_heights(&self) -> u64 {
+        let mut total = 0;
+        let mut start_key = [0u8; KEY_SIZE];
+        start_key[0] = Self::TABLE_ID;
+
+        for i in 0..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                let mut it = db.iter(start_key);
+                while let Some((key, value)) = it.next_kv() {
+                    if key[0] != Self::TABLE_ID {
+                        break;
+                    }
+                    let mut stream = BufferReader::new(&value);
+                    if let Ok(info) = ConfirmationHeightInfo::deserialize(&mut stream) {
+                        total += info.height;
+                    }
                 }
             }
         }
-        Box::new(results.into_iter())
+        total
     }
 }

@@ -18,6 +18,7 @@ pub(crate) struct BootstrapStaleElections {
     clock: Arc<SteadyClock>,
     pub stats: Arc<StaleElectionsStats>,
     stale_threshold: Duration,
+    #[allow(dead_code)]
     stale_accounts: Vec<Account>,
 }
 
@@ -43,6 +44,7 @@ impl BootstrapStaleElections {
         self.stale_threshold
     }
 
+    #[allow(dead_code)]
     fn bootstrap_stale_accounts(&mut self) {
         let mut state = self.bootstrapper.state();
 

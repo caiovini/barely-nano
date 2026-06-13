@@ -1,3 +1,4 @@
+use alloc::string::ToString;
 use anyhow::{Context, anyhow};
 use std::{str::FromStr, time::Duration};
 

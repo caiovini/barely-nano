@@ -1,3 +1,4 @@
+use alloc::string::ToString;
 use std::path::PathBuf;
 use std::{fmt::Write, str::FromStr};
 

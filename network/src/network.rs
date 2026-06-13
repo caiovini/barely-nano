@@ -31,7 +31,7 @@ pub struct Network {
     listening_port: u16,
     loopback: Arc<Channel>,
     pub protocol: rsnano_core::ProtocolInfo,
-    on_new_realtime_channel_callback: Option<Arc<dyn Fn(Arc<Channel>) + Send + Sync>>,
+    on_new_realtime_channel_observers: Vec<Arc<dyn Fn(Arc<Channel>) + Send + Sync>>,
     data_receiver_factory: Option<Box<dyn DataReceiverFactory>>,
 }
 
@@ -65,7 +65,7 @@ impl Network {
             listening_port: 0,
             loopback,
             protocol: rsnano_core::ProtocolInfo::default(),
-            on_new_realtime_channel_callback: None,
+            on_new_realtime_channel_observers: Vec::new(),
         }
     }
 
@@ -125,6 +125,25 @@ impl Network {
             return Err(NetworkError::Stopped);
         }
 
+        if let Some(existing) = self.find_channel_by_ip(&peer_addr.ip()) {
+            if !existing.is_closed() {
+                kernel_common::uart::putchar(b'-');
+                return Err(NetworkError::DuplicateConnection);
+            }
+        }
+
+        // Also reject inbound connections if we already have a pending outbound
+        // attempt to the same IP, to avoid simultaneous bidirectional connections
+        // that cause the remote C++ node to reset one side.
+        if direction == ChannelDirection::Inbound {
+            let ip = peer_addr.ip();
+            let has_attempt = self.attempts.keys().any(|a| *a.ip() == *ip);
+            if has_attempt {
+                kernel_common::uart::putchar(b'-');
+                return Err(NetworkError::DuplicateConnection);
+            }
+        }
+
         if direction == ChannelDirection::Inbound && !self.is_inbound_slot_available() {
             debug!("Rejecting inbound connection: max connections reached ({})", self.config.max_inbound_connections);
             return Err(NetworkError::MaxConnections);
@@ -151,11 +170,12 @@ impl Network {
 
         let receiver = self.data_receiver_factory.as_ref().expect("DataReceiverFactory not set").create_receiver_for(channel.clone());
         self.channels.insert(channel_id, channel.clone());
-
+        kernel_common::uart::putchar(b'+');
         Ok((channel, receiver))
     }
 
     pub fn remove(&mut self, channel_id: ChannelId) {
+        kernel_common::uart::print(b"[-]");
         if let Some(channel) = self.channels.remove(&channel_id) {
             channel.close();
         }
@@ -180,7 +200,7 @@ impl Network {
     fn count_by_direction(&self, direction: ChannelDirection) -> usize {
         self.channels
             .values()
-            .filter(|c| c.direction() == direction)
+            .filter(|c| c.direction() == direction && !c.is_closed())
             .count()
     }
 
@@ -200,7 +220,7 @@ impl Network {
         if self.attempts.contains_key(&peer) {
             return Err(NetworkError::DuplicateConnection);
         }
-        if self.find_channel(&peer).is_some() {
+        if self.find_channel_by_ip(&peer.ip()).is_some() {
             return Err(NetworkError::DuplicateConnection);
         }
         self.attempts.insert(peer, now);
@@ -235,8 +255,26 @@ impl Network {
         }).cloned()
     }
 
+    pub fn find_channel_by_ip(&self, ip: &core::net::Ipv6Addr) -> Option<Arc<Channel>> {
+        if ip.is_loopback() {
+            return None;
+        }
+        let octets = ip.octets();
+        if octets[0..10] == [0; 10] && octets[10] == 0xff && octets[11] == 0xff {
+            let ip4_octets = [octets[12], octets[13], octets[14], octets[15]];
+            if ip4_octets[0] == 127 {
+                return None;
+            }
+        }
+        self.channels.values().find(|c: &&Arc<Channel>| {
+            (c.mode() == ChannelMode::Realtime || c.mode() == ChannelMode::Undefined) 
+                && c.is_alive() 
+                && c.peer_addr().ip() == ip
+        }).cloned()
+    }
+
     pub fn on_new_realtime_channel(&mut self, callback: Arc<dyn Fn(Arc<Channel>) + Send + Sync>) {
-        self.on_new_realtime_channel_callback = Some(callback);
+        self.on_new_realtime_channel_observers.push(callback);
     }
 
     pub fn add_channel(&mut self, channel: Arc<Channel>) {
@@ -251,8 +289,8 @@ impl Network {
 
         self.channels.insert(channel.channel_id(), channel.clone());
         if channel.mode() == crate::ChannelMode::Realtime {
-            if let Some(callback) = &self.on_new_realtime_channel_callback {
-                callback(channel);
+            for observer in &self.on_new_realtime_channel_observers {
+                observer(channel.clone());
             }
         }
     }
@@ -277,14 +315,16 @@ impl Network {
     pub fn purge(&mut self, now: Timestamp, cutoff_period: Duration) -> Vec<Arc<Channel>> {
         let mut to_remove = Vec::new();
         for (id, channel) in &self.channels {
-            if now.millis() - channel.last_activity().millis() >= cutoff_period.as_millis() as i64 {
+            if channel.is_closed() || now.millis() - channel.last_activity().millis() >= cutoff_period.as_millis() as i64 {
                 to_remove.push(*id);
+                kernel_common::uart::putchar(b'~');
             }
         }
 
         let mut removed = Vec::new();
         for id in to_remove {
             if let Some(channel) = self.channels.remove(&id) {
+                kernel_common::uart::putchar(b'~');
                 channel.close();
                 removed.push(channel);
             }
@@ -301,8 +341,17 @@ impl Network {
         true
     }
 
-    pub fn idle_channels(&self, _min_idle_period: Duration, _now: Timestamp) -> Vec<Arc<Channel>> {
-        Vec::new()
+    pub fn idle_channels(&self, min_idle_period: Duration, now: Timestamp) -> Vec<Arc<Channel>> {
+        let mut result = Vec::new();
+        for channel in self.channels.values() {
+            if channel.mode() == ChannelMode::Realtime
+                && !channel.is_closed()
+                && now.millis() - channel.last_activity().millis() >= min_idle_period.as_millis() as i64
+            {
+                result.push(channel.clone());
+            }
+        }
+        result
     }
 
     pub fn sorted_channels(&self) -> Vec<Arc<Channel>> {
@@ -324,14 +373,13 @@ impl Network {
         if let Some(channel) = self.channels.get(&channel_id) {
             channel.set_mode(ChannelMode::Realtime);
             channel.set_node_id(node_id);
-            let observers = if let Some(callback) = &self.on_new_realtime_channel_callback {
-                alloc::vec![callback.clone()]
-            } else {
-                alloc::vec![]
-            };
-            return Some((channel.clone(), observers));
+            kernel_common::uart::putchar(b'U');
+            let observers = self.on_new_realtime_channel_observers.clone();
+            Some((channel.clone(), observers))
+        } else {
+            kernel_common::uart::putchar(b'u');
+            None
         }
-        None
     }
 
     pub fn perma_ban(&mut self, _addr: SocketAddrV6) {
@@ -345,7 +393,11 @@ impl Network {
     }
 
     pub fn shuffled_channels(&self, _type: TrafficType) -> Vec<Arc<Channel>> {
-        let mut result: Vec<Arc<Channel>> = self.channels.values().cloned().collect();
+        let mut result: Vec<Arc<Channel>> = self.channels
+            .values()
+            .filter(|c| c.mode() == ChannelMode::Realtime && !c.is_closed())
+            .cloned()
+            .collect();
         let mut rng = NullableRng::rng();
         result.shuffle(&mut rng);
         result
@@ -359,7 +411,19 @@ impl Network {
         let mut i = 0;
         for channel in self.channels.values() {
             if channel.mode() == ChannelMode::Realtime {
-                peers[i] = channel.peer_addr();
+                let mut peer = if let Some(peering) = channel.peering_addr() {
+                    peering
+                } else {
+                    channel.peer_addr()
+                };
+                
+                // For the Nano network, we should always advertise the standard listening port
+                // unless we explicitly know otherwise. Ephemeral ports must never be sent.
+                if peer.port() != 7075 {
+                    peer.set_port(7075);
+                }
+
+                peers[i] = peer;
                 i += 1;
                 if i >= 8 {
                     break;
@@ -393,6 +457,7 @@ impl Network {
             } else {
                 info.outbound += 1;
             }
+            info.queued_messages += channel.queue_len();
         }
         info
     }
@@ -405,6 +470,7 @@ pub struct ChannelsInfo {
     pub realtime: usize,
     pub inbound: usize,
     pub outbound: usize,
+    pub queued_messages: usize,
 }
 
 #[derive(Debug)]

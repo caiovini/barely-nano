@@ -20,7 +20,6 @@ pub(crate) struct FrontierRequester {
 
 enum FrontierState {
     Initial,
-    WaitCandidateAccounts,
     WaitLimiter,
     WaitAckProcessor,
     WaitChannel,
@@ -72,14 +71,8 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
             FrontierState::Initial => {
                 self.stats
                     .inc(StatType::Bootstrap, DetailType::LoopFrontiers);
-                self.state = FrontierState::WaitCandidateAccounts;
+                self.state = FrontierState::WaitLimiter;
                 return PollResult::Progress;
-            }
-            FrontierState::WaitCandidateAccounts => {
-                if !boot_state.candidate_accounts.priority_half_full() {
-                    self.state = FrontierState::WaitLimiter;
-                    return PollResult::Progress;
-                }
             }
             FrontierState::WaitLimiter => {
                 if self.frontiers_limiter.try_consume(1, now) {
@@ -94,7 +87,9 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
                 }
             }
             FrontierState::WaitChannel => match self.channel_waiter.poll(boot_state, now) {
-                PollResult::Wait => return PollResult::Wait,
+                PollResult::Wait => {
+                    return PollResult::Wait;
+                }
                 PollResult::Progress => return PollResult::Progress,
                 PollResult::Finished(channel) => {
                     self.state = FrontierState::WaitFrontier(channel);
@@ -144,33 +139,6 @@ mod tests {
         assert!(matches!(result.req_type, AscPullReqType::Frontiers(_)));
     }
 
-    #[test]
-    fn wait_candidate_accounts() {
-        let (mut requester, _) = create_test_requester();
-        let mut state = state_with_max_priorities(1);
-        let now = Timestamp::new_test_instance();
-
-        // Fill up candidate accounts
-        state.candidate_accounts.priority_up(&Account::from(1));
-
-        // Should wait because candidate accounts are full enough
-        let result = progress(&mut requester, &mut state);
-        assert!(matches!(result, PollResult::Wait));
-        assert!(matches!(
-            requester.state,
-            FrontierState::WaitCandidateAccounts
-        ));
-
-        // Running again continues waiting
-        let result = requester.poll(&mut state, now);
-        assert!(matches!(result, PollResult::Wait));
-
-        // If the accounts are cleared, continue
-        state.candidate_accounts.clear();
-        let result = requester.poll(&mut state, now);
-        assert!(matches!(result, PollResult::Progress));
-        assert!(matches!(requester.state, FrontierState::WaitLimiter));
-    }
 
     #[test]
     fn wait_limiter() {

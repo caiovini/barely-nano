@@ -44,9 +44,12 @@ impl RequestAggregatorConfig {
  * Votes are generated for uncached hashes.
  */
 pub struct RequestAggregator {
+#[allow(dead_code)]
     config: RequestAggregatorConfig,
     stats: Arc<Stats>,
+    #[allow(dead_code)]
     vote_generators: Arc<VoteGenerators>,
+    #[allow(dead_code)]
     ledger: Arc<Ledger>,
     pub(crate) state: Arc<Mutex<RequestAggregatorState>>,
     condition: Arc<Condvar>,

@@ -1,8 +1,7 @@
-use core::net::SocketAddrV6;
 use alloc::sync::Arc;
-use spin::{ RwLock };
-// // // // // // // use std::{    net::SocketAddrV6    }; // TODO: fix this
-
+use core::net::SocketAddrV6;
+use rsnano_network_protocol::LatestKeepalives;
+use spin::{Mutex, RwLock};
 
 use rsnano_core::VoteSource;
 use rsnano_messages::{Message, NetworkFilter};
@@ -31,6 +30,7 @@ pub struct RealtimeMessageHandler {
     bootstrap_server: Arc<BootstrapServer>,
     bootstrapper: Arc<Bootstrapper>,
     work_thresholds: WorkThresholds,
+    latest_keepalives: Arc<Mutex<LatestKeepalives>>,
 }
 
 impl RealtimeMessageHandler {
@@ -46,6 +46,7 @@ impl RealtimeMessageHandler {
         bootstrap_server: Arc<BootstrapServer>,
         bootstrapper: Arc<Bootstrapper>,
         work_thresholds: WorkThresholds,
+        latest_keepalives: Arc<Mutex<LatestKeepalives>>,
     ) -> Self {
         Self {
             stats,
@@ -59,6 +60,7 @@ impl RealtimeMessageHandler {
             bootstrap_server,
             bootstrapper,
             work_thresholds,
+            latest_keepalives,
         }
     }
 
@@ -71,6 +73,12 @@ impl RealtimeMessageHandler {
 
         match message {
             Message::Keepalive(keepalive) => {
+                kernel_common::uart::putchar(b'k');
+                // Discovery: Remember the peers for future reachout
+                self.latest_keepalives
+                    .lock()
+                    .insert(channel.channel_id(), keepalive.clone());
+
                 // Check for special node port data
                 let peer0 = keepalive.peers[0];
                 // The first entry is used to inform us of the peering address of the sending node
@@ -85,6 +93,7 @@ impl RealtimeMessageHandler {
                 }
             }
             Message::Publish(publish) => {
+                kernel_common::uart::putchar(b'B');
                 let mut ok = true;
 
                 if !self.work_thresholds.validate_entry_block(&publish.block) {
@@ -94,8 +103,6 @@ impl RealtimeMessageHandler {
                 }
 
                 if ok {
-                    // Put blocks that are being initially broadcasted in a separate queue, so that they won't have to compete with rebroadcasted blocks
-                    // Both queues have the same priority and size, so the potential for exploiting this is limited
                     let source = if publish.is_originator {
                         BlockSource::LiveOriginator
                     } else {
@@ -110,8 +117,6 @@ impl RealtimeMessageHandler {
                 }
 
                 if !ok {
-                    // The message couldn't be handled. We have to remove it from the duplicate
-                    // filter, so that it can be retransmitted and handled later
                     self.network_filter.clear(publish.digest);
                     self.stats
                         .inc_dir(StatType::Drop, DetailType::Publish, Direction::In);
@@ -129,6 +134,7 @@ impl RealtimeMessageHandler {
                 }
             }
             Message::ConfirmAck(ack) => {
+                kernel_common::uart::putchar(b'A');
                 // Ignore zero account votes
                 if ack.vote().voter.is_zero() {
                     self.stats.inc_dir(
@@ -138,11 +144,13 @@ impl RealtimeMessageHandler {
                     );
                 }
 
-                let source = match ack.is_rebroadcasted() {
+                let is_rebroadcasted = ack.is_rebroadcasted();
+
+                let source = match is_rebroadcasted {
                     true => VoteSource::Rebroadcast,
                     false => VoteSource::Live,
                 };
-                
+
                 let added = self.vote_processor_queue.enqueue(
                     Arc::new(ack.vote().clone()),
                     Some(channel.clone()),
@@ -172,7 +180,10 @@ impl RealtimeMessageHandler {
             Message::AscPullReq(req) => {
                 self.bootstrap_server.enqueue(req, channel.clone());
             }
-            Message::AscPullAck(ack) => self.bootstrapper.process(ack, channel.channel_id()),
+            Message::AscPullAck(ack) => {
+                kernel_common::uart::putchar(b'S');
+                self.bootstrapper.process(ack, channel.channel_id());
+            }
             Message::FrontierReq(_)
             | Message::BulkPush
             | Message::BulkPull(_)

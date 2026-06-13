@@ -56,6 +56,7 @@ fn deserialize_bootstrap_weights(buffer: &str) -> BootstrapWeights {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn log_bootstrap_weights(weight_cache: &RepWeightCache) {
     let mut bootstrap_weights = weight_cache.bootstrap_weights();
     if !bootstrap_weights.is_empty() {

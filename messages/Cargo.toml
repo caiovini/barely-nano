@@ -15,14 +15,21 @@ bitvec = { version = "1", default-features = false, features = ["alloc"] }
 num-derive = { version = "0.4", default-features = false }
 num-traits = { version = "0.2", default-features = false }
 rand = { version = "0.9", default-features = false }
-serde = { version = "=1.0.210", default-features = false, features = ["derive", "alloc"] }
+serde = { version = "=1.0.210", default-features = false, features = [
+    "derive",
+    "alloc",
+] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 serde_derive = "1"
 static_assertions = "1"
 siphasher = { version = "1", default-features = false }
 strum = { version = "0.26", default-features = false, features = ["derive"] }
 strum_macros = { version = "0.26", default-features = false }
-hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc", "inline-more"] }
+hashbrown = { version = "0.14", default-features = false, features = [
+    "ahash",
+    "alloc",
+    "inline-more",
+] }
 spin = "0.9"
 rsnano_nullable_random = { path = "../nullables/random" }
 

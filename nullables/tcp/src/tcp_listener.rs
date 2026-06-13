@@ -30,14 +30,28 @@ impl TcpListener {
                         let remote_endpoint = socket.remote_endpoint().unwrap();
                         let addr = match remote_endpoint.addr {
                             smoltcp::wire::IpAddress::Ipv4(v4) => {
-                                // If smoltcp 0.13 uses core::net types directly
                                 SocketAddr::new(core::net::IpAddr::V4(v4.into()), remote_endpoint.port)
                             }
                             smoltcp::wire::IpAddress::Ipv6(v6) => {
                                 SocketAddr::new(core::net::IpAddr::V6(v6.into()), remote_endpoint.port)
                             }
                         };
-                        return Poll::Ready(Ok((TcpStream::new(kernel_common::net::async_tcp::AsyncTcpStream::new(ctx.tcp_handle)), addr)));
+
+                        // Use the accept-and-re-listen pattern:
+                        // 1. Remove the established socket from the handle
+                        let established_socket = ctx.sockets.remove(ctx.tcp_handle);
+                        
+                        // 2. Create a new listener socket and put it back into the handle
+                        use smoltcp::socket::tcp::SocketBuffer as TcpSocketBuffer;
+                        let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
+                        let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
+                        let mut new_listener = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
+                        let _ = new_listener.listen(self.port);
+                        ctx.tcp_handle = ctx.sockets.add(new_listener);
+
+                        // 3. Add the established socket back under a new handle and wrap it
+                        let new_handle = ctx.sockets.add(established_socket);
+                        return Poll::Ready(Ok((TcpStream::new(kernel_common::net::async_tcp::AsyncTcpStream::new(new_handle)), addr)));
                     }
                     _ => {
                         socket.register_recv_waker(cx.waker());

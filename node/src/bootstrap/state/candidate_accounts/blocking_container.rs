@@ -3,6 +3,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use rsnano_core::{Account, BlockHash};
 use rsnano_nullable_clock::Timestamp;
+use core::cmp::min;
+use core::time::Duration;
 // // // // // // // use std::{    mem::size_of    }; // TODO: fix this
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +37,7 @@ pub(super) struct BlockingContainer {
     by_dependency: BTreeMap<BlockHash, Vec<Account>>,
     by_dependency_account: BTreeMap<Account, Vec<Account>>,
     by_timestamp: BTreeMap<Timestamp, Vec<Account>>,
+    dependency_stats: BTreeMap<BlockHash, (u8, Timestamp)>,
 }
 
 impl BlockingContainer {
@@ -114,14 +117,29 @@ impl BlockingContainer {
             .unwrap_or_default()
     }
 
-    pub fn next(&self, filter: impl Fn(&BlockHash) -> bool) -> Option<BlockHash> {
+    pub fn next(&self, now: Timestamp, filter: impl Fn(&BlockHash) -> bool) -> Option<BlockHash> {
         // Scan all entries with unknown dependency account
         let accounts = self.by_dependency_account.get(&Account::zero())?;
         accounts
             .iter()
             .map(|a| self.by_account.get(a).unwrap())
-            .find(|e| filter(&e.dependency))
+            .find(|e| {
+                if let Some((fails, last)) = self.dependency_stats.get(&e.dependency) {
+                    // Cooldown: 15s * (1 + fails), max 10 minutes
+                    let cooldown_secs = min(600, 15 * (1 + *fails as u64));
+                    if *last + Duration::from_secs(cooldown_secs) > now {
+                        return false;
+                    }
+                }
+                filter(&e.dependency)
+            })
             .map(|e| e.dependency)
+    }
+
+    pub fn dependency_failed(&mut self, hash: &BlockHash, now: Timestamp) {
+        let entry = self.dependency_stats.entry(*hash).or_insert((0, Timestamp::new(0)));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = now;
     }
 
     pub fn iter_start_dep_account(&self, start: Account) -> impl Iterator<Item = &BlockingEntry> {
@@ -174,6 +192,7 @@ impl BlockingContainer {
         dependency: &BlockHash,
         new_dependency_account: Account,
     ) -> usize {
+        self.dependency_stats.remove(dependency);
         let Some(accounts) = self.by_dependency.get(dependency) else {
             return 0;
         };
@@ -237,6 +256,7 @@ impl BlockingContainer {
         self.by_dependency.clear();
         self.by_dependency_account.clear();
         self.by_timestamp.clear();
+        self.dependency_stats.clear();
     }
 }
 

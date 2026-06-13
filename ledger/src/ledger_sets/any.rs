@@ -115,8 +115,31 @@ impl<'a> OwningAnySet<'a> {
     }
 
     pub fn random_blocks(&self, count: usize) -> Vec<SavedBlock> {
-        // Mock
-        Vec::with_capacity(count)
+        let total = self.store.block.count();
+        if total == 0 {
+            return Vec::new();
+        }
+
+        let skip = if total > count {
+            static mut COUNTER: usize = 0;
+            let seed = unsafe {
+                COUNTER = COUNTER.wrapping_add(1);
+                COUNTER
+            };
+            seed % (total - count + 1)
+        } else {
+            0
+        };
+
+        let mut results = Vec::with_capacity(count);
+        let mut current = 0;
+        self.store.block.for_each(|block| {
+            if current >= skip && results.len() < count {
+                results.push(block);
+            }
+            current += 1;
+        });
+        results
     }
 
     pub fn latest_root(&self, account: &Account) -> Root {
@@ -522,7 +545,7 @@ impl<'a> AnySet for BorrowingAnySet<'a> {
     }
 
     fn get_final_vote(&self, root: &QualifiedRoot) -> Option<BlockHash> {
-        self.store.final_vote.get(&(), root)
+        self.store.final_vote.get(&root.root)
     }
 }
 
@@ -535,12 +558,18 @@ pub struct AnyReceivableIterator {
 impl AnyReceivableIterator {
     pub fn new(
         pending: &BtreePendingStore,
-        _requested_account: Account,
+        requested_account: Account,
         returned_account: Option<Account>,
         _next_hash: Option<BlockHash>,
     ) -> Self {
-        // Btree doesn't have range iterators yet, returning empty for now
-        let items = pending.iter();
+        let items = if let Some(acc) = returned_account {
+             pending.iter_for_account(&acc)
+        } else if !requested_account.is_zero() {
+             pending.iter_for_account(&requested_account)
+        } else {
+             pending.iter()
+        };
+
         Self {
             returned_account,
             items,

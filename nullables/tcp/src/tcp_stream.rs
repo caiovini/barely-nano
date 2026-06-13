@@ -10,6 +10,7 @@ use kernel_common::net::async_tcp::{AsyncTcpStream, TcpError};
 use kernel_common::net::NET;
 use smoltcp::socket::tcp::Socket as SmolTcpSocket;
 use core::future::poll_fn;
+use kernel_common::uart;
 
 pub const TEST_ENDPOINT_1: SocketAddrV6 =
     SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0xffff, 0, 0, 0, 1), 1111, 0, 0);
@@ -59,8 +60,18 @@ impl TcpStream {
                     if let Some(ref mut ctx) = *NET.lock() {
                         let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                         if socket.can_recv() {
+                            uart::putchar(b'(');
                             Poll::Ready(Ok(()))
                         } else {
+                            let state = socket.state();
+                            if state == smoltcp::socket::tcp::State::Closed || 
+                               state == smoltcp::socket::tcp::State::CloseWait ||
+                               state == smoltcp::socket::tcp::State::Closing ||
+                               state == smoltcp::socket::tcp::State::TimeWait ||
+                               state == smoltcp::socket::tcp::State::LastAck {
+                                return Poll::Ready(Err(anyhow::anyhow!("Socket closed (state: {:?})", state)));
+                            }
+                            uart::putchar(b')');
                             socket.register_recv_waker(cx.waker());
                             Poll::Pending
                         }
@@ -162,8 +173,18 @@ impl TcpStream {
                     if let Some(ref mut ctx) = *NET.lock() {
                         let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                         if socket.can_send() {
+                            uart::putchar(b'{');
                             Poll::Ready(Ok(()))
                         } else {
+                            let state = socket.state();
+                            if state == smoltcp::socket::tcp::State::Closed || 
+                               state == smoltcp::socket::tcp::State::CloseWait ||
+                               state == smoltcp::socket::tcp::State::Closing ||
+                               state == smoltcp::socket::tcp::State::TimeWait ||
+                               state == smoltcp::socket::tcp::State::LastAck {
+                                return Poll::Ready(Err(anyhow::anyhow!("Socket closed (state: {:?})", state)));
+                            }
+                            uart::putchar(b'}');
                             socket.register_send_waker(cx.waker());
                             Poll::Pending
                         }

@@ -34,9 +34,13 @@ impl RunningQueryContainer {
     }
 
     pub fn count_by_account(&self, account: &Account, source: QuerySource) -> usize {
-        self.iter_account(account)
+        let count = self.iter_account(account)
             .filter(|i| i.source == source)
-            .count()
+            .count();
+        if count > 0 {
+            // tracing::info!("RunningQueryContainer: account {} has {} queries from source {:?}", account.encode_account(), count, source);
+        }
+        count
     }
 
     pub fn iter_hash(&self, hash: &BlockHash) -> impl Iterator<Item = &RunningQuery> {

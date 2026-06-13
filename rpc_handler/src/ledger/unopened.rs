@@ -1,10 +1,6 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
+use rsnano_ledger::LedgerSet;
 use crate::RpcCommandHandler;
 use rsnano_core::{Account, Amount, BlockHash, PendingKey};
-use rsnano_ledger::LedgerSet;
 use rsnano_rpc_messages::{unwrap_u64_or_max, UnopenedArgs, UnopenedResponse};
 use hashbrown::HashMap;
 
@@ -17,7 +13,7 @@ impl RpcCommandHandler {
 
         let any = self.node.ledger.any();
 
-        let mut iterator = any.iter_pending_range(PendingKey::new(start, BlockHash::zero())..);
+        let mut iterator = any.iter_pending_range(PendingKey::new(start, BlockHash::zero())..).into_iter();
 
         let mut current_account = start;
         let mut current_account_sum = Amount::zero();
@@ -38,7 +34,7 @@ impl RpcCommandHandler {
                 // Skip existing accounts
                 iterator = any.iter_pending_range(
                     PendingKey::new(account.inc().unwrap(), BlockHash::zero())..,
-                );
+                ).into_iter();
                 current = iterator.next();
             } else {
                 if account != current_account {

@@ -38,8 +38,8 @@ impl BootstrapState {
         }
     }
 
-    pub fn next_blocking_query(&self, channel: &Arc<Channel>) -> Option<AscPullQuerySpec> {
-        let next = self.next_blocking();
+    pub fn next_blocking_query(&self, channel: &Arc<Channel>, now: Timestamp) -> Option<AscPullQuerySpec> {
+        let next = self.next_blocking(now);
         if !next.is_zero() {
             Some(Self::create_blocking_query(next, channel.clone()))
         } else {
@@ -79,19 +79,24 @@ impl BootstrapState {
     }
 
     /* Waits for next available blocking block */
-    pub fn next_blocking(&self) -> BlockHash {
+    pub fn next_blocking(&self, now: Timestamp) -> BlockHash {
         self.candidate_accounts
-            .next_blocking(|hash| self.count_queries_by_hash(hash, QuerySource::Dependencies) == 0)
+            .next_blocking(now, |hash| self.count_queries_by_hash(hash, QuerySource::Dependencies) == 0)
+    }
+
+    pub fn dependency_failed(&mut self, hash: &BlockHash, now: Timestamp) {
+        self.candidate_accounts.dependency_failed(hash, now);
     }
 
     pub fn frontiers_processed(&mut self, outdated: &OutdatedAccounts) {
         self.counters.received_frontiers += outdated.fontiers_received;
         self.counters.outdated_accounts_found += outdated.accounts.len();
 
+
         for account in &outdated.accounts {
             // Use the lowest possible priority here
             self.candidate_accounts
-                .priority_set(account, CandidateAccounts::PRIORITY_CUTOFF);
+                .priority_set(account, crate::bootstrap::state::Priority::new(1.0));
 
             self.last_outdated_accounts.push_back(*account);
             if self.last_outdated_accounts.len() > 20 {

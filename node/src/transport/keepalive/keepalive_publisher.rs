@@ -62,7 +62,6 @@ impl KeepalivePublisher {
         }
     }
 
-    #[allow(dead_code)]
     fn keepalive_or_connect_socket(&self, peer: SocketAddr) {
         let peer_v6 = into_ipv6_socket_address(peer);
 

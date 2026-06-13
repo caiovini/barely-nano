@@ -272,10 +272,13 @@ impl RealFilesystem {
     }
 }
 
+use kernel_common::storage::{SHARDS, get_shard_index};
+
 impl Filesystem for RealFilesystem {
     fn exists(&self, path: &Path) -> bool {
         let key = Self::hash_path(path);
-        let mut guard = kernel_common::storage::DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut guard = SHARDS[shard_idx].lock();
         if let Some(btree) = guard.as_mut() {
             btree.search(&key).is_some()
         } else {
@@ -285,7 +288,8 @@ impl Filesystem for RealFilesystem {
 
     fn read_to_string(&mut self, f: &Path) -> Result<String> {
         let key = Self::hash_path(f);
-        let mut guard = kernel_common::storage::DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut guard = SHARDS[shard_idx].lock();
         let btree = guard.as_mut().ok_or(Error::new(ErrorKind::Other, "DB not initialized"))?;
         
         let val_bytes = btree.search(&key).ok_or(Error::new(ErrorKind::NotFound, "File not found"))?;
@@ -324,7 +328,8 @@ impl Filesystem for RealFilesystem {
 
     fn write(&mut self, path: &Path, contents: &[u8]) -> Result<()> {
         let key = Self::hash_path(path);
-        let mut guard = kernel_common::storage::DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut guard = SHARDS[shard_idx].lock();
         let btree = guard.as_mut().ok_or(Error::new(ErrorKind::Other, "DB not initialized"))?;
         
         let total_len = contents.len() as u64;
@@ -359,7 +364,7 @@ impl Filesystem for RealFilesystem {
         
         let mut val_bytes = [0u8; 512];
         val_bytes[0..4].copy_from_slice(&first_page.to_le_bytes());
-        btree.insert(key, val_bytes);
+        btree.insert(key, &val_bytes[0..4]);
         Ok(())
     }
 

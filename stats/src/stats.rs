@@ -193,15 +193,18 @@ impl Stats {
 
         if updates.is_empty() { return Ok(()); }
 
-        kernel_common::uart::print(b"[stats] Bulk flushing ");
-        kernel_common::uart::print_usize(updates.len());
-        kernel_common::uart::print(b" counters...\n");
+        {
+            let _uart_guard = kernel_common::uart::UART_LOCK.lock();
+            let mut sorted_updates = updates.clone();
+            sorted_updates.sort_by(|a, b| b.1.cmp(&a.1));
+            
+        }
 
-        let mut db_guard = kernel_common::storage::DB.lock();
-        if let Some(db) = db_guard.as_mut() {
+        let mut lock = kernel_common::storage::SHARDS[0].lock();
+        if let Some(db) = lock.as_mut() {
             for (key, val) in updates {
                 let mut db_key = [0u8; 65];
-                db_key[0] = 10; // Stats table
+                db_key[0] = 14; // Stats table ID (was using 10 which is Pruned)
                 db_key[1] = key.stat_type as u8;
                 let detail_bytes = (key.detail as u16).to_le_bytes();
                 db_key[2] = detail_bytes[0];
@@ -210,7 +213,7 @@ impl Stats {
 
                 let mut db_val = [0u8; 512];
                 db_val[0..8].copy_from_slice(&val.to_le_bytes());
-                db.insert(db_key, db_val);
+                db.insert(db_key, &db_val[0..8]);
             }
             db.flush().map_err(|e| anyhow::anyhow!("DB flush failed: {:?}", e))?;
         }

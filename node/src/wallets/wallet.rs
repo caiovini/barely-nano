@@ -1,10 +1,10 @@
 use alloc::sync::Arc;
 use spin::Mutex;
-use hashbrown::HashSet;
+use hashbrown::{HashSet, HashMap};
 
 use tracing::warn;
 
-use rsnano_core::{PublicKey, Root, WorkNonce};
+use rsnano_core::{Amount, Block, BlockHash, Link, PrivateKey, PublicKey, Root, StateBlockArgs, WorkNonce};
 use rsnano_ledger::Ledger;
 use rsnano_work::WorkThresholds;
 
@@ -12,6 +12,7 @@ pub struct Wallet {
     pub representatives: Mutex<HashSet<PublicKey>>,
     ledger: Arc<Ledger>,
     work_thresholds: WorkThresholds,
+    pub keys: Mutex<HashMap<PublicKey, PrivateKey>>,
 }
 
 impl Wallet {
@@ -24,7 +25,40 @@ impl Wallet {
             representatives: Mutex::new(HashSet::new()),
             ledger,
             work_thresholds,
+            keys: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn insert_key(&self, priv_key: PrivateKey) -> PublicKey {
+        let pub_key = priv_key.public_key();
+        self.keys.lock().insert(pub_key, priv_key);
+        pub_key
+    }
+
+    pub fn create_block(
+        &self, 
+        pub_key: &PublicKey, 
+        previous: BlockHash, 
+        representative: PublicKey, 
+        balance: Amount, 
+        link: Link, 
+        work: WorkNonce
+    ) -> anyhow::Result<Block> {
+        let keys = self.keys.lock();
+        let prv = keys.get(pub_key).ok_or_else(|| anyhow!("Key not found in wallet"))?;
+        let args = StateBlockArgs {
+            key: prv,
+            previous,
+            representative,
+            balance,
+            link,
+            work,
+        };
+        Ok(Block::from(args))
+    }
+
+    pub fn get_key(&self, pub_key: &PublicKey) -> Option<PrivateKey> {
+        self.keys.lock().get(pub_key).cloned()
     }
 
     pub fn work_update(
@@ -45,7 +79,7 @@ impl Wallet {
         true
     }
 
-    pub fn exists(&self, _pub_key: &PublicKey) -> bool {
-        false
+    pub fn exists(&self, pub_key: &PublicKey) -> bool {
+        self.keys.lock().contains_key(pub_key)
     }
 }

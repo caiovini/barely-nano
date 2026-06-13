@@ -5,7 +5,6 @@ use rsnano_core::utils::{CancellationToken, Tickable};
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_nullable_clock::Timestamp as Instant;
 use spin::Mutex;
-// // // // // // // use std::{    time::Duration, time::Instant    }; // TODO: fix this
 use tracing::debug;
 
 pub struct OnlineWeightCalculation {

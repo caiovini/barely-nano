@@ -1,8 +1,8 @@
 use crate::utils::LazyLock;
 use crate::utils::{Condvar, JoinHandle};
+use alloc::string::ToString;
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 

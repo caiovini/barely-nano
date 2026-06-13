@@ -61,7 +61,7 @@ impl<'a> BlockValidator<'a> {
 
     pub(crate) fn amount_received(&self) -> Amount {
         if self.is_genesis {
-            tracing::info!("amount_received: Genesis block detected, returning MAX");
+            tracing::debug!("amount_received: Genesis block detected, returning MAX");
             return Amount::MAX;
         }
         match &self.block {
@@ -104,7 +104,7 @@ impl<'a> BlockValidator<'a> {
     pub(crate) fn new_balance(&self) -> Amount {
         let result = self.old_balance() + self.amount_received() - self.amount_sent();
         if self.is_genesis {
-            tracing::info!("new_balance: Genesis block balance calculated as {:?}", result);
+            tracing::debug!("new_balance: Genesis block balance calculated as {:?}", result);
         }
         result
     }

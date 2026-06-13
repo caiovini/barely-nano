@@ -7,6 +7,8 @@ use core::time::Duration;
 
 use super::VerifyResult;
 
+use rsnano_network::ChannelId;
+
 #[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum QueryType {
     #[default]
@@ -40,6 +42,7 @@ pub enum QuerySource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RunningQuery {
     pub id: u64,
+    pub channel_id: ChannelId,
     pub source: QuerySource,
     pub query_type: QueryType,
     pub start: HashOrAccount,
@@ -63,6 +66,7 @@ impl RunningQuery {
             response_cutoff: Timestamp::new_test_instance() + Duration::from_secs(30),
             sent: Timestamp::new_test_instance(),
             id: 42,
+            channel_id: ChannelId::from(1),
         }
     }
 
@@ -104,6 +108,7 @@ impl RunningQuery {
             hash: spec.hash,
             count,
             id,
+            channel_id: spec.channel.channel_id(),
             sent: now,
             response_cutoff: Self::initial_response_cutoff(now, timeout),
         }

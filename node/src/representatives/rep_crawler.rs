@@ -1,17 +1,17 @@
 use alloc::sync::Arc;
-use spin::{Mutex, RwLock};
-use core::time::Duration;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::ops::DerefMut;
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
+use spin::{Mutex, RwLock};
 
 use crate::utils::BoundedVecDeque;
 use tracing::{debug, info, warn};
 
 use rsnano_core::{
-    utils::{ContainerInfo, ContainerInfoProvider},
     Account, BlockHash, Root, Vote,
+    utils::{ContainerInfo, ContainerInfoProvider},
 };
 use rsnano_ledger::{AnySet, Ledger, LedgerSet};
 use rsnano_messages::{ConfirmReq, Message};
@@ -24,8 +24,8 @@ use crate::{
     config::{NetworkParams, NodeConfig},
     consensus::{ActiveElectionsContainer, ReceivedVote},
     transport::{
-        keepalive::{KeepalivePublisher, PreconfiguredPeersKeepalive},
         MessageSender,
+        keepalive::{KeepalivePublisher, PreconfiguredPeersKeepalive},
     },
 };
 
@@ -44,6 +44,7 @@ pub struct RepCrawler {
     preconfigured_peers: Arc<PreconfiguredPeersKeepalive>,
     active_elections: Arc<RwLock<ActiveElectionsContainer>>,
     keepalive_in_progress: AtomicBool,
+    waker: Mutex<Option<core::task::Waker>>,
 }
 
 impl RepCrawler {
@@ -63,17 +64,21 @@ impl RepCrawler {
         active_elections: Arc<RwLock<ActiveElectionsContainer>>,
     ) -> Self {
         let is_dev_network = network_params.network.is_dev_network();
+
         Self {
             online_reps: Arc::clone(&online_reps),
             stats: Arc::clone(&stats),
             config: config.clone(),
-            network_params,
+            network_params: network_params.clone(),
             network,
             ledger,
             steady_clock: Arc::clone(&steady_clock),
             message_sender: Mutex::new(message_sender),
             preconfigured_peers: {
-                info!("Initializing RepCrawler with {} preconfigured peers", config.preconfigured_peers.len());
+                debug!(
+                    "Initializing RepCrawler with {} preconfigured peers",
+                    config.preconfigured_peers.len()
+                );
                 Arc::new(PreconfiguredPeersKeepalive::new(
                     config.preconfigured_peers,
                     keepalive_publisher,
@@ -93,12 +98,16 @@ impl RepCrawler {
             }),
             active_elections,
             keepalive_in_progress: AtomicBool::new(false),
+            waker: Mutex::new(None),
         }
     }
 
     pub fn stop(&self) {
         let mut guard = self.rep_crawler_impl.lock();
         guard.stopped = true;
+        if let Some(waker) = self.waker.lock().take() {
+            waker.wake();
+        }
     }
 
     /// Called when a non-replay vote arrives that might be of interest to rep crawler.
@@ -107,6 +116,7 @@ impl RepCrawler {
         let Some(channel) = vote.channel.clone() else {
             return false;
         };
+
         let mut guard = self.rep_crawler_impl.lock();
         let mut processed = false;
 
@@ -120,11 +130,6 @@ impl RepCrawler {
             let done;
 
             if found {
-                debug!(
-                    "Processing response for block: {} from: {}",
-                    target_hash,
-                    channel.peer_addr()
-                );
                 self.stats
                     .inc_dir(StatType::RepCrawler, DetailType::Response, Direction::In);
 
@@ -136,6 +141,11 @@ impl RepCrawler {
 
                 responses.push_back(vote.clone());
                 query.replies += 1;
+                debug!(
+                    "RepCrawler: matched response for block: {} from: {}",
+                    target_hash,
+                    channel.peer_addr()
+                );
                 processed = true;
                 done = true
             } else {
@@ -145,25 +155,41 @@ impl RepCrawler {
             done
         });
 
+        if processed {
+            if let Some(waker) = self.waker.lock().take() {
+                waker.wake();
+            }
+        }
+
         processed
     }
 
     /// Attempt to determine if the peer manages one or more representative accounts
     pub fn query(&self, target_channels: Vec<Arc<Channel>>) {
+        if !target_channels.is_empty() {}
         let hash_root = self.prepare_query_target();
 
         let mut guard = self.rep_crawler_impl.lock();
 
         for channel in target_channels {
-            guard.track_rep_request(hash_root, channel.channel_id(), self.steady_clock.now());
-            self.stats
-                .inc_dir(StatType::RepCrawler, DetailType::QuerySent, Direction::In);
-
             let req = Message::ConfirmReq(ConfirmReq::new(vec![hash_root]));
 
-            self.message_sender
+            let result = self.message_sender
                 .lock()
                 .try_send(&channel, &req, TrafficType::RepCrawler);
+            
+            if result {
+                guard.track_rep_request(hash_root, channel.channel_id(), self.steady_clock.now());
+            }
+
+            debug!(
+                "RepCrawler: query sent for block: {} to: {} (result: {:?})",
+                hash_root.0,
+                channel.peer_addr(),
+                result
+            );
+            self.stats
+                .inc_dir(StatType::RepCrawler, DetailType::QuerySent, Direction::In);
         }
     }
 
@@ -171,12 +197,20 @@ impl RepCrawler {
     pub fn query_with_priority(&self, target_channel: Arc<Channel>) {
         let mut guard = self.rep_crawler_impl.lock();
         guard.prioritized.push(target_channel);
+        drop(guard);
+        
+        if let Some(waker) = self.waker.lock().take() {
+            waker.wake();
+        }
     }
 
     pub fn force_process2(&self, vote: ReceivedVote) {
         assert!(self.network_params.network.is_dev_network());
         let mut guard = self.rep_crawler_impl.lock();
         guard.responses.push_back(vote);
+        if let Some(waker) = self.waker.lock().take() {
+            waker.wake();
+        }
     }
 
     pub fn force_query(&self, hash: BlockHash, channel_id: ChannelId) {
@@ -187,11 +221,13 @@ impl RepCrawler {
             channel_id,
             time: self.steady_clock.now(),
             replies: 0,
-        })
+        });
+        if let Some(waker) = self.waker.lock().take() {
+            waker.wake();
+        }
     }
 
     pub fn run(&self) {
-        // tracing::info!("[rep_crawler] run() called");
         let mut guard = self.rep_crawler_impl.lock();
         if guard.stopped {
             return;
@@ -223,11 +259,12 @@ impl RepCrawler {
         }
 
         let interval = self.query_interval(sufficient_weight);
-        
+
         self.stats
             .inc_dir(StatType::RepCrawler, DetailType::Loop, Direction::In);
 
         if !guard.responses.is_empty() {
+            debug!("RepCrawler: processing {} responses", guard.responses.len());
             self.validate_and_process(guard);
             guard = self.rep_crawler_impl.lock();
         }
@@ -259,6 +296,13 @@ impl RepCrawler {
                 .network
                 .read()
                 .shuffled_channels(TrafficType::RepCrawler);
+            
+            debug!(
+                "RepCrawler: loop [sufficient_weight: {}] [channels: {}]",
+                sufficient_weight,
+                random_peers.len()
+            );
+
             random_peers.truncate(required_peer_count);
 
             guard = self.rep_crawler_impl.lock();
@@ -267,6 +311,7 @@ impl RepCrawler {
                 random_peers,
                 self.steady_clock.now(),
             );
+            debug!("RepCrawler: targets: {}", targets.len());
             drop(guard);
             self.query(targets);
             let loopback = self.network.read().loopback().clone();
@@ -283,6 +328,7 @@ impl RepCrawler {
             self.online_reps.lock().minimum_principal_weight(),
             self.config.rep_crawler_weight_minimum,
         );
+        debug!("RepCrawler: validate_and_process starting. weight minimum: {}", minimum.to_string_dec());
 
         for vote in responses.iter() {
             let Some(channel) = vote.channel.clone() else {
@@ -291,9 +337,10 @@ impl RepCrawler {
             let rep_weight = self.ledger.weight(&vote.voter);
             if rep_weight < minimum {
                 debug!(
-                    "Ignoring vote from account: {} with too little voting weight: {}",
+                    "RepCrawler: ignoring vote from account: {} with too little voting weight: {} (minimum: {})",
                     Account::from(vote.voter).encode_account(),
-                    rep_weight.to_string_dec()
+                    rep_weight.to_string_dec(),
+                    minimum.to_string_dec()
                 );
                 continue;
             }
@@ -430,9 +477,7 @@ impl RepCrawlerImpl {
                 .last_request_elapsed(channel.channel_id(), now);
 
             match elapsed {
-                Some(last_request_elapsed) => {
-                    last_request_elapsed >= rep_query_interval
-                }
+                Some(last_request_elapsed) => last_request_elapsed >= rep_query_interval,
                 None => {
                     let max_attemts = if sufficient_weight {
                         CONSERVATIVE_MAX_ATTEMPTS
@@ -459,16 +504,23 @@ impl RepCrawlerImpl {
             time: now,
             replies: 0,
         });
-        self.online_reps
-            .lock()
-            .on_rep_request(channel_id, now);
+        self.online_reps.lock().on_rep_request(channel_id, now);
     }
 
     fn cleanup(&mut self) {
         let now = self.clock.now();
-        self.queries.retain(|query| {
-            now.elapsed(query.time) < self.query_timeout
-        });
+        let initial_count = self.queries.len();
+        self.queries
+            .retain(|query| query.time.elapsed(now) < self.query_timeout);
+        let removed = initial_count - self.queries.len();
+        if removed > 0 {
+            debug!(
+                "RepCrawler: cleaned up {} expired queries (timeout: {}ms, total pending: {})", 
+                removed, 
+                self.query_timeout.as_millis(),
+                self.queries.len()
+            );
+        }
     }
 }
 
@@ -498,8 +550,9 @@ impl OrderedQueries {
         }
     }
 
-    pub const ELEMENT_SIZE: usize =
-        core::mem::size_of::<QueryEntry>() + core::mem::size_of::<BlockHash>() + core::mem::size_of::<usize>() * 3;
+    pub const ELEMENT_SIZE: usize = core::mem::size_of::<QueryEntry>()
+        + core::mem::size_of::<BlockHash>()
+        + core::mem::size_of::<usize>() * 3;
 
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -572,18 +625,58 @@ impl OrderedQueries {
     }
 }
 
+struct RepCrawlerFuture {
+    rep_crawler: Arc<RepCrawler>,
+}
+
+impl core::future::Future for RepCrawlerFuture {
+    type Output = ();
+
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        let this = &self.rep_crawler;
+        
+        *this.waker.lock() = Some(cx.waker().clone());
+        
+        if this.rep_crawler_impl.lock().stopped {
+            return core::task::Poll::Ready(());
+        }
+
+        this.run();
+
+        let guard = this.rep_crawler_impl.lock();
+        let sufficient_weight = {
+            let reps = this.online_reps.lock();
+            let current_total_weight = reps.peered_weight();
+            current_total_weight > reps.quorum_delta()
+        };
+        let interval = this.query_interval(sufficient_weight);
+        let elapsed = match guard.last_query {
+            Some(last) => this.steady_clock.now() - last,
+            None => Duration::ZERO,
+        };
+        let sleep_duration = if elapsed >= interval {
+            Duration::ZERO
+        } else {
+            interval - elapsed
+        };
+        
+        let waker = cx.waker().clone();
+        kernel_common::async_rt::spawn(async move {
+            kernel_common::async_rt::sleep(sleep_duration).await;
+            waker.wake();
+        });
+
+        core::task::Poll::Pending
+    }
+}
+
 pub trait RepCrawlerExt {
     fn start(&self);
 }
 
 impl RepCrawlerExt for Arc<RepCrawler> {
     fn start(&self) {
-        let this = self.clone();
-        kernel_common::async_rt::spawn(async move {
-            loop {
-                this.run();
-                kernel_common::async_rt::sleep(Duration::from_secs(3)).await;
-            }
-        });
+        let rep_crawler = self.clone();
+        kernel_common::async_rt::spawn(RepCrawlerFuture { rep_crawler });
     }
 }

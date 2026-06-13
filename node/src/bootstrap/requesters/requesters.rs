@@ -1,12 +1,11 @@
+use crate::utils::{Condvar, JoinHandle};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
-use spin::{ Mutex, RwLock };
-use crate::utils::{Condvar, JoinHandle};
+use spin::{Mutex, RwLock};
 
 use rsnano_ledger::Ledger;
-use rsnano_network::token_bucket::TokenBucket;
 use rsnano_network::Network;
+use rsnano_network::token_bucket::TokenBucket;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{Stats, StatsCollection, StatsSource};
 
@@ -18,7 +17,9 @@ use super::{
 };
 use crate::{
     block_processing::BlockProcessorQueue,
-    bootstrap::{state::BootstrapState, AscPullQuerySpec, BootstrapConfig, BootstrapPromise, PollResult},
+    bootstrap::{
+        AscPullQuerySpec, BootstrapConfig, BootstrapPromise, PollResult, state::BootstrapState,
+    },
     transport::MessageSender,
 };
 
@@ -34,7 +35,7 @@ pub(crate) struct Requesters {
     threads: Mutex<Option<RequesterThreads>>,
     ledger: Arc<Ledger>,
     block_processor_queue: Arc<BlockProcessorQueue>,
-    network: Arc<RwLock<Network>>,
+    pub(crate) network: Arc<RwLock<Network>>,
     stats_sources: Mutex<Vec<Arc<dyn StatsSource + Send + Sync>>>,
 }
 
@@ -145,52 +146,54 @@ impl Requesters {
 
     fn spawn_query<T>(
         &self,
-        name: impl Into<String>,
+        name: &'static str,
         query_factory: T,
         runner: Arc<BootstrapPromiseRunner>,
     ) -> JoinHandle<()>
     where
         T: BootstrapPromise<AscPullQuerySpec> + Send + 'static,
     {
-        let name = name.into();
         tracing::info!("Spawning bootstrap requester: {}", name);
         let message_sender = self.message_sender.clone();
         let clock = self.clock.clone();
         let stats = self.stats.clone();
-        kernel_common::async_rt::spawn(async move {
+        kernel_common::async_rt::spawn_named(
+            async move {
+                let mut promise = SendQueriesPromise::new(
+                    query_factory,
+                    QuerySender::new(message_sender, clock, stats),
+                );
 
-            let mut promise = SendQueriesPromise::new(query_factory, QuerySender::new(
-                message_sender,
-                clock,
-                stats,
-            ));
-            
-            loop {
-                if runner.state.lock().stopped { break; }
-                
-                let now = runner.clock.now();
-
-                let result = {
-                    let mut state = runner.state.lock();
-                    promise.poll(&mut state, now)
-                };
-
-
-                match result {
-                    PollResult::Finished(_) => {
-                        // Already handled by SendQueriesPromise::poll
-                        kernel_common::async_rt::yield_now().await;
+                loop {
+                    if runner.state.lock().stopped {
+                        break;
                     }
-                    PollResult::Wait => {
-                        // Yield and wait a bit
-                        kernel_common::async_rt::sleep(core::time::Duration::from_millis(100)).await;
-                    }
-                    PollResult::Progress => {
-                        kernel_common::async_rt::yield_now().await;
+
+                    let now = runner.clock.now();
+
+                    let result = {
+                        let mut state = runner.state.lock();
+                        promise.poll(&mut state, now)
+                    };
+
+                    match result {
+                        PollResult::Finished(_) => {
+                            // This should not happen for SendQueriesPromise
+                        }
+                        PollResult::Wait => {
+                            // All channels busy or rate limited, wait a bit
+                            kernel_common::async_rt::sleep(core::time::Duration::from_millis(10))
+                                .await;
+                        }
+                        PollResult::Progress => {
+                            // Sent a query, try to send more immediately!
+                            kernel_common::async_rt::yield_now().await;
+                        }
                     }
                 }
-            }
-        });
+            },
+            Some(name),
+        );
         JoinHandle::new()
     }
 }

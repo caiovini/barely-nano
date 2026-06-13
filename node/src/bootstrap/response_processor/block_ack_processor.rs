@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use spin::{ Mutex};
+use spin::Mutex;
 
 use rsnano_messages::BlocksAckPayload;
 use rsnano_network::ChannelId;
@@ -30,14 +30,19 @@ impl BlockAckProcessor {
         }
     }
 
-    pub fn process(&self, query: &RunningQuery, response: &BlocksAckPayload) -> bool {
+    pub fn process(
+        &self,
+        query: &RunningQuery,
+        response: &BlocksAckPayload,
+        channel_id: ChannelId,
+    ) -> bool {
         self.stats
             .inc(StatType::BootstrapProcess, DetailType::Blocks);
 
         let result = query.verify_blocks(response);
         match result {
             VerifyResult::Ok => {
-                self.process_valid_blocks(query, response);
+                self.process_valid_blocks(query, response, channel_id);
                 true
             }
             VerifyResult::NothingNew => {
@@ -52,7 +57,7 @@ impl BlockAckProcessor {
         }
     }
 
-    fn process_valid_blocks(&self, query: &RunningQuery, response: &BlocksAckPayload) {
+    fn process_valid_blocks(&self, query: &RunningQuery, response: &BlocksAckPayload, channel_id: ChannelId) {
         self.stats
             .inc(StatType::BootstrapVerifyBlocks, DetailType::Ok);
         self.stats.add_dir(
@@ -66,7 +71,23 @@ impl BlockAckProcessor {
 
         // Avoid re-processing the block we already have
         assert!(blocks.len() >= 1);
-        if blocks.front().unwrap().hash() == query.start.into() {
+        let start_hash = match query.query_type {
+            crate::bootstrap::state::QueryType::BlocksByHash => query.start.into(),
+            crate::bootstrap::state::QueryType::BlocksByAccount => {
+                // If it's by account, we might want to skip the open block if we already have it.
+                // But query.start is the account, not the open block hash.
+                // For now, let's just skip if it's an open block for the right account.
+                let first = blocks.front().unwrap();
+                if first.is_open() && first.account_field().unwrap() == query.start.into() {
+                    first.hash()
+                } else {
+                    rsnano_core::BlockHash::zero()
+                }
+            }
+            _ => rsnano_core::BlockHash::zero(),
+        };
+
+        if blocks.front().unwrap().hash() == start_hash {
             blocks.pop_front();
         }
 
@@ -80,7 +101,7 @@ impl BlockAckProcessor {
                     .push(BlockContext::new_with_callback(
                         block,
                         BlockSource::Bootstrap,
-                        ChannelId::LOOPBACK,
+                        channel_id,
                         Box::new(move |_| {
                             stats.inc(StatType::Bootstrap, DetailType::TimestampReset);
                             {
@@ -93,7 +114,7 @@ impl BlockAckProcessor {
                 self.block_processor_queue.push(BlockContext::new(
                     block,
                     BlockSource::Bootstrap,
-                    ChannelId::LOOPBACK,
+                    channel_id,
                 ));
             }
         }
@@ -102,6 +123,7 @@ impl BlockAckProcessor {
     fn process_empty_response(&self, query: &RunningQuery) {
         self.stats
             .inc(StatType::BootstrapVerifyBlocks, DetailType::NothingNew);
+
 
         {
             let mut guard = self.state.lock();
@@ -126,8 +148,6 @@ impl BlockAckProcessor {
                 }
                 PriorityDownResult::InvalidAccount => {}
             }
-
-            guard.candidate_accounts.reset_last_request(&query.account);
         }
     }
 }

@@ -21,3 +21,4 @@ strum = { version = "0.26", default-features = false, features = ["derive"] }
 strum_macros = { version = "0.26", default-features = false }
 spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock", "once"] }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc"] }
+kernel-common = { path = "../common" }

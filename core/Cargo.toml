@@ -9,7 +9,7 @@ edition = "2021"
 rsnano_nullable_random = { path = "../nullables/random" }
 rsnano_output_tracker = { path = "../nullables/output_tracker" }
 rsnano_nullable_clock = { path = "../nullables/clock" }
-tools = { package = "rsnano_sha", path = "../tools/sha" }
+tools = { package = "rsnano_sha", path = "../nullables/sha" }
 rand = { version = "0.9.2", default-features = false }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more"] }
 anyhow = { version = "1", default-features = false }

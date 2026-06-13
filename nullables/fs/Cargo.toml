@@ -6,5 +6,5 @@ edition = "2021"
 [dependencies]
 rsnano_output_tracker = { path = "../output_tracker" }
 kernel-common = { path = "../../common", features = ["smode"] }
-rsnano_sha = { path = "../../tools/sha" }
+rsnano_sha = { path = "../sha" }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }

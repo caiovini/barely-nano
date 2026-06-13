@@ -52,12 +52,20 @@ impl VoteTimestamp {
         Self(u64::from_le_bytes(bytes))
     }
 
+    pub fn from_be_bytes(bytes: [u8; 8]) -> Self {
+        Self(u64::from_be_bytes(bytes))
+    }
+
     pub fn to_ne_bytes(&self) -> [u8; 8] {
         self.0.to_ne_bytes()
     }
 
     pub fn to_le_bytes(&self) -> [u8; 8] {
         self.0.to_le_bytes()
+    }
+
+    pub fn to_be_bytes(&self) -> [u8; 8] {
+        self.0.to_be_bytes()
     }
 }
 

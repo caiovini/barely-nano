@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, BufReader, Write},
 };
 
-use tracing::info;
+use tracing::debug;
 
 use rsnano_core::RawKey;
 
@@ -21,7 +21,7 @@ pub(crate) fn create_account_map(
     let mut should_create_new_file = true;
 
     if account_keys_path.exists() {
-        info!("Loading account keys from {account_keys_path:?}");
+        debug!("Loading account keys from {account_keys_path:?}");
         let file = File::open(&account_keys_path).unwrap();
         let reader = BufReader::new(file);
         for line in reader.lines() {
@@ -32,7 +32,7 @@ pub(crate) fn create_account_map(
     }
 
     if should_create_new_file {
-        info!("Creating account keys file with {account_count} keys: {account_keys_path:?}");
+        debug!("Creating account keys file with {account_count} keys: {account_keys_path:?}");
 
         account_map = AccountMap::default();
         account_map.fill(account_count);

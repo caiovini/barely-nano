@@ -21,7 +21,7 @@ impl TcpListener {
         let network_adapter = self.network_adapter.clone();
         let cancel_token = self.cancel_token.clone();
 
-        async_rt::spawn(async move {
+        async_rt::spawn_named(async move {
             loop {
                 if cancel_token.is_cancelled() {
                     break;
@@ -47,7 +47,7 @@ impl TcpListener {
                     ::kernel_common::async_rt::sleep(core::time::Duration::from_millis(10)).await;
                 }
             }
-        });
+        }, Some("TcpListener"));
     }
 
     pub fn stop(&self) {

@@ -1,6 +1,5 @@
 use alloc::collections::{ BTreeMap, VecDeque };
 use alloc::sync::Arc;
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use spin::{ Mutex };
 use crate::utils::{Condvar, JoinHandle};
@@ -76,9 +75,10 @@ impl UncheckedMap {
     pub fn put(&self, dependency: HashOrAccount, info: UncheckedInfo) {
         let mut lock = self.mutable.lock();
         let key = UncheckedKey::new(dependency.into(), info.block.hash());
-        let inserted = lock.entries_container.insert(Entry::new(key, info));
+        let inserted = lock.entries_container.insert(Entry::new(key, info.clone()));
         if lock.entries_container.len() > self.max_unchecked_blocks {
             lock.entries_container.pop_front();
+            // tracing::debug!("UncheckedMap: limit reached ({}), evicted oldest block", self.max_unchecked_blocks);
         }
         if inserted {
             self.stats.inc(StatType::Unchecked, DetailType::Put);
@@ -107,6 +107,7 @@ impl UncheckedMap {
         let mut lock = self.mutable.lock();
         lock.buffer.push_back(*dependency);
         drop(lock);
+        tracing::debug!("UncheckedMap: trigger for {}", dependency);
         self.stats.inc(StatType::Unchecked, DetailType::Trigger);
         self.condition.notify_all(); // Notify run ()
     }
@@ -159,7 +160,7 @@ impl UncheckedMap {
             .for_each_with_dependency(dependency, action, predicate)
     }
 
-    pub fn set_satisfied_observer(&self, callback: Box<dyn Fn(&UncheckedInfo) + Send>) {
+    pub fn set_satisfied_observer(&self, callback: Arc<dyn Fn(&UncheckedInfo) + Send + Sync>) {
         self.mutable.lock().satisfied_callback = Some(callback);
     }
 
@@ -176,6 +177,8 @@ impl UncheckedMap {
             lock = self.mutable.lock();
             lock.writing_back_buffer = false;
             back_buffer_lock.clear();
+        } else {
+            // tracing::debug!("UncheckedMap: run_once (buffer empty)");
         }
     }
 }
@@ -208,7 +211,7 @@ struct ThreadMutableData {
     buffer: VecDeque<HashOrAccount>,
     writing_back_buffer: bool,
     entries_container: EntriesContainer,
-    satisfied_callback: Option<Box<dyn Fn(&UncheckedInfo) + Send>>,
+    satisfied_callback: Option<Arc<dyn Fn(&UncheckedInfo) + Send + Sync>>,
 }
 
 impl ThreadMutableData {
@@ -263,22 +266,33 @@ impl UncheckedMapThread {
     }
 
     pub fn query_impl(&self, hash: &HashOrAccount) {
-        let mut delete_queue = Vec::new();
-        let mut lock = self.mutable.lock();
-        lock.entries_container.for_each_with_dependency(
-            hash,
-            |key, info| {
-                delete_queue.push(key.clone());
-                self.stats.inc(StatType::Unchecked, DetailType::Satisfied);
-                if let Some(callback) = &lock.satisfied_callback {
-                    callback(info);
+        let mut satisfied = Vec::new();
+        {
+            let mut lock = self.mutable.lock();
+            lock.entries_container.for_each_with_dependency(
+                hash,
+                |key, info| {
+                    satisfied.push((key.clone(), info.clone()));
+                },
+                || true,
+            );
+            
+            if !self.disable_delete {
+                for (key, _) in &satisfied {
+                    lock.entries_container.remove(key);
                 }
-            },
-            || true,
-        );
-        if !self.disable_delete {
-            for key in &delete_queue {
-                lock.entries_container.remove(key);
+            }
+        }
+
+        for (_, info) in satisfied {
+            self.stats.inc(StatType::Unchecked, DetailType::Satisfied);
+            let callback = {
+                let lock = self.mutable.lock();
+                lock.satisfied_callback.as_ref().map(|cb| Arc::clone(&cb))
+            };
+            
+            if let Some(callback) = callback {
+                callback(&info);
             }
         }
     }

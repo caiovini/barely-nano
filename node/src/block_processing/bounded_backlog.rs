@@ -246,6 +246,7 @@ impl ContainerInfoProvider for BoundedBacklog {
     }
 }
 
+#[allow(dead_code)]
 struct BoundedBacklogImpl {
     mutex: Mutex<BacklogData>,
     condition: Condvar,
@@ -257,6 +258,7 @@ struct BoundedBacklogImpl {
     publish_event: Mutex<Option<BackpressureSender<LedgerEvent>>>,
 }
 
+#[allow(dead_code)]
 impl BoundedBacklogImpl {
     fn run_once(&self) {
         let mut guard = self.mutex.lock();

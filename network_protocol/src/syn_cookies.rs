@@ -55,6 +55,7 @@ impl SynCookies {
                     created_at: self.clock.now(),
                 },
             );
+            
             Some(cookie)
         } else {
             None
@@ -96,10 +97,10 @@ impl SynCookies {
         }
     }
 
-    /// Get cookie associated with endpoint and erases that cookie from this container
     pub fn cookie(&self, endpoint: &SocketAddrV6) -> Option<Cookie> {
         let ip_addr = endpoint.ip();
         let mut lock = self.data.lock();
+
         let info = lock.cookies.remove(endpoint);
         if info.is_some() {
             lock.dec_cookie_count(*ip_addr);

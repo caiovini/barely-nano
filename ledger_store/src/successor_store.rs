@@ -1,5 +1,5 @@
 use rsnano_core::BlockHash;
-use kernel_common::storage::DB;
+use kernel_common::storage::{SHARDS, get_shard_index};
 use kernel_common::storage::btree::KEY_SIZE;
 
 pub struct BtreeSuccessorStore {}
@@ -18,23 +18,29 @@ impl BtreeSuccessorStore {
         key
     }
 
-    pub fn put(&self, block: &BlockHash, successor: &BlockHash) {
-        let key = self.make_key(block);
+    pub fn put(&self, hash: &BlockHash, successor: &BlockHash) {
+        let key = self.make_key(hash);
         let mut value = [0u8; 512];
-        value[..32].copy_from_slice(successor.as_bytes());
+        value[0..32].copy_from_slice(successor.as_bytes());
         
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.insert(key, value);
+            db.insert(key, &value[0..32]);
         }
     }
 
     pub fn get(&self, hash: &BlockHash) -> Option<BlockHash> {
         let key = self.make_key(hash);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             if let Some(value) = db.search(&key) {
-                return Some(BlockHash::from_bytes(value[..32].try_into().unwrap()));
+                if value.len() == 32 {
+                    return Some(BlockHash::from_bytes(value[0..32].try_into().unwrap()));
+                } else {
+                    tracing::debug!("SuccessorStore: garbage value found for hash {}, length={}", hash, value.len());
+                }
             }
         }
         None
@@ -42,7 +48,8 @@ impl BtreeSuccessorStore {
 
     pub fn del(&self, hash: &BlockHash) {
         let key = self.make_key(hash);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.delete(key);
         }

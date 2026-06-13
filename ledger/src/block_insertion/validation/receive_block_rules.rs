@@ -11,6 +11,7 @@ impl<'a> BlockValidator<'a> {
 
     fn ensure_source_block_exists(&self) -> Result<(), BlockError> {
         if self.is_receive() && !self.source_block_exists && !self.is_genesis {
+            tracing::debug!("GapSource triggered: is_receive={}, source_block_exists={}, is_genesis={}", self.is_receive(), self.source_block_exists, self.is_genesis);
             Err(BlockError::GapSource)
         } else {
             Ok(())

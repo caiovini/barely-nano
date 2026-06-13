@@ -134,9 +134,9 @@ pub struct FrontierScanConfig {
 impl Default for FrontierScanConfig {
     fn default() -> Self {
         Self {
-            parallelism: 128,
+            parallelism: 8,
             consideration_count: 4,
-            candidates: 1000,
+            candidates: 128,
             cooldown: Duration::from_secs(5),
         }
     }

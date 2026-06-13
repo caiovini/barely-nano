@@ -47,7 +47,7 @@ impl BootstrapPromise<AscPullQuerySpec> for DependencyRequester {
                 }
             },
             DependencyState::WaitBlocking(ref channel) => {
-                if let Some(spec) = state.next_blocking_query(channel) {
+                if let Some(spec) = state.next_blocking_query(channel, now) {
                     self.stats
                         .inc(StatType::BootstrapNext, DetailType::NextBlocking);
                     self.state = DependencyState::Initial;

@@ -1,9 +1,5 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
-use crate::RpcCommandHandler;
 use rsnano_node::wallets::WalletsExt;
+use crate::RpcCommandHandler;
 use rsnano_rpc_messages::{AccountResponse, WalletAddArgs};
 
 impl RpcCommandHandler {
@@ -12,7 +8,7 @@ impl RpcCommandHandler {
         let pub_key = self
             .node
             .wallets
-            .insert_adhoc2(&args.wallet, &args.key, generate_work)?;
+            .insert_adhoc2(&args.wallet, args.key.as_bytes(), generate_work)?;
         Ok(AccountResponse::new(pub_key.as_account()))
     }
 }

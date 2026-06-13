@@ -1,0 +1,11 @@
+[package]
+name = "rsnano_sha"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rsnano_sha"
+path = "src/lib.rs"
+
+[features]
+simd = []

@@ -2,7 +2,7 @@ ENTRY(_start);
 
 MEMORY
 {
-  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 128M
+  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 2048M
 }
 
 SECTIONS
@@ -28,8 +28,10 @@ SECTIONS
   _stack_top = . + 0x80000;
   . = _stack_top;
 
-  /* Heap: 32MB */
+  /* Heap: 1536MB (1.5GB) */
+  . = ALIGN(4096);
+  . = 0xA0000000;
   _heap_start = .;
-  . = . + 0x2000000;
+  . = . + 0x60000000;
   _heap_end = .;
 }

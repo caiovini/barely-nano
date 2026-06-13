@@ -10,15 +10,23 @@ u256_struct!(Account);
 
 impl Account {
     pub fn encode_account(&self) -> String {
-        let mut number = U512::from_big_endian(&self.0);
-        let check = U512::from_little_endian(&self.account_checksum());
+        let mut bytes_64 = [0u8; 64];
+        bytes_64[32..].copy_from_slice(&self.0);
+        let mut number = U512::from_big_endian(&bytes_64);
+        
+        let mut check_64 = [0u8; 64];
+        let mut checksum = self.account_checksum();
+        checksum.reverse();
+        check_64[59..].copy_from_slice(&checksum);
+        let check = U512::from_big_endian(&check_64);
+        
         number <<= 40;
         number |= check;
 
         let mut result = String::with_capacity(65);
 
         for _i in 0..60 {
-            let r = number.byte(0) & 0x1f_u8;
+            let r = (number.low_u64() & 0x1f) as u8;
             number >>= 5;
             result.push(account_encode(r));
         }
@@ -90,9 +98,10 @@ struct EncodedAccountU512(U512);
 
 impl EncodedAccountU512 {
     fn account_bytes(&self) -> [u8; 32] {
-        let bytes_512 = (self.0 >> 40).to_big_endian();
+        let number = self.0 >> 40;
+        let bytes_64 = number.to_big_endian();
         let mut bytes_256 = [0u8; 32];
-        bytes_256.copy_from_slice(&bytes_512[32..]);
+        bytes_256.copy_from_slice(&bytes_64[32..]);
         bytes_256
     }
 
@@ -177,11 +186,15 @@ impl<'a> EncodedAccountStr<'a> {
         }
 
         let mut number = U512::default();
-        for character in self.chars_after_prefix() {
+        for (i, character) in self.chars_after_prefix().enumerate() {
             match self.decode_byte(character) {
                 Some(byte) => {
-                    number <<= 5;
-                    number = number + byte;
+                    if i == 0 {
+                        number = U512::from(byte & 0x1);
+                    } else {
+                        number <<= 5;
+                        number = number + byte;
+                    }
                 }
                 None => bail!("invalid hex string"),
             }
@@ -417,5 +430,13 @@ mod tests {
             error.to_string(),
             "invalid value: string \"INVALID\", expected an account in the form \"nano_...\" at line 1 column 9"
         );
+    }
+
+    #[test]
+    fn genesis_account_test() {
+        let genesis_addr = "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3";
+        let account = Account::decode_account(genesis_addr).expect("Failed to decode");
+        let encoded = account.encode_account();
+        assert_eq!(genesis_addr, encoded);
     }
 }

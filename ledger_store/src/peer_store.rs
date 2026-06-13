@@ -1,4 +1,5 @@
-use kernel_common::storage::DB;
+use kernel_common::storage::{SHARDS, get_shard_index, SHARD_COUNT};
+use kernel_common::storage::btree::KEY_SIZE;
 use rsnano_core::utils::SocketAddrV6;
 use rsnano_nullable_clock::SystemTime;
 use alloc::vec::Vec;
@@ -18,10 +19,10 @@ impl BtreePeerStore {
 
     pub fn put(&self, endpoint: SocketAddrV6, _timestamp: SystemTime) {
         let key = self.make_key(&endpoint);
-        let value = [0u8; 512];
-        // value[0..8].copy_from_slice(&timestamp.as_secs().to_be_bytes());
+        let value = &[]; // Just mark existence
         
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.insert(key, value);
         }
@@ -29,7 +30,8 @@ impl BtreePeerStore {
 
     pub fn del(&self, endpoint: SocketAddrV6) {
         let key = self.make_key(&endpoint);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.delete(key);
         }
@@ -37,7 +39,8 @@ impl BtreePeerStore {
 
     pub fn exists(&self, endpoint: SocketAddrV6) -> bool {
         let key = self.make_key(&endpoint);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.search(&key).is_some()
         } else {
@@ -45,9 +48,33 @@ impl BtreePeerStore {
         }
     }
 
+    pub fn for_each<F>(&self, mut f: F)
+    where
+        F: FnMut(SocketAddrV6, SystemTime),
+    {
+        let mut start_key = [0u8; KEY_SIZE];
+        start_key[0] = Self::TABLE_ID;
+
+        for i in 0..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                let mut it = db.iter(start_key);
+                while let Some((k, _)) = it.next_kv() {
+                    if k[0] != Self::TABLE_ID {
+                        break;
+                    }
+                    let ip = core::net::Ipv6Addr::from(<[u8; 16]>::try_from(&k[1..17]).unwrap());
+                    let port = u16::from_be_bytes(k[17..19].try_into().unwrap());
+                    let endpoint = SocketAddrV6::new(ip, port, 0, 0);
+                    f(endpoint, SystemTime::UNIX_EPOCH); // Placeholder time
+                }
+            }
+        }
+    }
+
     pub fn iter(&self) -> Vec<(SocketAddrV6, SystemTime)> {
-        let result = Vec::new();
-        // Simplified iteration for now
+        let mut result = Vec::new();
+        self.for_each(|e, t| result.push((e, t)));
         result
     }
 }

@@ -119,6 +119,10 @@ impl BufferWriter for MemoryStream {
     fn write_u64_ne_safe(&mut self, value: u64) {
         self.write_bytes_safe(&value.to_ne_bytes());
     }
+
+    fn write_u64_le_safe(&mut self, value: u64) {
+        self.write_bytes_safe(&value.to_le_bytes());
+    }
 }
 
 impl Stream for MemoryStream {
@@ -169,6 +173,7 @@ pub trait BufferWriter {
     fn write_u32_be_safe(&mut self, value: u32);
     fn write_u64_be_safe(&mut self, value: u64);
     fn write_u64_ne_safe(&mut self, value: u64);
+    fn write_u64_le_safe(&mut self, value: u64);
 }
 
 impl<'a> MutStreamAdapter<'a> {
@@ -216,6 +221,10 @@ impl<'a> BufferWriter for MutStreamAdapter<'a> {
 
     fn write_u64_ne_safe(&mut self, value: u64) {
         self.write_bytes_safe(&value.to_ne_bytes())
+    }
+
+    fn write_u64_le_safe(&mut self, value: u64) {
+        self.write_bytes_safe(&value.to_le_bytes())
     }
 }
 

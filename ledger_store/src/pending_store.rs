@@ -1,5 +1,5 @@
 use rsnano_core::{PendingKey, PendingInfo, utils::{Serialize, Deserialize, BufferReader, MutStreamAdapter}};
-use kernel_common::storage::DB;
+use kernel_common::storage::{SHARDS, get_shard_index, SHARD_COUNT};
 use kernel_common::storage::btree::KEY_SIZE;
 use alloc::vec::Vec;
 
@@ -18,12 +18,14 @@ impl BtreePendingStore {
         key_bytes[1..65].copy_from_slice(&key.to_bytes());
 
         let mut val_bytes = [0u8; 512];
-        let mut stream = MutStreamAdapter::new(&mut val_bytes);
-        info.serialize(&mut stream);
-
-        let mut guard = DB.lock();
-        if let Some(btree) = guard.as_mut() {
-            btree.insert(key_bytes, val_bytes);
+        let mut adapter = MutStreamAdapter::new(&mut val_bytes);
+        info.serialize(&mut adapter);
+        let len = adapter.bytes_written();
+        
+        let shard_idx = get_shard_index(&key_bytes);
+        let mut lock = SHARDS[shard_idx].lock();
+        if let Some(btree) = lock.as_mut() {
+            btree.insert(key_bytes, &val_bytes[0..len]);
         }
     }
 
@@ -32,8 +34,9 @@ impl BtreePendingStore {
         key_bytes[0] = Self::TABLE_ID;
         key_bytes[1..65].copy_from_slice(&key.to_bytes());
 
-        let mut guard = DB.lock();
-        let btree = guard.as_mut()?;
+        let shard_idx = get_shard_index(&key_bytes);
+        let mut lock = SHARDS[shard_idx].lock();
+        let btree = lock.as_mut()?;
         let val_bytes = btree.search(&key_bytes)?;
         
         let mut reader = BufferReader::new(&val_bytes);
@@ -45,22 +48,25 @@ impl BtreePendingStore {
         key_bytes[0] = Self::TABLE_ID;
         key_bytes[1..65].copy_from_slice(&key.to_bytes());
 
-        let mut guard = DB.lock();
-        if let Some(btree) = guard.as_mut() {
+        let shard_idx = get_shard_index(&key_bytes);
+        let mut lock = SHARDS[shard_idx].lock();
+        if let Some(btree) = lock.as_mut() {
             btree.delete(key_bytes);
         }
     }
 
-    pub fn iter(&self) -> Vec<(PendingKey, PendingInfo)> {
+    pub fn iter_for_account(&self, account: &rsnano_core::Account) -> Vec<(PendingKey, PendingInfo)> {
         let mut results = Vec::new();
         let mut start_key = [0u8; KEY_SIZE];
         start_key[0] = Self::TABLE_ID;
+        start_key[1..33].copy_from_slice(account.as_bytes());
 
-        let mut guard = DB.lock();
-        if let Some(btree) = guard.as_mut() {
+        let shard_idx = get_shard_index(&start_key);
+        let mut lock = SHARDS[shard_idx].lock();
+        if let Some(btree) = lock.as_mut() {
             let mut it = btree.iter(start_key);
             while let Some((k, v)) = it.next_kv() {
-                if k[0] != Self::TABLE_ID {
+                if k[0] != Self::TABLE_ID || &k[1..33] != account.as_bytes() {
                     break;
                 }
                 let mut reader = BufferReader::new(&v);
@@ -72,6 +78,39 @@ impl BtreePendingStore {
                 }
             }
         }
+        results
+    }
+
+    pub fn for_each<F>(&self, mut f: F)
+    where
+        F: FnMut(PendingKey, PendingInfo),
+    {
+        let mut start_key = [0u8; KEY_SIZE];
+        start_key[0] = Self::TABLE_ID;
+
+        for i in 0..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(btree) = lock.as_mut() {
+                let mut it = btree.iter(start_key);
+                while let Some((k, v)) = it.next_kv() {
+                    if k[0] != Self::TABLE_ID {
+                        break;
+                    }
+                    let mut reader = BufferReader::new(&v);
+                    if let Ok(info) = PendingInfo::deserialize(&mut reader) {
+                        let mut key_reader = BufferReader::new(&k[1..]);
+                        if let Ok(key) = PendingKey::deserialize(&mut key_reader) {
+                            f(key, info);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn iter(&self) -> Vec<(PendingKey, PendingInfo)> {
+        let mut results = Vec::new();
+        self.for_each(|key, info| results.push((key, info)));
         results
     }
 }

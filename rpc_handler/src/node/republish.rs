@@ -1,13 +1,12 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
 use crate::RpcCommandHandler;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use anyhow::anyhow;
+use core::time::Duration;
+use core::usize;
 use rsnano_core::{Block, BlockHash, PendingKey};
 use rsnano_ledger::AnySet;
 use rsnano_rpc_messages::{BlockHashesResponse, RepublishArgs};
-use std::{time::Duration, usize};
 
 impl RpcCommandHandler {
     pub(crate) fn republish(&self, args: RepublishArgs) -> anyhow::Result<BlockHashesResponse> {
@@ -34,6 +33,7 @@ impl RpcCommandHandler {
                 let mut block_a = self.load_block_any(&any, &source);
 
                 while let Ok(b) = block_a {
+                    let b: Block = b;
                     if hashes.len() >= sources {
                         break;
                     }
@@ -57,7 +57,7 @@ impl RpcCommandHandler {
             // Republish destination chain
             if destinations != 0 {
                 let block_b = self.load_block_any(&any, &hash)?;
-                if let Some(destination) = block_b.destination() {
+                if let Some(destination) = block_b.destination_field() {
                     if any
                         .get_pending(&PendingKey::new(destination, hash))
                         .is_none()

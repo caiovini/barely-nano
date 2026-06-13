@@ -65,35 +65,34 @@ impl BtreeStore {
         self.cache.reset();
         
         // Block count
-        let blocks = self.block.iter();
-        self.cache.block_count.store(blocks.len() as u64, Ordering::SeqCst);
+        self.cache.block_count.store(self.block.count() as u64, Ordering::SeqCst);
         
         // Account count
-        let accounts = self.account.iter(rsnano_core::Account::zero());
-        self.cache.account_count.store(accounts.len() as u64, Ordering::SeqCst);
+        self.cache.account_count.store(self.account.count() as u64, Ordering::SeqCst);
         
         // Confirmed count
-        let conf_heights = self.confirmation_height.iter();
-        let total_confirmed: u64 = conf_heights.iter().map(|(_, info)| info.height).sum();
-        self.cache.confirmed_count.store(total_confirmed, Ordering::SeqCst);
+        self.cache.confirmed_count.store(self.confirmation_height.sum_heights(), Ordering::SeqCst);
     }
 
     pub fn tx_begin_read(&self) -> () { () }
     pub fn tx_begin_write(&self) -> () { () }
 
     pub fn flush(&self) -> anyhow::Result<()> {
-        let mut lock = kernel_common::storage::DB.lock();
-        if let Some(db) = lock.as_mut() {
-            db.flush().map_err(|e: virtio_drivers::Error| anyhow::anyhow!("DB flush failed: {:?}", e))
-        } else {
-            Ok(())
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            let mut lock = kernel_common::storage::SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                db.flush().map_err(|e: virtio_drivers::Error| anyhow::anyhow!("DB shard {} flush failed: {:?}", i, e))?;
+            }
         }
+        Ok(())
     }
 
     pub fn wipe(&self) {
-        let mut lock = kernel_common::storage::DB.lock();
-        if let Some(db) = lock.as_mut() {
-            db.wipe();
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            let mut lock = kernel_common::storage::SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                db.wipe();
+            }
         }
         self.cache.reset();
     }

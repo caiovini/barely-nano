@@ -27,6 +27,7 @@ pub(crate) struct BlockValidator<'a> {
     pub any_pending_exists: bool,
     pub source_block_exists: bool,
     pub is_genesis: bool,
+    pub signature_verified: bool,
     pub now: UnixMillisTimestamp,
 }
 

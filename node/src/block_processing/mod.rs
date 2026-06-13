@@ -45,6 +45,7 @@ pub struct ProcessedResult {
     pub source: BlockSource,
     pub status: Result<(), BlockError>,
     pub saved_block: Option<SavedBlock>,
+    pub channel_id: rsnano_network::ChannelId,
 }
 
 #[derive(

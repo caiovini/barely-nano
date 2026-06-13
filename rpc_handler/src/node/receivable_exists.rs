@@ -1,14 +1,10 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
 use crate::RpcCommandHandler;
+use alloc::sync::Arc;
 use anyhow::bail;
 use rsnano_core::{BlockHash, PendingKey};
 use rsnano_ledger::{AnySet, ConfirmedSet};
 use rsnano_node::Node;
 use rsnano_rpc_messages::{ExistsResponse, ReceivableExistsArgs};
-use alloc::sync::Arc;
 
 impl RpcCommandHandler {
     pub(crate) fn receivable_exists(

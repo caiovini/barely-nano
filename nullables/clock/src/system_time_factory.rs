@@ -10,7 +10,7 @@ impl SystemTime {
 
     pub fn now() -> Self {
         let ticks = kernel_common::clint::mtime();
-        let uptime_nanos = ticks * 100;
+        let uptime_nanos = (ticks as u128 * 1_000_000_000 / kernel_common::clint::FREQ as u128) as u64;
         let offset_nanos = kernel_common::clint::get_time_offset_ns();
         SystemTime(Duration::from_nanos(uptime_nanos + offset_nanos))
     }

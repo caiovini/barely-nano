@@ -36,7 +36,7 @@ impl QuerySender {
             message_sender,
             clock,
             stats,
-            request_timeout: Duration::from_secs(15),
+            request_timeout: Duration::from_secs(60),
             send_listener: OutputListenerMt::new(),
         }
     }
@@ -50,6 +50,7 @@ impl QuerySender {
         )
     }
 
+    #[allow(dead_code)]
     pub fn set_request_timeout(&mut self, timeout: Duration) {
         self.request_timeout = timeout;
     }
@@ -79,6 +80,7 @@ impl QuerySender {
             self.stats
                 .inc(StatType::BootstrapRequest, query_type.into());
 
+
             // After the request has been sent, the peer has a limited time to respond
             query.response_cutoff = now + self.request_timeout;
             state.running_queries.insert(query);
@@ -93,6 +95,7 @@ impl QuerySender {
         } else {
             self.stats
                 .inc(StatType::Bootstrap, DetailType::RequestFailed);
+            state.scoring.request_finished(spec.channel.channel_id());
             None
         }
     }

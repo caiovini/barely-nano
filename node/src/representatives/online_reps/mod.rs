@@ -229,13 +229,14 @@ impl OnlineReps {
     /// Returns whether it is a rep which has more than min weight
     pub fn vote_observed(&mut self, rep_account: PublicKey, now: Timestamp) -> bool {
         let weight = self.rep_weights.weight(&rep_account);
-        if weight < self.representative_weight_minimum && self.online_weight != Amount::zero() {
+
+        if weight < self.representative_weight_minimum {
             return false;
         }
 
         let new_insert = self.online_reps.insert(rep_account, now);
-
         if new_insert {
+            tracing::info!("Representative registered: {}", rep_account.as_account().encode_account());
             self.calculate_online_weight();
         }
         true
@@ -278,7 +279,8 @@ impl OnlineReps {
     ) -> InsertResult {
         let is_rep = self.vote_observed(rep_account, now);
         if is_rep {
-            self.peered_reps.update_or_insert(rep_account, channel, now)
+            let res = self.peered_reps.update_or_insert(rep_account, channel, now);
+            res
         } else {
             InsertResult::Updated
         }

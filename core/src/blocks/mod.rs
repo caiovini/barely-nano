@@ -125,6 +125,9 @@ pub trait BlockBase {
         QualifiedRoot::new(self.root(), self.previous())
     }
     fn valid_predecessor(&self, block_type: BlockType) -> bool;
+    fn verify_signature(&self, pub_key: &PublicKey) -> anyhow::Result<()> {
+        pub_key.verify(self.hash().as_bytes(), self.signature())
+    }
 }
 
 pub fn serialized_block_size(block_type: BlockType) -> usize {
@@ -252,6 +255,17 @@ impl Block {
             BlockType::Invalid | BlockType::NotABlock => bail!("invalid block type"),
         };
         Ok(block)
+    }
+
+    pub fn verify_signature(&self) -> anyhow::Result<()> {
+        match self {
+            Block::State(b) => b.verify_signature(),
+            _ => anyhow::bail!("Legacy blocks require a public key to verify signature"),
+        }
+    }
+
+    pub fn verify_with_key(&self, pub_key: &PublicKey) -> anyhow::Result<()> {
+        self.as_block().verify_signature(pub_key)
     }
 
     pub fn deserialize(stream: &mut dyn Stream) -> anyhow::Result<Block> {

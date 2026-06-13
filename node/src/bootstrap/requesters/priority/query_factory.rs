@@ -47,13 +47,6 @@ impl QueryFactory {
         let (head, confirmed_frontier) = self.get_account_info(&next.account);
         let pull_type = self.pull_type_decider.decide_pull_type();
 
-        tracing::debug!(
-            "QueryFactory: next account={}, head={}, pull_type={:?}",
-            next.account.encode_account(),
-            head,
-            pull_type
-        );
-
         Some(self.create_priority_query(&next, channel, pull_type, head, confirmed_frontier))
     }
 
@@ -78,6 +71,9 @@ impl QueryFactory {
         confirmed_frontier: BlockHash,
     ) -> AscPullQuerySpec {
         let pull_start = { PullStart::new(pull_type, next.account, head, confirmed_frontier) };
+        
+
+
         let req_type = AscPullReqType::Blocks(BlocksReqPayload {
             start_type: pull_start.start_type,
             start: pull_start.start,

@@ -4,8 +4,8 @@ const _MTIME_ADDR: usize = CLINT_BASE + 0x0000_BFF8;
 #[cfg(feature = "mmode")]
 const MTIMECMP_ADDR: usize = CLINT_BASE + 0x0000_4000; // hart 0
 
-// CLINT timer frequency on QEMU virt machine: 10 MHz
-pub const FREQ: u64 = 10_000_000;
+// CLINT timer frequency on Orange Pi RV2 (SpacemiT K1): 24 MHz
+pub const FREQ: u64 = 24_000_000;
 
 /// Read the current time.
 /// - M-mode: reads directly from CLINT MMIO (fast).
@@ -28,7 +28,11 @@ pub fn mtime_raw() -> u64 {
 }
 
 pub fn mtime() -> u64 {
-    mtime_raw() + (TIME_OFFSET_NS.load(Ordering::Relaxed) / 100)
+    let offset_ns = TIME_OFFSET_NS.load(Ordering::Relaxed);
+    // Use u128 to avoid overflow when offset_ns is large (e.g. Unix epoch nanoseconds)
+    // (1.7e18 ns * 24e6 Hz) >> 64
+    let offset_cycles = (offset_ns as u128 * FREQ as u128 / 1_000_000_000) as u64;
+    mtime_raw().wrapping_add(offset_cycles)
 }
 
 /// Write mtimecmp for hart 0. M-mode only — S-mode must use SBI set_timer.

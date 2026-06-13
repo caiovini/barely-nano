@@ -22,6 +22,7 @@ impl<'a> BlockValidator<'a> {
     pub(crate) fn ensure_open_block_has_link(&self) -> Result<(), BlockError> {
         if let Block::State(state) = self.block {
             if self.block.is_open() && state.link().is_zero() {
+                tracing::debug!("GapSource triggered in Open: is_open={}, link={}", self.block.is_open(), state.link());
                 return Err(BlockError::GapSource);
             }
         }

@@ -2,20 +2,19 @@
 
 extern crate alloc;
 
-use alloc::string::ToString;
-
 mod ledger;
 mod node;
 mod utils;
-// mod wallets;
+mod wallets;
 
+use alloc::string::ToString;
+use alloc::sync::Arc;
 use anyhow::anyhow;
 use rsnano_core::{Account, AccountInfo};
 use rsnano_ledger::AnySet;
 use rsnano_node::Node;
 use rsnano_rpc_messages::{RpcCommand, RpcError, StatsType};
 use serde_json::{to_value, Value};
-use alloc::sync::Arc;
 use tracing::debug;
 use utils::*;
 
@@ -30,7 +29,11 @@ pub struct RpcCommandHandler {
 
 impl RpcCommandHandler {
     #[cfg(not(target_os = "none"))]
-    pub fn new(node: Arc<Node>, enable_control: bool, tx_stop: tokio::sync::oneshot::Sender<()>) -> Self {
+    pub fn new(
+        node: Arc<Node>,
+        enable_control: bool,
+        tx_stop: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
         Self {
             node,
             enable_control,
@@ -66,7 +69,9 @@ impl RpcCommandHandler {
             RpcCommand::AccountWeight(args) => to_value(self.account_weight(args)),
             RpcCommand::AccountsBalances(args) => to_value(self.accounts_balances(args)),
             RpcCommand::AccountsReceivable(args) => to_value(self.accounts_receivable(args)),
-            RpcCommand::AccountsRepresentatives(args) => to_value(self.accounts_representatives(args)),
+            RpcCommand::AccountsRepresentatives(args) => {
+                to_value(self.accounts_representatives(args))
+            }
             RpcCommand::BlockCount => to_value(self.block_count()),
             RpcCommand::BlockHash(args) => to_value(block_hash(args)),
             RpcCommand::BlockInfo(args) => to_value(self.block_info(args)?),
@@ -75,7 +80,6 @@ impl RpcCommandHandler {
             RpcCommand::ConfirmationActive(args) => to_value(self.confirmation_active(args)),
             RpcCommand::ConfirmationQuorum(args) => to_value(self.confirmation_quorum(args)),
             RpcCommand::FrontierCount => to_value(self.frontier_count()),
-            RpcCommand::Keepalive(_) => self.not_implemented(),
             RpcCommand::Peers(args) => to_value(self.peers(args)),
             RpcCommand::Representatives(args) => to_value(self.representatives(args)),
             RpcCommand::Telemetry(args) => to_value(self.telemetry(args)?),
@@ -88,11 +92,44 @@ impl RpcCommandHandler {
             RpcCommand::AccountKey(args) => to_value(account_key(args)),
             RpcCommand::AccountGet(args) => to_value(account_get(args)),
             RpcCommand::Ledger(args) => to_value(self.ledger(args)),
-            RpcCommand::Stats(_) |
-            RpcCommand::StatsClear => self.not_implemented(),
+            RpcCommand::Process(args) => Ok(self.process(args)?),
+            RpcCommand::Send(args) => to_value(self.send(args)?),
+            RpcCommand::Receive(args) => to_value(self.receive(args)?),
+
+            // Newly activated node commands
+            RpcCommand::BlockCreate(args) => to_value(self.block_create(args)?),
+            RpcCommand::ConfirmationHistory(args) => to_value(self.confirmation_history(args)),
+            RpcCommand::ConfirmationInfo(args) => to_value(self.confirmation_info(args)?),
+            RpcCommand::Keepalive(_) => self.not_implemented(),
+            RpcCommand::NodeId => to_value(self.node_id()),
+            RpcCommand::PopulateBacklog => self.not_implemented(),
+            RpcCommand::Receivable(args) => to_value(self.receivable(args)),
+            RpcCommand::ReceivableExists(args) => to_value(self.receivable_exists(args)?),
+            RpcCommand::RepresentativesOnline(args) => to_value(self.representatives_online(args)),
+            RpcCommand::Republish(args) => to_value(self.republish(args)?),
+            RpcCommand::Sign(args) => to_value(self.sign(args)?),
+            RpcCommand::Stats(args) => to_value(self.stats(args)?),
+            RpcCommand::Stop => to_value(self.stop()),
+            RpcCommand::Unchecked(args) => to_value(self.unchecked(args)),
+            RpcCommand::UncheckedClear => to_value(self.unchecked_clear()),
+            RpcCommand::UncheckedGet(args) => to_value(self.unchecked_get(args)?),
+            RpcCommand::UncheckedKeys(args) => to_value(self.unchecked_keys(args)),
+
+            // Newly activated ledger commands
+            RpcCommand::AccountsFrontiers(args) => to_value(self.accounts_frontiers(args)),
+            RpcCommand::AvailableSupply => to_value(self.available_supply()),
+            RpcCommand::BlockAccount(args) => to_value(self.block_account(args)?),
+            RpcCommand::BlockConfirm(args) => to_value(self.block_confirm(args)?),
+            RpcCommand::Chain(args) => to_value(self.chain(args, false)),
+            RpcCommand::Successors(args) => to_value(self.chain(args, true)),
+            RpcCommand::Delegators(args) => to_value(self.delegators(args)),
+            RpcCommand::DelegatorsCount(args) => to_value(self.delegators_count(args)),
+            RpcCommand::Frontiers(args) => to_value(self.frontiers(args)),
+            RpcCommand::Unopened(args) => to_value(self.unopened(args)),
+            RpcCommand::WalletAdd(args) => to_value(self.wallet_add(args)?),
+            RpcCommand::WalletCreate(args) => to_value(self.wallet_create(args)?),
+
             _ => self.not_implemented(),
-
-
         }?;
 
         Ok(response)
@@ -106,11 +143,19 @@ impl RpcCommandHandler {
         }
     }
 
-
-
     fn load_account(&self, any: &dyn AnySet, account: &Account) -> anyhow::Result<AccountInfo> {
         any.get_account(account)
             .ok_or_else(|| anyhow!(Self::ACCOUNT_NOT_FOUND))
+    }
+
+    fn load_block_any(
+        &self,
+        any: &dyn AnySet,
+        hash: &rsnano_core::BlockHash,
+    ) -> anyhow::Result<rsnano_core::Block> {
+        any.get_block(hash)
+            .map(|sb| sb.into())
+            .ok_or_else(|| anyhow!(Self::BLOCK_NOT_FOUND))
     }
 
     const BLOCK_NOT_FOUND: &str = "Block not found";
@@ -168,8 +213,6 @@ fn requires_control(command: &RpcCommand) -> bool {
         _ => false,
     }
 }
-
-
 
 #[cfg(test)]
 use serde::de::DeserializeOwned;

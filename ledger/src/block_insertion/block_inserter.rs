@@ -44,13 +44,22 @@ impl<'a> BlockInserter<'a> {
 
         let sideband = self.instructions.set_sideband.clone();
         let saved_block = SavedBlock::new(self.block.clone(), sideband);
+        
+        tracing::debug!(
+            "BlockInserter: inserting block {} for account {}",
+            saved_block.hash(),
+            saved_block.account().encode_account()
+        );
+
         self.ledger.store.block.put(&saved_block);
+        
         if !saved_block.previous().is_zero() {
             self.ledger.store.successors.put(
                 &saved_block.previous(),
                 &saved_block.hash(),
             );
         }
+        
         self.update_account();
         self.delete_old_pending_info();
         self.insert_new_pending_info();

@@ -9,7 +9,7 @@ use rsnano_stats::{StatsCollection, StatsSource};
 
 use super::{
     backlog_waiter::BacklogWaiter, block_batch_processor::BlockBatchProcessorStats,
-    BlockProcessorQueue, LedgerEvent, UncheckedMap,
+    BlockContext, BlockProcessorQueue, LedgerEvent, UncheckedMap,
 };
 use crate::block_processing::block_batch_processor::BlockBatchProcessor;
 
@@ -21,6 +21,7 @@ pub struct BlockProcessor {
     process_stats: Arc<BlockBatchProcessorStats>,
     backlog_waiter: Arc<BacklogWaiter>,
     event_publisher: Mutex<Option<BackpressureSender<LedgerEvent>>>,
+    pub signature_checker: Arc<crate::signatures::SignatureChecker>,
 }
 
 impl BlockProcessor {
@@ -30,6 +31,7 @@ impl BlockProcessor {
         unchecked: Arc<UncheckedMap>,
         backlog_waiter: Arc<BacklogWaiter>,
         event_publisher: BackpressureSender<LedgerEvent>,
+        signature_checker: Arc<crate::signatures::SignatureChecker>,
     ) -> Self {
         Self {
             queue,
@@ -39,9 +41,13 @@ impl BlockProcessor {
             threads: Mutex::new(Vec::new()),
             backlog_waiter,
             event_publisher: Mutex::new(Some(event_publisher)),
+            signature_checker,
         }
     }
 
+    /// In bare-metal mode, the BlockProcessor is driven manually
+    /// by Hart 2 in main/src/bin.rs. This start() method remains as a 
+    /// no-op placeholder for architectural consistency.
     pub fn start(&self, _thread_count: usize) {
         // debug_assert!(self.threads.lock().is_empty());
         // for _ in 0..thread_count {
@@ -64,6 +70,7 @@ impl BlockProcessor {
     }
 
     pub fn run_once(&self) {
+
         let mut loop_state = self.create_loop();
         loop_state.run_once();
     }
@@ -88,6 +95,7 @@ impl BlockProcessor {
                 .unwrap()
                 .clone(),
             clock: Arc::new(rsnano_nullable_clock::SteadyClock::default()), // TODO: use real clock
+            signature_checker: self.signature_checker.clone(),
         }
     }
 
@@ -102,6 +110,26 @@ impl BlockProcessor {
 
     pub fn total_queue_len(&self) -> usize {
         self.queue.total_queue_len()
+    }
+
+    pub fn try_total_queue_len(&self) -> Result<usize, ()> {
+        if let Some(guard) = self.queue.try_lock_internal() {
+            Ok(guard.total_queue_len())
+        } else {
+            Err(())
+        }
+    }
+
+    pub fn total_processed(&self) -> u64 {
+        self.process_stats.total_processed()
+    }
+
+    pub fn push(&self, context: Arc<BlockContext>) -> bool {
+        self.queue.push(context)
+    }
+
+    pub fn try_push(&self, context: Arc<BlockContext>) -> Result<bool, ()> {
+        self.queue.try_push(context)
     }
 }
 
@@ -127,8 +155,6 @@ impl BlockProcessorLoop {
     #[allow(dead_code)]
     pub fn run(&mut self) {
         while let Some(blocks) = self.queue.pop_blocking() {
-            self.backlog_waiter.wait_for_backlog();
-
             if self.queue.stopped() {
                 break;
             }
@@ -138,9 +164,14 @@ impl BlockProcessorLoop {
     }
 
     pub fn run_once(&mut self) {
-        if let Some(blocks) = self.queue.pop() {
-            self.backlog_waiter.wait_for_backlog();
+        let mut count = 0;
+        while let Some(blocks) = self.queue.pop() {
             self.process.process_blocks(blocks);
+            
+            count += 1;
+            if count >= 16 || self.queue.stopped() {
+                break;
+            }
         }
     }
 }

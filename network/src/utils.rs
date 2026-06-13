@@ -204,7 +204,9 @@ impl<'a> Future for WaitForCancellationFuture<'a> {
             if self.token.is_cancelled() {
                 Poll::Ready(())
             } else {
-                wakers.push(cx.waker().clone());
+                if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                    wakers.push(cx.waker().clone());
+                }
                 Poll::Pending
             }
         }

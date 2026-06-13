@@ -1,7 +1,4 @@
-use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
 use crate::RpcCommandHandler;
 use indexmap::IndexMap;
 use rsnano_core::{Amount, BlockHash};
@@ -29,8 +26,8 @@ impl RpcCommandHandler {
         let should_sort = sorting && !simple;
 
         let mut peers_simple = Vec::new();
-        let mut peers_source: IndexMap<BlockHash, SourceInfo> = IndexMap::new();
-        let mut peers_amount: IndexMap<BlockHash, Amount> = IndexMap::new();
+        let mut peers_source = IndexMap::default();
+        let mut peers_amount = IndexMap::default();
         let any = self.node.ledger.any();
 
         let receivables = any.account_receivable_upper_bound(args.account, BlockHash::zero());
@@ -84,7 +81,7 @@ impl RpcCommandHandler {
             } else if offset >= peers_amount.len() {
                 peers_amount.clear();
             } else {
-                peers_amount.sort_by(|_, v1, _, v2| v2.cmp(v1));
+                peers_amount.sort_by(|_, v1: &Amount, _, v2: &Amount| v2.cmp(v1));
                 peers_amount = peers_amount.split_off(offset);
                 peers_amount.truncate(count);
             }

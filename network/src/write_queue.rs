@@ -23,6 +23,7 @@ impl WriteQueue {
                 move |_| max_size,
                 |traffic_type| match traffic_type {
                     TrafficType::BlockBroadcast | TrafficType::VoteRebroadcast => 1,
+                    TrafficType::BootstrapRequests | TrafficType::BootstrapServer => 32,
                     _ => 4,
                 },
             )),
@@ -94,7 +95,9 @@ impl WriteQueue {
                 return Some(entry);
             }
 
+            kernel_common::uart::putchar(b'n');
             self.notify_enqueued.notified().await;
+            kernel_common::uart::putchar(b'q');
         }
     }
 

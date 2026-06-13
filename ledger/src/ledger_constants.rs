@@ -163,3 +163,14 @@ pub const DEV_GENESIS_PUB_KEY: PublicKey = PublicKey::from_bytes([
 pub static DEV_GENESIS_BLOCK: Lazy<Block> = Lazy::new(|| {
     serde_json::from_str(DEV_GENESIS_DATA).unwrap()
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_print_live_genesis_hash() {
+        let constants = LedgerConstants::new(rsnano_work::WorkThresholds::none(), Networks::NanoLiveNetwork);
+        std::println!("LIVE GENESIS HASH: {}", constants.genesis_block.hash().encode_hex());
+    }
+}

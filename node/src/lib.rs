@@ -26,6 +26,7 @@ pub mod pruning;
 mod recently_cemented_inserter;
 pub mod representatives;
 pub mod telemetry;
+pub mod signatures;
 pub mod transport;
 pub mod utils;
 pub mod wallets;

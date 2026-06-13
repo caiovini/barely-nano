@@ -2,7 +2,7 @@ use super::WorkRequest;
 use rsnano_core::WorkNonce;
 
 #[derive(Default)]
-pub(crate) struct DistributedWorkClient {}
+pub struct DistributedWorkClient {}
 
 impl DistributedWorkClient {
     pub async fn generate_work(

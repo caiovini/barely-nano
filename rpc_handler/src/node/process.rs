@@ -1,7 +1,3 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
 use anyhow::{anyhow, bail};
 
 use rsnano_core::{Block, BlockBase, BlockType};
@@ -81,7 +77,6 @@ impl RpcCommandHandler {
                         self.node
                             .active
                             .write()
-                            .unwrap()
                             .erase(&block.qualified_root());
                         self.node.block_processor_queue.push(BlockContext::new(
                             block,

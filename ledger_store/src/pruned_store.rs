@@ -1,5 +1,5 @@
 use rsnano_core::BlockHash;
-use kernel_common::storage::DB;
+use kernel_common::storage::{SHARDS, get_shard_index};
 use kernel_common::storage::btree::KEY_SIZE;
 
 pub struct BtreePrunedStore {}
@@ -20,9 +20,10 @@ impl BtreePrunedStore {
 
     pub fn put(&self, hash: &BlockHash) {
         let key = self.make_key(hash);
-        let value = [1u8; 512]; // Just store '1' to indicate pruned
+        let value = &[]; // Just mark existence
         
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.insert(key, value);
         }
@@ -30,7 +31,8 @@ impl BtreePrunedStore {
 
     pub fn exists(&self, hash: &BlockHash) -> bool {
         let key = self.make_key(hash);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.search(&key).is_some()
         } else {

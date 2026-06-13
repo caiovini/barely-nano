@@ -36,6 +36,7 @@ pub struct ElectionSchedulers {
     pub hinted: Arc<HintedScheduler>,
     pub manual: Arc<ManualScheduler>,
     notify_listener: OutputListenerMt<()>,
+    #[allow(dead_code)]
     config: NodeConfig,
     ledger: Arc<Ledger>,
     activate_successors_listener: OutputListenerMt<SavedBlock>,

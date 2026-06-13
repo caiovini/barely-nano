@@ -50,20 +50,28 @@ pub fn backpressure_channel<T>(
 }
 
 impl<T> BackpressureSender<T> {
-    /// Send a value to the channel and track the size
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
         self.queue.lock().push_back(t);
         self.queue_size.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Get the current size of the channel
+    pub fn try_send(&self, t: T) -> Result<(), SendError<T>> {
+        let mut q = self.queue.lock();
+        if q.len() < 1024 { // Hard limit to prevent memory exhaustion
+            q.push_back(t);
+            self.queue_size.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err(SendError(t))
+        }
+    }
+
     pub fn len(&self) -> usize {
         let len = self.queue_size.load(Ordering::Relaxed);
         max(len, 0) as usize
     }
 
-    /// Check if the channel is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

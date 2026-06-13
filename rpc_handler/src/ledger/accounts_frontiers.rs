@@ -1,7 +1,4 @@
-use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::string::ToString;
-use alloc::vec;
 use crate::RpcCommandHandler;
 use rsnano_ledger::AnySet;
 use rsnano_rpc_messages::{AccountsRpcMessage, FrontiersResponse};

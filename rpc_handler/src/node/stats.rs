@@ -1,50 +1,19 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
-use std::time::SystemTime;
 
 use crate::RpcCommandHandler;
 use rsnano_core::utils::ContainerInfo;
 use rsnano_rpc_messages::{StatsArgs, StatsType, SuccessResponse};
-use rsnano_stats::{StatsJsonWriter, StatsLogSink};
 
 impl RpcCommandHandler {
     pub(crate) fn stats(&self, args: StatsArgs) -> anyhow::Result<serde_json::Value> {
         match args.stats_type {
             StatsType::Counters => {
-                let mut sink = StatsJsonWriter::new();
-                let now = SystemTime::now();
-                sink.write_header("counters", now)?;
-                {
-                    let stats = self.node.stats();
-                    for (key, value) in stats.iter() {
-                        sink.write_counter_entry(
-                            now,
-                            key.stat,
-                            key.detail,
-                            key.dir.as_str(),
-                            *value,
-                        )?;
-                    }
-                }
-                sink.finalize();
-                sink.add(
-                    "stat_duration_seconds",
-                    self.node.stats.last_reset().as_secs(),
-                );
-                Ok(sink.finish())
+                // StatsJsonWriter is disabled in no_std for now
+                self.not_implemented().map_err(|e| anyhow::anyhow!(e))
             }
             StatsType::Samples => {
-                let mut sink = StatsJsonWriter::new();
-                self.node.stats.log_samples(&mut sink).unwrap();
-                sink.add(
-                    "stat_duration_seconds",
-                    self.node.stats.last_reset().as_secs(),
-                );
-                Ok(sink.finish())
+                self.not_implemented().map_err(|e| anyhow::anyhow!(e))
             }
-            StatsType::Database => Ok(serde_json::to_value(self.node.ledger.memory_stats()?)?),
+            StatsType::Database => Ok(serde_json::Value::Object(serde_json::Map::new())),
             StatsType::Objects => Ok(ContainerInfo::builder()
                 .node("node", self.node.container_info())
                 .finish()

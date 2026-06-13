@@ -1,15 +1,14 @@
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use crate::utils::JoinHandle;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use hashbrown::{ HashMap };
-use spin::{ Mutex };
-use core::sync::atomic::{ AtomicBool, AtomicU64, Ordering };
-use crate::utils::{JoinHandle};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::cmp::{max, min};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use hashbrown::HashMap;
+use spin::Mutex;
 
-
-use rsnano_core::{utils::BackpressureSender, BlockHash, Vote, VoteError, VoteSource};
+use rsnano_core::{BlockHash, Vote, VoteError, VoteSource, utils::BackpressureSender};
 use rsnano_network::Channel;
 use rsnano_stats::{DetailType, StatType, Stats};
 
@@ -28,8 +27,8 @@ pub struct VoteProcessorConfig {
 impl VoteProcessorConfig {
     pub fn new(parallelism: usize) -> Self {
         Self {
-            max_pr_queue: 256,
-            max_non_pr_queue: 32,
+            max_pr_queue: 2048,
+            max_non_pr_queue: 2048,
             pr_priority: 3,
             threads: max(1, min(4, parallelism / 2)),
             batch_size: 1024,
@@ -118,7 +117,6 @@ impl VoteProcessor {
             return;
         }
         if self.cool_down.load(Ordering::Relaxed) {
-            // kernel_common::uart::print(b"[node] VoteProcessor: in cool_down\n");
             return;
         }
 

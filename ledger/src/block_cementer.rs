@@ -33,34 +33,40 @@ impl<'a> BlockCementer<'a> {
         max_blocks: usize,
     ) -> Vec<SavedBlock> {
         let mut result = Vec::new();
+        let mut visited = hashbrown::HashSet::new();
 
         let mut stack = VecDeque::new();
         stack.push_back(target_hash);
         while let Some(&hash) = stack.back() {
+            if visited.contains(&hash) {
+                stack.pop_back();
+                continue;
+            }
+
             let Some(block) = self.store.block.get(&hash) else {
+                visited.insert(hash);
                 stack.pop_back();
                 continue;
             };
 
+            let mut pushed = false;
             let dependents =
                 block.dependent_blocks(&self.constants.epochs, &self.constants.genesis_account);
             for dependent in dependents.iter() {
-                if !dependent.is_zero() && !self.is_confirmed(dependent) {
+                if !dependent.is_zero() && !visited.contains(dependent) && !self.is_confirmed(dependent) {
                     self.stats.inc(
                         StatType::ConfirmationHeight,
                         DetailType::DependentUnconfirmed,
                     );
 
                     stack.push_back(*dependent);
-
-                    if stack.len() > max_blocks {
-                        stack.pop_front();
-                    }
+                    pushed = true;
                 }
             }
 
-            if stack.back() == Some(&hash) {
+            if !pushed {
                 stack.pop_back();
+                visited.insert(hash);
                 if !self.is_confirmed(&hash) {
                     let conf_height = ConfirmationHeightInfo::new(block.height(), block.hash());
 

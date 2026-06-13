@@ -62,10 +62,10 @@ global_asm!(
     ".option arch, +d",
     ".global trap_vector",
     "trap_vector:",
-    "addi sp, sp, -512",
+    "addi sp, sp, -256",
     "sd   x5,  32(sp)",  // Save t0 (x5) first!
     "sd   x1,   0(sp)",
-    "addi t0, sp, 512",
+    "addi t0, sp, 256",
     "sd   t0,   8(sp)",  // original sp
     "sd   x3,  16(sp)",
     "sd   x4,  24(sp)",
@@ -95,72 +95,8 @@ global_asm!(
     "sd   x29, 224(sp)",
     "sd   x30, 232(sp)",
     "sd   x31, 240(sp)",
-    "fsd  f0,  256(sp)",
-    "fsd  f1,  264(sp)",
-    "fsd  f2,  272(sp)",
-    "fsd  f3,  280(sp)",
-    "fsd  f4,  288(sp)",
-    "fsd  f5,  296(sp)",
-    "fsd  f6,  304(sp)",
-    "fsd  f7,  312(sp)",
-    "fsd  f8,  320(sp)",
-    "fsd  f9,  328(sp)",
-    "fsd  f10, 336(sp)",
-    "fsd  f11, 344(sp)",
-    "fsd  f12, 352(sp)",
-    "fsd  f13, 360(sp)",
-    "fsd  f14, 368(sp)",
-    "fsd  f15, 376(sp)",
-    "fsd  f16, 384(sp)",
-    "fsd  f17, 392(sp)",
-    "fsd  f18, 400(sp)",
-    "fsd  f19, 408(sp)",
-    "fsd  f20, 416(sp)",
-    "fsd  f21, 424(sp)",
-    "fsd  f22, 432(sp)",
-    "fsd  f23, 440(sp)",
-    "fsd  f24, 448(sp)",
-    "fsd  f25, 456(sp)",
-    "fsd  f26, 464(sp)",
-    "fsd  f27, 472(sp)",
-    "fsd  f28, 480(sp)",
-    "fsd  f29, 488(sp)",
-    "fsd  f30, 496(sp)",
-    "fsd  f31, 504(sp)",
     "mv   a0, sp",
     "call rust_trap_handler",
-    "fld  f0,  256(sp)",
-    "fld  f1,  264(sp)",
-    "fld  f2,  272(sp)",
-    "fld  f3,  280(sp)",
-    "fld  f4,  288(sp)",
-    "fld  f5,  296(sp)",
-    "fld  f6,  304(sp)",
-    "fld  f7,  312(sp)",
-    "fld  f8,  320(sp)",
-    "fld  f9,  328(sp)",
-    "fld  f10, 336(sp)",
-    "fld  f11, 344(sp)",
-    "fld  f12, 352(sp)",
-    "fld  f13, 360(sp)",
-    "fld  f14, 368(sp)",
-    "fld  f15, 376(sp)",
-    "fld  f16, 384(sp)",
-    "fld  f17, 392(sp)",
-    "fld  f18, 400(sp)",
-    "fld  f19, 408(sp)",
-    "fld  f20, 416(sp)",
-    "fld  f21, 424(sp)",
-    "fld  f22, 432(sp)",
-    "fld  f23, 440(sp)",
-    "fld  f24, 448(sp)",
-    "fld  f25, 456(sp)",
-    "fld  f26, 464(sp)",
-    "fld  f27, 472(sp)",
-    "fld  f28, 480(sp)",
-    "fld  f29, 488(sp)",
-    "fld  f30, 496(sp)",
-    "fld  f31, 504(sp)",
     "ld   x1,   0(sp)",
     "ld   x3,  16(sp)",
     "ld   x4,  24(sp)",
@@ -191,7 +127,7 @@ global_asm!(
     "ld   x29, 224(sp)",
     "ld   x30, 232(sp)",
     "ld   x31, 240(sp)",
-    "addi sp, sp, 512",
+    "addi sp, sp, 256",
     "mret",   // M-mode return
 );
 
@@ -201,10 +137,10 @@ global_asm!(
     ".option arch, +d",
     ".global trap_vector",
     "trap_vector:",
-    "addi sp, sp, -512",
+    "addi sp, sp, -256",
     "sd   x5,  32(sp)",  // Save t0 (x5) first!
     "sd   x1,   0(sp)",
-    "addi t0, sp, 512",
+    "addi t0, sp, 256",
     "sd   t0,   8(sp)",  // original sp
     "sd   x3,  16(sp)",
     "sd   x4,  24(sp)",
@@ -234,72 +170,8 @@ global_asm!(
     "sd   x29, 224(sp)",
     "sd   x30, 232(sp)",
     "sd   x31, 240(sp)",
-    "fsd  f0,  256(sp)",
-    "fsd  f1,  264(sp)",
-    "fsd  f2,  272(sp)",
-    "fsd  f3,  280(sp)",
-    "fsd  f4,  288(sp)",
-    "fsd  f5,  296(sp)",
-    "fsd  f6,  304(sp)",
-    "fsd  f7,  312(sp)",
-    "fsd  f8,  320(sp)",
-    "fsd  f9,  328(sp)",
-    "fsd  f10, 336(sp)",
-    "fsd  f11, 344(sp)",
-    "fsd  f12, 352(sp)",
-    "fsd  f13, 360(sp)",
-    "fsd  f14, 368(sp)",
-    "fsd  f15, 376(sp)",
-    "fsd  f16, 384(sp)",
-    "fsd  f17, 392(sp)",
-    "fsd  f18, 400(sp)",
-    "fsd  f19, 408(sp)",
-    "fsd  f20, 416(sp)",
-    "fsd  f21, 424(sp)",
-    "fsd  f22, 432(sp)",
-    "fsd  f23, 440(sp)",
-    "fsd  f24, 448(sp)",
-    "fsd  f25, 456(sp)",
-    "fsd  f26, 464(sp)",
-    "fsd  f27, 472(sp)",
-    "fsd  f28, 480(sp)",
-    "fsd  f29, 488(sp)",
-    "fsd  f30, 496(sp)",
-    "fsd  f31, 504(sp)",
     "mv   a0, sp",
     "call rust_trap_handler",
-    "fld  f0,  256(sp)",
-    "fld  f1,  264(sp)",
-    "fld  f2,  272(sp)",
-    "fld  f3,  280(sp)",
-    "fld  f4,  288(sp)",
-    "fld  f5,  296(sp)",
-    "fld  f6,  304(sp)",
-    "fld  f7,  312(sp)",
-    "fld  f8,  320(sp)",
-    "fld  f9,  328(sp)",
-    "fld  f10, 336(sp)",
-    "fld  f11, 344(sp)",
-    "fld  f12, 352(sp)",
-    "fld  f13, 360(sp)",
-    "fld  f14, 368(sp)",
-    "fld  f15, 376(sp)",
-    "fld  f16, 384(sp)",
-    "fld  f17, 392(sp)",
-    "fld  f18, 400(sp)",
-    "fld  f19, 408(sp)",
-    "fld  f20, 416(sp)",
-    "fld  f21, 424(sp)",
-    "fld  f22, 432(sp)",
-    "fld  f23, 440(sp)",
-    "fld  f24, 448(sp)",
-    "fld  f25, 456(sp)",
-    "fld  f26, 464(sp)",
-    "fld  f27, 472(sp)",
-    "fld  f28, 480(sp)",
-    "fld  f29, 488(sp)",
-    "fld  f30, 496(sp)",
-    "fld  f31, 504(sp)",
     "ld   x1,   0(sp)",
     "ld   x3,  16(sp)",
     "ld   x4,  24(sp)",
@@ -330,7 +202,7 @@ global_asm!(
     "ld   x29, 224(sp)",
     "ld   x30, 232(sp)",
     "ld   x31, 240(sp)",
-    "addi sp, sp, 512",
+    "addi sp, sp, 256",
     "sret",   // S-mode return
 );
 
@@ -356,19 +228,19 @@ pub fn init() {
 
     #[cfg(feature = "smode")]
     {
-        // S-mode CSRs: stvec, sie (STIE=bit5), sstatus (SIE=bit1)
-        // Timer cause: 5 (supervisor timer interrupt)
-        // mtimecmp writes are M-mode only — use SBI set_timer instead
-        uart::print_no_lock(b"[trap] stvec\n");
+        // S-mode CSRs: stvec, sie, sstatus
+        // We set up stvec to capture exceptions, but we do NOT configure or enable
+        // timer interrupts, because the SpacemiT K1 processor's OpenSBI firmware
+        // has a buggy/unimplemented sbi_set_timer ecall that hangs the CPU.
+        // The node's scheduler and Sleep futures use rdtime cooperative yielding
+        // and do not require preemption, and the watchdog is already continuously
+        // kicked in the main loop.
+        uart::print(b"[trap] S-mode trap vector init\n");
         csrw!("stvec", tv);
-        uart::print_no_lock(b"[trap] timer\n");
-        sbi::set_timer(clint::mtime_raw() + TIMER_INTERVAL);
-        uart::print_no_lock(b"[trap] sie\n");
-        csrs!("sie", 1usize << 5);      // STIE
-        uart::print_no_lock(b"[trap] sstatus\n");
-        // Enable FS (bits 14:13) and VS (bits 10:9)
-        csrs!("sstatus", (1usize << 1) | (3usize << 13) | (3usize << 9));  // SIE | FS=Dirty | VS=Dirty
-        uart::print_no_lock(b"[trap] done\n");
+        
+        // Enable FS (bits 14:13) and VS (bits 10:9) for vector/floating-point/SIMD ops
+        csrs!("sstatus", (3usize << 13) | (3usize << 9));
+        uart::print(b"[trap] S-mode trap vector init done\n");
     }
 }
 
@@ -393,21 +265,32 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
     let timer_cause = 5usize;
 
     if is_interrupt && cause == timer_cause {
-        let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if tick % 100 == 0 {
+        let _tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        /*if tick % 100 == 0 {
             let hart_id: usize;
             unsafe { core::arch::asm!("mv {0}, tp", out(reg) hart_id); }
             if hart_id < 10 {
-                uart::putchar_no_lock(b'!');
-                uart::putchar_no_lock(hart_id as u8 + b'0');
+                uart::putchar(b'!');
+                uart::putchar(hart_id as u8 + b'0');
             }
+        }*/
+
+        // Kick watchdog on Hart 1 timer ticks
+        let mut hart_id: usize = 0;
+        unsafe {
+            core::arch::asm!("mv {}, tp", out(reg) hart_id);
+        }
+        if hart_id == 1 {
+            crate::watchdog::kick();
         }
 
         // Schedule next tick
         #[cfg(feature = "mmode")]
         clint::set_mtimecmp(clint::mtime_raw() + TIMER_INTERVAL);
         #[cfg(feature = "smode")]
-        sbi::set_timer(clint::mtime_raw() + TIMER_INTERVAL);
+        {
+            // Do not call sbi::set_timer here since timer interrupts are disabled
+        }
     } else {
         // Exception or other interrupt
         let hart_id: usize;
@@ -416,7 +299,7 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
         // Use no_lock to avoid deadlocking if the hart was already holding the UART lock
         uart::print_no_lock(b"?");
         if hart_id < 10 {
-            uart::putchar_no_lock(hart_id as u8 + b'0');
+            uart::putchar(hart_id as u8 + b'0');
         } else {
             uart::print_usize_no_lock(hart_id);
         }

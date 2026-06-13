@@ -7,6 +7,7 @@ mod thread_pool;
 mod timer;
 mod timer_thread;
 mod bounded_vec_deque;
+mod spammer;
 
 
 use rsnano_sha::blake2b::Blake2bHasher;
@@ -22,6 +23,7 @@ pub use rate_calculator::RateCalculator;
 pub use thread_pool::*;
 pub use timer_thread::*;
 pub use bounded_vec_deque::BoundedVecDeque;
+pub use spammer::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ErrorCode {
@@ -132,12 +134,11 @@ impl Condvar {
     pub fn wait<'a, T>(&self, guard: spin::MutexGuard<'a, T>) -> Result<spin::MutexGuard<'a, T>, ()> {
         // In a no_std environment without a proper scheduler, we can't easily implement a real Condvar
         // that releases the lock and waits for a signal.
-        // Instead, we turn this into a "yield" that keeps the lock but allows other harts a tiny window
-        // if we were to drop it. But since we don't have the Mutex reference, we just spin a bit.
-        // To actually work with other harts, we'd need a better Mutex/Condvar pair.
-        // For now, returning the guard immediately turns this into a busy-wait loop in pop_blocking,
-        // which is better than being stuck forever.
-        core::hint::spin_loop();
+        // Instead, we busy-wait but try to be a bit nicer.
+        // WARNING: This holds the lock! If the condition is changed by someone who needs this lock, we DEADLOCK.
+        for _ in 0..100 {
+            core::hint::spin_loop();
+        }
         Ok(guard)
     }
 

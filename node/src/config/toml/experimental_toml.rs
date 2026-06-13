@@ -1,5 +1,5 @@
-use alloc::string::String;
 use alloc::string::ToString;
+use alloc::string::String;
 use alloc::vec::Vec;
 use crate::config::NodeConfig;
 use rsnano_core::utils::Peer;

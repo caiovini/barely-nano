@@ -3,7 +3,7 @@ use rsnano_core::{
     Account, AccountInfo,
 };
 
-use kernel_common::storage::DB;
+use kernel_common::storage::{SHARDS, get_shard_index, SHARD_COUNT};
 use kernel_common::storage::btree::KEY_SIZE;
 use alloc::sync::Arc;
 use crate::LedgerCache;
@@ -28,20 +28,22 @@ impl BtreeAccountStore {
 
     pub fn put(&self, account: &Account, info: &AccountInfo) {
         let key = self.make_key(account);
-        let mut value = [0u8; 512];
-        let mut adapter = MutStreamAdapter::new(&mut value);
+        let mut buffer = [0u8; 512];
+        let mut adapter = MutStreamAdapter::new(&mut buffer);
         info.serialize(&mut adapter);
+        let len = adapter.bytes_written();
         
-        tracing::debug!("AccountStore: putting account {}, head={}", account.encode_account(), info.head);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.insert(key, value);
+            db.insert(key, &buffer[0..len]);
         }
     }
 
     pub fn get(&self, account: &Account) -> Option<AccountInfo> {
         let key = self.make_key(account);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             if let Some(value) = db.search(&key) {
                 let mut stream = BufferReader::new(&value);
@@ -51,35 +53,57 @@ impl BtreeAccountStore {
                 }
             }
         }
-        tracing::debug!("AccountStore: NOT found account {}", account.encode_account());
+        // tracing::debug!("AccountStore: NOT found account {}", account.encode_account());
         None
     }
 
     pub fn del(&self, account: &Account) {
         let key = self.make_key(account);
-        let mut lock = DB.lock();
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.delete(key);
         }
     }
 
-    pub fn iter(&self, start: Account) -> alloc::vec::Vec<(Account, AccountInfo)> {
+    pub fn count(&self) -> usize {
+        let mut count = 0;
+        for i in 0..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                count += db.count_prefixed(Self::TABLE_ID);
+            }
+        }
+        count
+    }
+
+    pub fn for_each<F>(&self, start: Account, mut f: F)
+    where
+        F: FnMut(Account, AccountInfo),
+    {
         let start_key = self.make_key(&start);
-        let mut results = alloc::vec::Vec::new();
-        let mut lock = DB.lock();
-        if let Some(db) = lock.as_mut() {
-            let mut it = db.iter(start_key);
-            while let Some((key, value)) = it.next_kv() {
-                if key[0] != Self::TABLE_ID {
-                    break;
-                }
-                let account = Account::from_bytes(key[1..33].try_into().unwrap());
-                let mut stream = BufferReader::new(&value);
-                if let Ok(info) = AccountInfo::deserialize(&mut stream) {
-                    results.push((account, info));
+
+        for i in 0..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                let mut it = db.iter(start_key);
+                while let Some((key, value)) = it.next_kv() {
+                    if key[0] != Self::TABLE_ID {
+                        break;
+                    }
+                    let account = Account::from_bytes(key[1..33].try_into().unwrap());
+                    let mut stream = BufferReader::new(&value);
+                    if let Ok(info) = AccountInfo::deserialize(&mut stream) {
+                        f(account, info);
+                    }
                 }
             }
         }
+    }
+
+    pub fn iter(&self, start: Account) -> alloc::vec::Vec<(Account, AccountInfo)> {
+        let mut results = alloc::vec::Vec::new();
+        self.for_each(start, |acc, info| results.push((acc, info)));
         results
     }
 }

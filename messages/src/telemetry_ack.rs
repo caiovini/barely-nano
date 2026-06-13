@@ -9,9 +9,9 @@ use rsnano_core::{to_hex_string, Account, BlockHash, NodeId, PrivateKey, Signatu
 use serde_derive::Serialize;
 use core::fmt::Display;
 use core::mem::size_of;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use alloc::string::String;
-use alloc::string::ToString;
 
 #[repr(u8)]
 #[derive(FromPrimitive, Copy, Clone, PartialEq, Eq)]

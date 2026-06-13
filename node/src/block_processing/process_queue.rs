@@ -30,13 +30,13 @@ impl ProcessQueueConfig {}
 impl Default for ProcessQueueConfig {
     fn default() -> Self {
         Self {
-            max_peer_queue: 512,
-            max_system_queue: 1024,
+            max_peer_queue: 2048,
+            max_system_queue: 8192,
             priority_live: 1,
             priority_bootstrap: 8,
             priority_local: 16,
             priority_system: 32,
-            batch_size: 64,
+            batch_size: 256,
         }
     }
 }
@@ -68,7 +68,7 @@ impl ProcessQueue {
 
         Self {
             queue: FairQueue::new(max_size_query, priority_query),
-            batch_size: config.batch_size,
+            batch_size: 256,
         }
     }
 

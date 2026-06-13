@@ -21,23 +21,60 @@ impl PeerScoring {
         self.channel_limit = limit;
     }
 
+    pub const BAN_THRESHOLD: i32 = 0;
+
+    pub fn punish(&mut self, channel_id: ChannelId, penalty: i32) {
+        self.scoring.modify(channel_id, |i| {
+            i.score = i.score.saturating_sub(penalty);
+        });
+    }
+
+    pub fn reward(&mut self, channel_id: ChannelId, reward: i32) {
+        self.scoring.modify(channel_id, |i| {
+            i.score = core::cmp::min(PeerScore::INITIAL_SCORE, i.score.saturating_add(reward));
+        });
+    }
+
+    pub fn is_banned(&self, channel_id: ChannelId) -> bool {
+        if let Some(score) = self.scoring.get(channel_id) {
+            score.score <= Self::BAN_THRESHOLD
+        } else {
+            false
+        }
+    }
+
     pub fn received_message(&mut self, channel_id: ChannelId) {
         self.scoring.modify(channel_id, |i| {
-            if i.running_queries > 1 {
+            if i.running_queries > 0 {
                 i.running_queries -= 1;
                 i.response_count_total += 1;
             }
         });
     }
 
-    pub fn channel(&mut self, candidates: Vec<ChannelId>) -> Option<ChannelId> {
-        
-        candidates
-            .iter()
-            .find(|channel_id| {
-                Self::try_send_message(&mut self.scoring, **channel_id, self.channel_limit)
-            })
-            .cloned()
+    pub fn request_finished(&mut self, channel_id: ChannelId) {
+        self.scoring.modify(channel_id, |i| {
+            if i.running_queries > 0 {
+                i.running_queries -= 1;
+            }
+        });
+    }
+
+    pub fn channel(&mut self, mut candidates: Vec<ChannelId>) -> Option<ChannelId> {
+        use rand::seq::SliceRandom;
+        let mut rng = rsnano_nullable_random::NullableRng::rng();
+        candidates.shuffle(&mut rng);
+
+        let limit = self.channel_limit;
+        for channel_id in candidates {
+            if self.is_banned(channel_id) {
+                continue;
+            }
+            if Self::try_send_message(&mut self.scoring, channel_id, limit) {
+                return Some(channel_id);
+            }
+        }
+        None
     }
 
     fn try_send_message(
@@ -73,6 +110,15 @@ impl PeerScoring {
             self.scoring.remove(*channel_id);
         }
     }
+
+    pub fn banned_channels(&self) -> Vec<ChannelId> {
+        self.scoring
+            .iter()
+            .filter(|i| i.score <= Self::BAN_THRESHOLD)
+            .map(|i| i.channel_id)
+            .collect()
+    }
+
 
     pub fn container_info(&self) -> ContainerInfo {
         [("scores", self.len(), 0)].into()

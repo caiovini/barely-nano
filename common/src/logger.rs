@@ -2,16 +2,18 @@ use crate::uart;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
 
-use spin::Mutex;
-
 pub struct UartSubscriber;
 
 impl Subscriber for UartSubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.level() <= &Level::DEBUG
-            && (metadata.target().contains("rsnano")
-                || metadata.target().contains("hello_bare")
-                || metadata.target().contains("node_monitor"))
+        if metadata.level() <= &Level::INFO {
+            metadata.target().contains("node_monitor")
+                || metadata.target().contains("rep_crawler")
+                || metadata.target().contains("keepalive")
+                || metadata.level() == &Level::ERROR
+        } else {
+            false
+        }
     }
 
     fn new_span(&self, _span: &Attributes<'_>) -> Id {
@@ -23,10 +25,11 @@ impl Subscriber for UartSubscriber {
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        let _guard = uart::UART_LOCK.lock();
-        let mut visitor = UartVisitor;
-        event.record(&mut visitor);
-        uart::print_no_lock(b"\n");
+        if let Some(_guard) = uart::UART_LOCK.try_lock() {
+            let mut visitor = UartVisitor;
+            event.record(&mut visitor);
+            uart::print_no_lock(b"\n");
+        }
     }
 
     fn enter(&self, _span: &Id) {}

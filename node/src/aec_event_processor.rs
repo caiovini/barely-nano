@@ -145,6 +145,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
                     .try_enqueue(&vote.vote, &results);
 
                 let result = aggregate_vote_results(&results);
+                tracing::debug!("AecEventProcessor: vote processed from {} source {:?} result {:?}", vote.voter.as_account().encode_account(), vote.source, result);
                 self.try_update_online_reps(&vote, result);
 
                 if let Some(tx) = &self.node_observer {
@@ -163,6 +164,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
 }
 
 impl AecEventProcessor {
+    #[allow(dead_code)]
     pub fn add(&mut self, handler: impl AecEventHandler + Send + 'static) {
         self.plugins.push(Box::new(handler));
     }
@@ -184,8 +186,12 @@ impl AecEventProcessor {
         );
 
         // Ignore republished votes when rep crawling
-        if vote.source == VoteSource::Live {
-            should_observe |= self.rep_crawler.process(vote);
+        if vote.source == VoteSource::Live || vote.source == VoteSource::Rebroadcast {
+            let processed = self.rep_crawler.process(vote);
+            if processed {
+                tracing::debug!("AecEventProcessor: vote processed by RepCrawler from {}", vote.voter.as_account().encode_account());
+            }
+            should_observe |= processed;
         }
 
         if should_observe {

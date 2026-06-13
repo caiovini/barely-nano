@@ -124,11 +124,16 @@ impl State {
 
     #[allow(dead_code)]
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
-        // let start = Instant::now();
+        let start = kernel_common::clint::mtime();
         let batch_size = batch.len();
+        
+        kernel_common::uart::putchar(b'~');
+
         for (_, (message, channel)) in batch {
             self.realtime_handler.process(message, &channel);
         }
         self.total_processed.fetch_add(batch_size as u64, Ordering::Relaxed);
+        
+        kernel_common::uart::putchar(b'}');
     }
 }

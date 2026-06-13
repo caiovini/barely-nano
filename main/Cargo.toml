@@ -1,31 +1,50 @@
 [package]
-name = "hello-bare"
+name = "barely-nano"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
 
 [[bin]]
-name = "hello-bare"
+name = "barely-nano"
 path = "src/bin.rs"
 
 [features]
 default = ["smode"]
-mmode = ["kernel-common/mmode"]   # -bios none, direct CLINT
-smode = ["kernel-common/smode"]   # OpenSBI, SBI ecalls
+mmode = ["kernel-common/mmode"] # -bios none, direct CLINT
+smode = ["kernel-common/smode"] # OpenSBI, SBI ecalls
+spammer = []                    # Local block spammer (disable for live network)
+simd = ["rsnano_sha/simd"]
 
 [dependencies]
 kernel-common = { path = "../common" }
-linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
+linked_list_allocator = { version = "0.10", default-features = false, features = [
+    "use_spin",
+] }
 rsnano_node = { path = "../node" }
 rsnano_core = { path = "../core" }
 rsnano_network = { path = "../network" }
 rsnano_ledger = { path = "../ledger" }
 rsnano_nullable_random = { path = "../nullables/random" }
-smoltcp = { version = "0.13", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-tcp", "socket-udp", "socket-dns", "async"] }
+rsnano_nullable_clock = { path = "../nullables/clock" }
+smoltcp = { version = "0.13", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-icmp",
+    "socket-tcp",
+    "socket-udp",
+    "socket-dns",
+    "async",
+] }
 anyhow = { version = "1.0", default-features = false }
-spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+spin = { version = "0.9", default-features = false, features = [
+    "mutex",
+    "spin_mutex",
+] }
 rsnano_rpc_handler = { path = "../rpc_handler" }
 rsnano_rpc_messages = { path = "../rpc_messages" }
 rsnano_rpc_server = { path = "../rpc_server", default-features = false }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }
+rsnano_sha = { path = "../nullables/sha" }

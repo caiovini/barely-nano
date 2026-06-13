@@ -22,8 +22,8 @@ impl Default for CandidateAccountsConfig {
     fn default() -> Self {
         Self {
             consideration_count: 4,
-            priorities_max: 4 * 1024,
-            blocking_max: 4 * 1024,
+            priorities_max: 512,
+            blocking_max: 512,
             blocking_decay: Duration::from_secs(60 * 15),
             cooldown: Duration::from_secs(3),
         }
@@ -55,12 +55,12 @@ pub struct CandidateAccounts {
 }
 
 impl CandidateAccounts {
-    pub const PRIORITY_INITIAL: Priority = Priority::new(2.0);
-    pub const PRIORITY_INCREASE: Priority = Priority::new(2.0);
+    pub const PRIORITY_INITIAL: Priority = Priority::new(128.0);
+    pub const PRIORITY_INCREASE: Priority = Priority::new(128.0);
     pub const PRIORITY_DIVIDE: f64 = 2.0;
-    pub const PRIORITY_MAX: Priority = Priority::new(128.0);
-    pub const PRIORITY_CUTOFF: Priority = Priority::new(0.15);
-    pub const MAX_FAILS: usize = 3;
+    pub const PRIORITY_MAX: Priority = Priority::new(1_048_576.0); // 2^20
+    pub const PRIORITY_CUTOFF: Priority = Priority::new(0.1);
+    pub const MAX_FAILS: usize = 10;
 
     pub fn new(config: CandidateAccountsConfig) -> Self {
         Self {
@@ -71,14 +71,17 @@ impl CandidateAccounts {
     }
 
     pub fn priority_up(&mut self, account: &Account) -> PriorityUpResult {
+        self.priority_up_with(account, Self::PRIORITY_INCREASE)
+    }
+
+    pub fn priority_up_with(&mut self, account: &Account, increment: Priority) -> PriorityUpResult {
         if account.is_zero() {
             return PriorityUpResult::InvalidAccount;
         }
 
         if !self.blocked(account) {
             let updated = self.priorities.modify(account, |entry| {
-                entry.priority = Self::higher_priority(entry.priority);
-                entry.fails = 0;
+                entry.priority = Self::higher_priority(entry.priority, increment);
                 true // keep this entry
             });
 
@@ -88,7 +91,7 @@ impl CandidateAccounts {
                 }
                 ChangePriorityResult::NotFound => {
                     self.priorities
-                        .insert(PriorityEntry::new(*account, Self::PRIORITY_INITIAL));
+                        .insert(PriorityEntry::new(*account, increment));
 
                     self.trim_overflow();
                     PriorityUpResult::Inserted
@@ -99,8 +102,8 @@ impl CandidateAccounts {
         }
     }
 
-    fn higher_priority(priority: Priority) -> Priority {
-        min(priority + Self::PRIORITY_INCREASE, Self::PRIORITY_MAX)
+    fn higher_priority(priority: Priority, increment: Priority) -> Priority {
+        min(priority + increment, Self::PRIORITY_MAX)
     }
 
     pub fn priority_down(&mut self, account: &Account) -> PriorityDownResult {
@@ -143,14 +146,16 @@ impl CandidateAccounts {
     fn priority_set_impl(
         account: &Account,
         priority: Priority,
-        blocking: &BlockingContainer,
+        _blocking: &BlockingContainer,
         priorities: &mut PriorityContainer,
     ) -> bool {
         if account.is_zero() {
             return false;
         }
 
-        if !blocking.contains(account) && !priorities.contains(account) {
+        // An account can be prioritized even if it is blocked.
+        // This is necessary to fetch the missing blocks for a blocked account.
+        if !priorities.contains(account) {
             priorities.insert(PriorityEntry::new(*account, priority));
             true
         } else {
@@ -202,7 +207,7 @@ impl CandidateAccounts {
             if hash_matches {
                 debug_assert!(!self.priorities.contains(&account));
                 self.priorities
-                    .insert(PriorityEntry::new(account, Self::PRIORITY_INITIAL));
+                    .insert(PriorityEntry::new(account, Priority::new(1024.0)));
                 self.blocking.remove(&account);
                 self.trim_overflow();
                 return true;
@@ -234,7 +239,11 @@ impl CandidateAccounts {
     pub fn reset_last_request(&mut self, account: &Account) {
         debug_assert!(!account.is_zero());
 
-        self.priorities.set_last_request(account, None);
+        self.priorities.modify(account, |entry| {
+            entry.last_request = None;
+            entry.fails = 0;
+            true
+        });
     }
 
     /// Sets information about the account chain that contains the block hash
@@ -262,7 +271,7 @@ impl CandidateAccounts {
 
     /// Sampling
     pub fn next_priority(
-        &self,
+        &mut self,
         now: Timestamp,
         filter: impl Fn(&Account) -> bool,
     ) -> PriorityResult {
@@ -270,25 +279,42 @@ impl CandidateAccounts {
             return Default::default();
         }
 
-        let cutoff = now - self.config.cooldown;
+        let result = self.priorities.next_priority(|entry| {
+            if let Some(last) = entry.last_request {
+                // Exponential cooldown: 3s * 2^fails, max 1 hour
+                let cooldown_secs = min(3600, self.config.cooldown.as_secs() * (2u64.pow(entry.fails as u32)));
+                if last + Duration::from_secs(cooldown_secs) > now {
+                    return false;
+                }
+            }
+            filter(&entry.account)
+        });
 
-        let Some(entry) = self.priorities.next_priority(cutoff, filter) else {
-            return Default::default();
-        };
-
-        PriorityResult {
-            account: entry.account,
-            priority: entry.priority,
-            fails: entry.fails,
+        if let Some(entry) = result {
+            let account = entry.account;
+            let priority = entry.priority;
+            let fails = entry.fails;
+            self.set_last_request(&account, now);
+            PriorityResult {
+                account,
+                priority,
+                fails,
+            }
+        } else {
+            Default::default()
         }
     }
 
-    pub fn next_blocking(&self, filter: impl Fn(&BlockHash) -> bool) -> BlockHash {
+    pub fn next_blocking(&self, now: Timestamp, filter: impl Fn(&BlockHash) -> bool) -> BlockHash {
         if self.blocking.len() == 0 {
             return BlockHash::zero();
         }
 
-        self.blocking.next(filter).unwrap_or_default()
+        self.blocking.next(now, filter).unwrap_or_default()
+    }
+
+    pub fn dependency_failed(&mut self, hash: &BlockHash, now: Timestamp) {
+        self.blocking.dependency_failed(hash, now);
     }
 
     /// Sets information about the account chain that contains the block hash
@@ -299,13 +325,13 @@ impl CandidateAccounts {
         // Sample all accounts with a known dependency account (> account 0)
         let begin = Account::from(1);
         for entry in self.blocking.iter_start_dep_account(begin) {
-            if self.priority_full() {
+            if inserted >= 128 {
                 break;
             }
 
             if Self::priority_set_impl(
                 &entry.dependency_account,
-                Self::PRIORITY_INITIAL,
+                Self::PRIORITY_MAX,
                 &self.blocking,
                 &mut self.priorities,
             ) {
@@ -639,16 +665,16 @@ mod tests {
     }
 
     #[test]
-    fn priority_set_fails_for_blocked_account() {
+    fn priority_set_succeeds_for_blocked_account() {
         let mut candidates = CandidateAccounts::default();
         let account = Account::from(1);
         candidates.priority_set_initial(&account);
         candidates.block(account, BlockHash::from(2), Timestamp::new_test_instance());
         let success = candidates.priority_set(&account, Priority::new(42.0));
 
-        assert_eq!(success, false);
+        assert_eq!(success, true);
         assert_eq!(candidates.blocked_len(), 1);
-        assert_eq!(candidates.priority_len(), 0);
+        assert_eq!(candidates.priority_len(), 1);
     }
 
     #[test]
@@ -813,7 +839,7 @@ mod tests {
             next,
             PriorityResult {
                 account: account2,
-                priority: CandidateAccounts::PRIORITY_INITIAL,
+                priority: CandidateAccounts::PRIORITY_MAX,
                 fails: 0
             }
         );

@@ -54,6 +54,7 @@ impl LedgerEventProcessor {
 
 impl BackpressureEventProcessor<LedgerEvent> for LedgerEventProcessor {
     fn cool_down(&mut self) {
+        tracing::info!("LedgerEventProcessor: cooling down block processor");
         self.confirming_set.set_cooldown(true);
         self.block_processor_queue.set_cooldown(true);
         self.bounded_backlog.set_cooldown(true);
@@ -62,6 +63,7 @@ impl BackpressureEventProcessor<LedgerEvent> for LedgerEventProcessor {
     }
 
     fn recovered(&mut self) {
+        tracing::info!("LedgerEventProcessor: recovered from cool down");
         self.confirming_set.set_cooldown(false);
         self.block_processor_queue.set_cooldown(false);
         self.bounded_backlog.set_cooldown(false);

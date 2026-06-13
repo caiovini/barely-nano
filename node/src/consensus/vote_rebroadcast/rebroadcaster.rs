@@ -43,6 +43,8 @@ impl VoteRebroadcaster {
         }
     }
 
+    /// TODO: Wire this to a secondary Hart or a background task scheduler
+    /// when multicore support is fully enabled for the Orange Pi RV2.
     pub fn start(&mut self) {
         let _queue = self.queue.clone();
         let _rebroadcast_processor = RebroadcastProcessor::new(

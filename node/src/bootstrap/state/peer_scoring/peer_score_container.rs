@@ -41,6 +41,10 @@ impl PeerScoreContainer {
     pub fn remove(&mut self, channel_id: ChannelId) {
         self.by_channel.remove(&channel_id);
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &PeerScore> {
+        self.by_channel.values()
+    }
 }
 
 #[cfg(test)]

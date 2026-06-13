@@ -1,7 +1,3 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
 use crate::RpcCommandHandler;
 use anyhow::anyhow;
 use indexmap::IndexMap;
@@ -17,7 +13,7 @@ impl RpcCommandHandler {
     ) -> anyhow::Result<ConfirmationInfoResponse> {
         let include_representatives = args.representatives.unwrap_or(false.into()).inner();
         let contents = args.contents.unwrap_or(true.into()).inner();
-        let active = self.node.active.read().unwrap();
+        let active = self.node.active.read();
         let election = active
             .election_for_root(&args.root)
             .ok_or_else(|| anyhow!("Active confirmation not found"))?;
@@ -27,7 +23,7 @@ impl RpcCommandHandler {
         let last_winner = election.winner().hash();
         let final_tally = election.winner_final_tally();
         let mut total_tally = Amount::zero();
-        let mut blocks = IndexMap::new();
+        let mut blocks = IndexMap::default();
 
         for block in election.candidate_blocks().values() {
             let tally = election.tallies().get(&block.hash());
@@ -41,8 +37,8 @@ impl RpcCommandHandler {
             };
 
             let (representatives, representatives_final) = if include_representatives {
-                let mut reps = IndexMap::new();
-                let mut reps_final = IndexMap::new();
+                let mut reps = IndexMap::default();
+                let mut reps_final = IndexMap::default();
                 for (representative, vote) in election.votes() {
                     if block.hash() == vote.hash {
                         let amount = self.node.ledger.rep_weights.weight(representative);
@@ -54,8 +50,8 @@ impl RpcCommandHandler {
                         }
                     }
                 }
-                reps.sort_by(|k1, _, k2, _| k2.cmp(k1));
-                reps_final.sort_by(|k1, _, k2, _| k2.cmp(k1));
+                reps.sort_by(|k1: &Account, _, k2: &Account, _| k2.cmp(k1));
+                reps_final.sort_by(|k1: &Account, _, k2: &Account, _| k2.cmp(k1));
                 (Some(reps), Some(reps_final))
             } else {
                 (None, None)

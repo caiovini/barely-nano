@@ -365,40 +365,49 @@ impl ConfirmingSetThread {
     }
 
     fn run_once(&self) {
-        let mut guard = self.mutex.lock();
-        if self.stopped.load(Ordering::SeqCst) {
-            return;
-        }
+        let mut count = 0;
+        loop {
+            let mut guard = self.mutex.lock();
+            if self.stopped.load(Ordering::SeqCst) || guard.set.is_empty() || guard.cool_down {
+                return;
+            }
 
-        self.stats.inc(StatType::ConfirmingSet, DetailType::Loop);
-        let evicted = guard.cleanup(self.clock.now());
+            self.stats.inc(StatType::ConfirmingSet, DetailType::Loop);
+            let evicted = guard.cleanup(self.clock.now());
 
-        if !evicted.is_empty() {
-            drop(guard);
-            {
-                for entry in evicted {
-                    self.notify(LedgerEvent::ConfirmationFailed(entry.confirmation_root));
+            if !evicted.is_empty() {
+                drop(guard);
+                {
+                    for entry in evicted {
+                        self.notify(LedgerEvent::ConfirmationFailed(entry.confirmation_root));
+                    }
                 }
-            }
-            guard = self.mutex.lock();
-        }
-
-        if !guard.set.is_empty() && !guard.cool_down {
-            let batch = guard.next_batch(self.config.batch_size);
-
-            for entry in &batch {
-                guard.current.insert(entry.confirmation_root);
-            }
-            let recovered = guard.near_full && guard.set.len() < guard.recovered_limit;
-            if recovered {
-                guard.near_full = false;
+                guard = self.mutex.lock();
             }
 
-            drop(guard);
+            if !guard.set.is_empty() && !guard.cool_down {
+                let batch = guard.next_batch(self.config.batch_size);
 
-            self.run_batch(batch);
-            if recovered {
-                self.notify(LedgerEvent::ConfirmingSetRecovered);
+                for entry in &batch {
+                    guard.current.insert(entry.confirmation_root);
+                }
+                let recovered = guard.near_full && guard.set.len() < guard.recovered_limit;
+                if recovered {
+                    guard.near_full = false;
+                }
+
+                drop(guard);
+
+                self.run_batch(batch);
+                if recovered {
+                    self.notify(LedgerEvent::ConfirmingSetRecovered);
+                }
+                count += 1;
+                if count >= 4 {
+                    break;
+                }
+            } else {
+                break;
             }
         }
     }

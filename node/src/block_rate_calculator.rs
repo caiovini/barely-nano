@@ -1,9 +1,9 @@
-use alloc::sync::Arc;
 use crate::utils::RateCalculator;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicI64, Ordering};
 use rsnano_core::utils::{CancellationToken, Tickable};
 use rsnano_ledger::Ledger;
 use rsnano_nullable_clock::SteadyClock;
-use core::sync::atomic::{ AtomicI64, Ordering };
 
 #[derive(Default)]
 pub struct CurrentBlockRates {
@@ -58,7 +58,8 @@ impl BlockRateCalculator {
 impl Tickable for BlockRateCalculator {
     fn tick(&mut self, _cancel_token: &CancellationToken) {
         let now = self.clock.now();
-        self.bps_calculator.sample(self.ledger.block_count() as u64, now);
+        self.bps_calculator
+            .sample(self.ledger.block_count() as u64, now);
         self.cps_calculator
             .sample(self.ledger.confirmed_count() as u64, now);
         self.current_rates.set_bps(self.bps_calculator.rate());

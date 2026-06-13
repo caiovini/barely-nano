@@ -2,7 +2,7 @@
 members = [
 	"common",
 	"main",
-	"tools/sha",
+	"nullables/sha",
 	"nullables/clock",
 	"nullables/output_tracker",
 	"nullables/console",

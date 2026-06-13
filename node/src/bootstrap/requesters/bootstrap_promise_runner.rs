@@ -8,6 +8,7 @@ use core::cmp::min;
 
 /// Calls a requester to create a bootstrap request and then sends it to
 /// the peered node
+#[allow(dead_code)]
 pub(crate) struct BootstrapPromiseRunner {
     pub state: Arc<Mutex<BootstrapState>>,
     pub throttle_wait: Duration,
@@ -15,6 +16,7 @@ pub(crate) struct BootstrapPromiseRunner {
     pub clock: Arc<SteadyClock>,
 }
 
+#[allow(dead_code)]
 impl BootstrapPromiseRunner {
     const INITIAL_INTERVAL: Duration = Duration::from_millis(5);
 

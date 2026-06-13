@@ -21,6 +21,8 @@ pub struct AsyncTcpStream {
     handle: SocketHandle,
 }
 
+static NEXT_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
 impl AsyncTcpStream {
     pub fn new(handle: SocketHandle) -> Self {
         Self { handle }
@@ -37,8 +39,16 @@ impl AsyncTcpStream {
         let mut success = false;
         if let Some(ref mut ctx) = *NET.lock() {
             let socket = ctx.sockets.get_mut::<TcpSocket>(handle);
-            static NEXT_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(49152);
-            let local_port = NEXT_PORT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            
+            let mut local_port = NEXT_PORT.load(core::sync::atomic::Ordering::SeqCst);
+            if local_port == 0 {
+                // If not initialized, fallback to default range
+                local_port = 49152;
+                NEXT_PORT.store(49153, core::sync::atomic::Ordering::SeqCst);
+            } else {
+                local_port = NEXT_PORT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            }
+            
             if socket.connect(ctx.iface.context(), endpoint, local_port).is_ok() {
                 success = true;
             }
@@ -78,6 +88,8 @@ impl AsyncTcpStream {
 impl Drop for AsyncTcpStream {
     fn drop(&mut self) {
         if let Some(ref mut ctx) = *NET.lock() {
+            let socket = ctx.sockets.get_mut::<TcpSocket>(self.handle);
+            socket.abort();
             ctx.remove_tcp_socket(self.handle);
         }
     }
@@ -148,4 +160,8 @@ impl Write for AsyncTcpStream {
     async fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+}
+
+pub fn set_starting_port(port: u16) {
+    NEXT_PORT.store(port, core::sync::atomic::Ordering::SeqCst);
 }

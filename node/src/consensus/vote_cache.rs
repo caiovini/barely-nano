@@ -12,7 +12,9 @@ use rsnano_core::{
 };
 use rsnano_stats::Stats;
 
+#[allow(dead_code)]
 type FxHashMap<K, V> = HashMap<K, V>;
+#[allow(dead_code)]
 type FxHashSet<T> = HashSet<T>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +34,7 @@ impl Default for VoteCacheConfig {
     }
 }
 
+#[allow(dead_code)]
 pub struct VoteCache {
     config: VoteCacheConfig,
     cache: CacheEntryCollection,
@@ -52,6 +55,7 @@ impl Default for CacheEntryCollection {
         Self {}
     }
 }
+#[allow(dead_code)]
 impl CacheEntryCollection {
     pub fn contains(&self, _hash: &BlockHash) -> bool { false }
     pub fn insert(&mut self, _entry: CacheEntry) {}

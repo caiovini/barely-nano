@@ -121,6 +121,7 @@ impl VoteRebroadcastQueue {
 
     /// This will wait for a vote to be enqueued or for the
     /// queue to be stopped.
+    #[allow(dead_code)]
     pub fn dequeue_blocking(&self) -> Option<(RepTier, Arc<Vote>)> {
         let mut queue = self.queue.lock();
         if queue.len() == 0 && !self.block_when_empty {
@@ -252,6 +253,7 @@ impl QueueImpl {
         added
     }
 
+    #[allow(dead_code)]
     fn dequeue(&mut self) -> Option<(RepTier, Arc<Vote>)> {
         let vote = self.queue.next();
         if let Some((_, v)) = &vote {

@@ -1,5 +1,3 @@
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::RpcCommandHandler;
 use anyhow::{anyhow, bail};
 use rsnano_core::{Amount, BlockDetails, PendingKey, Root, WorkNonce};

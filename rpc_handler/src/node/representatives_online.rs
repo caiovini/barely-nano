@@ -1,15 +1,12 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use alloc::vec;
 use crate::RpcCommandHandler;
+use alloc::vec::Vec;
+use hashbrown::{HashMap, HashSet};
 use rsnano_core::{Account, PublicKey};
 use rsnano_node::representatives::OnlineRepInfo;
 use rsnano_rpc_messages::{
     DetailedRepresentativesOnline, RepWeightDto, RepresentativesOnlineArgs,
     RepresentativesOnlineResponse, SimpleRepresentativesOnline,
 };
-use hashbrown::{HashMap, HashSet};
 
 impl RpcCommandHandler {
     pub(crate) fn representatives_online(
@@ -88,12 +85,12 @@ impl ResponseBuilder {
 mod tests {
     use super::ResponseBuilder;
     use crate::test_rpc_command;
+    use hashbrown::HashMap;
     use rsnano_core::Account;
     use rsnano_rpc_messages::{
         RepWeightDto, RepresentativesOnlineArgs, RepresentativesOnlineResponse, RpcCommand,
         SimpleRepresentativesOnline,
     };
-    use hashbrown::HashMap;
 
     #[test]
     fn online_reps_command() {

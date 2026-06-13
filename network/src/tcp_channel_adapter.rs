@@ -7,9 +7,11 @@ use rsnano_core::utils::{TEST_ENDPOINT_1, TEST_ENDPOINT_2};
 use rsnano_nullable_clock::{SteadyClock, Timestamp};
 use rsnano_nullable_tcp::TcpStream;
 use core::fmt::Display;
-use alloc::sync::{Arc, Weak};
+use core::future::Future;
 use alloc::string::ToString;
+use alloc::sync::{Arc, Weak};
 use kernel_common::async_rt;
+use kernel_common::uart;
 
 /// Connects a Channel with a TcpStream
 pub struct TcpChannelAdapter {
@@ -62,13 +64,14 @@ impl TcpChannelAdapter {
         let channel_w = channel.clone();
         let stream_w = stream.clone();
         let clock_w = clock.clone();
-        async_rt::spawn(async move {
+        async_rt::spawn_named(async move {
             loop {
                 if channel_w.is_cancelled() {
                     return;
                 }
 
                 if let Some(entry) = channel_w.pop().await {
+                    kernel_common::uart::putchar(b'|');
                     let mut written = 0;
                     let buffer = &entry.buffer;
                     loop {
@@ -76,22 +79,42 @@ impl TcpChannelAdapter {
                             return;
                         }
                         
-                        match stream_w.writable().await {
+                        // Wait for writable or cancellation
+                        let mut writable_fut = core::pin::pin!(stream_w.writable());
+                        let mut cancel_fut = core::pin::pin!(channel_w.cancelled());
+                        
+                        let ready = core::future::poll_fn(|cx| {
+                            if let core::task::Poll::Ready(r) = writable_fut.as_mut().poll(cx) {
+                                return core::task::Poll::Ready(Some(r));
+                            }
+                            if let core::task::Poll::Ready(_) = cancel_fut.as_mut().poll(cx) {
+                                return core::task::Poll::Ready(None);
+                            }
+                            core::task::Poll::Pending
+                        }).await;
+
+                        let Some(writable_res) = ready else { return; };
+                        kernel_common::uart::putchar(b'>');
+                        
+                        match writable_res {
                             Ok(()) => match stream_w.try_write(&buffer[written..]) {
                                 Ok(n) => {
                                     written += n;
+                                    kernel_common::uart::putchar(b'.');
                                     if written >= buffer.len() {
                                         channel_w.set_last_activity(clock_w.now());
                                         break;
                                     }
                                 }
                                 Err(_) => {
+                                    kernel_common::uart::putchar(b'!');
                                     channel_w.write_error();
                                     channel_w.close();
                                     return;
                                 }
                             },
                             Err(_) => {
+                                kernel_common::uart::putchar(b'!');
                                 channel_w.write_error();
                                 channel_w.close();
                                 return;
@@ -103,10 +126,10 @@ impl TcpChannelAdapter {
                 }
             }
             channel_w.close();
-        });
+        }, Some("TcpChannel Write"));
 
         let channel_l = channel_adapter.clone();
-        async_rt::spawn(async move { channel_l.ongoing_checkup().await });
+        async_rt::spawn_named(async move { channel_l.ongoing_checkup().await }, Some("TcpChannel Checkup"));
         channel_adapter
     }
 
@@ -149,10 +172,11 @@ impl TcpChannelAdapter {
 
     async fn ongoing_checkup(&self) {
         loop {
-            // Simple yielding wait
-            for _ in 0..5 {
-                async_rt::yield_now().await;
-                for _ in 0..100 { core::hint::spin_loop(); }
+            // Sleep to yield executor without pegging CPU
+            async_rt::sleep(core::time::Duration::from_secs(1)).await;
+
+            if self.channel.is_closed() {
+                break;
             }
 
             let now = self.clock.now();

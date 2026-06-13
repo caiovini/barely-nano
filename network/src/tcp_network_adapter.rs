@@ -1,37 +1,32 @@
 use crate::{
-    utils::{into_core_addr}, Channel, ChannelDirection, ChannelId, DeadChannelCleanupStep,
-    Network, NetworkError, ReceiveResult, TcpChannelAdapter,
+    utils::into_core_addr, Channel, ChannelDirection, ChannelId, DeadChannelCleanupStep, Network,
+    NetworkError, ReceiveResult, TcpChannelAdapter,
 };
+use alloc::sync::Arc;
+use core::{
+    future::Future,
+    net::{SocketAddr, SocketAddrV6},
+    time::Duration,
+};
+use hashbrown::HashMap;
+use kernel_common::async_rt;
 use rsnano_core::utils::NULL_ENDPOINT;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_nullable_tcp::TcpStream;
-use core::{
-    net::{SocketAddr, SocketAddrV6},
-    time::Duration,
-    future::poll_fn,
-    task::Poll,
-};
-use alloc::sync::Arc;
-use alloc::string::ToString;
-use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
-use tracing::{warn, info};
-use kernel_common::async_rt;
+use tracing::warn;
 
 /// Connects the Network to TcpStreams
 pub struct TcpNetworkAdapter {
-    channel_adapters: Mutex<HashMap<ChannelId, Arc<TcpChannelAdapter>>>,
+    channel_adapters: Arc<Mutex<HashMap<ChannelId, Arc<TcpChannelAdapter>>>>,
     network: Arc<RwLock<Network>>,
     clock: Arc<SteadyClock>,
 }
 
 impl TcpNetworkAdapter {
-    pub fn new(
-        network_info: Arc<RwLock<Network>>,
-        clock: Arc<SteadyClock>,
-    ) -> Self {
+    pub fn new(network_info: Arc<RwLock<Network>>, clock: Arc<SteadyClock>) -> Self {
         Self {
-            channel_adapters: Mutex::new(HashMap::new()),
+            channel_adapters: Arc::new(Mutex::new(HashMap::new())),
             clock,
             network: network_info,
         }
@@ -46,9 +41,8 @@ impl TcpNetworkAdapter {
                 last_log = self.clock.now();
             }
 
-            // Simple yielding wait
-            async_rt::yield_now().await;
-            for _ in 0..100 { core::hint::spin_loop(); }
+            // Sleep to yield executor without pegging CPU
+            async_rt::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -84,77 +78,114 @@ impl TcpNetworkAdapter {
             .add(local_addr, peer_addr, direction, self.clock.now())
             .map_err(|e| anyhow!("Could not add channel: {:?}", e))?;
 
+        tracing::debug!("Adding new channel: {} ({:?})", peer_addr, direction);
         receiver.ensure_handshake();
 
         let channel_id = channel.channel_id();
-        let channel_adapter =
-            TcpChannelAdapter::create(channel, stream, self.clock.clone());
+        let channel_adapter = TcpChannelAdapter::create(channel, stream, self.clock.clone());
 
         self.channel_adapters
             .lock()
             .insert(channel_id, channel_adapter.clone());
 
+        let network_l = self.network.clone();
+        let adapters_l = self.channel_adapters.clone();
         let adapter_l = channel_adapter.clone();
-        async_rt::spawn(async move {
-
+        let clock_l = self.clock.clone();
+        async_rt::spawn_named(async move {
+            kernel_common::uart::putchar(b'[');
             let channel_l = adapter_l.channel.clone();
             let mut buffer = [0u8; 1024];
 
             loop {
                 if channel_l.is_closed() {
-                    return;
+                    kernel_common::uart::print(b"[X]");
+                    break;
                 }
 
-                // Wait for data
-                match adapter_l.readable().await {
+                // Wait for data or cancellation
+                let mut readable_fut = core::pin::pin!(adapter_l.readable());
+                let mut cancel_fut = core::pin::pin!(channel_l.cancelled());
+                
+                let ready = core::future::poll_fn(|cx| {
+                    if let core::task::Poll::Ready(r) = readable_fut.as_mut().poll(cx) {
+                        return core::task::Poll::Ready(Some(r));
+                    }
+                    if let core::task::Poll::Ready(_) = cancel_fut.as_mut().poll(cx) {
+                        return core::task::Poll::Ready(None);
+                    }
+                    core::task::Poll::Pending
+                }).await;
+
+                let Some(readable_res) = ready else { 
+                    kernel_common::uart::print(b"[C]");
+                    break; 
+                };
+                
+                match readable_res {
                     Ok(()) => {
-                    }
-                    Err(_e) => {
-                        return;
-                    }
-                }
+                        let read_result = adapter_l.try_read(&mut buffer);
+                        match read_result {
+                            Ok(read_count) => {
+                                if read_count == 0 {
+                                    kernel_common::uart::print(b"[0]");
+                                    break;
+                                }
 
-                let read_result = adapter_l.try_read(&mut buffer);
-                match read_result {
-                    Ok(read_count) => {
-                        if read_count == 0 {
-                            break;
-                        }
-
-                        let new_data = &buffer[..read_count];
-                        match receiver.receive(new_data) {
-                            ReceiveResult::Continue => {}
-                            ReceiveResult::Abort => {
-                                tracing::info!("Receiver task: receiver requested Abort, exiting");
-                                break;
-                            }
-                            ReceiveResult::Pause => {
-                                loop {
-                                    async_rt::yield_now().await;
-                                    for _ in 0..100 { core::hint::spin_loop(); }
-                                    if channel_l.is_cancelled() { break; }
-                                    match receiver.try_unpause() {
-                                        ReceiveResult::Continue => break,
-                                        ReceiveResult::Abort => {
-                                            return;
-                                        }
-                                        ReceiveResult::Pause => {}
+                                kernel_common::uart::putchar(b'd');
+                                adapter_l.channel.set_last_activity(clock_l.now());
+                                let new_data = &buffer[..read_count];
+                                match receiver.receive(new_data) {
+                                    ReceiveResult::Continue => {
+                                        kernel_common::uart::putchar(b'm');
                                     }
+                                    ReceiveResult::Abort => {
+                                        kernel_common::uart::print(b"[A]");
+                                        break;
+                                    }
+                                    ReceiveResult::Pause => loop {
+                                        async_rt::sleep(core::time::Duration::from_millis(50)).await;
+                                        if channel_l.is_cancelled() {
+                                            kernel_common::uart::print(b"{C}");
+                                            break;
+                                        }
+                                        match receiver.try_unpause() {
+                                            ReceiveResult::Continue => {
+                                                match receiver.receive(&[]) {
+                                                    ReceiveResult::Continue => break,
+                                                    ReceiveResult::Abort => {
+                                                        kernel_common::uart::print(b"{A}");
+                                                        break;
+                                                    }
+                                                    ReceiveResult::Pause => {} 
+                                                }
+                                            }
+                                            ReceiveResult::Abort => {
+                                                kernel_common::uart::print(b"{A}");
+                                                break;
+                                            }
+                                            ReceiveResult::Pause => {}
+                                        }
+                                    },
                                 }
                             }
+                            Err(_) => {
+                                kernel_common::uart::print(b"[E]");
+                                break;
+                            }
                         }
-                    },
-                    Err(e) => {
-                        let msg = alloc::format!("{:?}", e);
-                        if msg.contains("Would block") {
-                            continue;
-                        }
-                        return;
+                    }
+                    Err(_) => {
+                        kernel_common::uart::print(b"[E]");
+                        break;
                     }
                 }
             }
+            kernel_common::uart::putchar(b']');
             channel_l.close();
-        });
+            network_l.write().remove(channel_id);
+            adapters_l.lock().remove(&channel_id);
+        }, Some("TcpChannel Read"));
 
         Ok(channel_adapter.channel.clone())
     }

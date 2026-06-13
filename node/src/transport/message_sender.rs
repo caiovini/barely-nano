@@ -56,6 +56,21 @@ impl MessageSender {
         message: &Message,
         traffic_type: TrafficType,
     ) -> bool {
+        // Safety shield: do not send non-handshake messages to channels in Undefined mode
+        if channel.mode() != rsnano_network::ChannelMode::Realtime && !matches!(message, Message::NodeIdHandshake(_)) {
+            trace!(peer=%channel.peer_addr(), message = ?message, "Prevented sending non-handshake message to non-realtime channel");
+            return false;
+        }
+
+        // Additional safety shield: do not send non-handshake messages to newly established realtime channels
+        // during the first 1.0 second to allow the peer to transition to Realtime mode on their side.
+        if channel.mode() == rsnano_network::ChannelMode::Realtime && !matches!(message, Message::NodeIdHandshake(_)) {
+            if channel.seconds_since_realtime() < 1.0 {
+                trace!(peer=%channel.peer_addr(), message = ?message, "Prevented sending non-handshake message to newly upgraded realtime channel");
+                return false;
+            }
+        }
+
         if self.send_listener.is_tracked() {
             self.send_listener.emit(SendEvent {
                 channel_id: channel.channel_id(),

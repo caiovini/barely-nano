@@ -1,14 +1,15 @@
-use crate::{ChannelDirection, NetworkError, TcpNetworkAdapter, utils::CancellationToken};
+use crate::{utils::CancellationToken, ChannelDirection, NetworkError, TcpNetworkAdapter};
+use alloc::boxed::Box;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use core::future::{poll_fn, Future};
+use core::pin::Pin;
+use core::task::Poll;
+use core::{net::SocketAddrV6, time::Duration};
+use kernel_common::async_rt;
 use rsnano_nullable_tcp::{TcpSocket, TcpStream};
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
-use core::{net::SocketAddrV6, time::Duration};
-use alloc::sync::Arc;
-use alloc::boxed::Box;
 use tracing::debug;
-use kernel_common::async_rt;
-use core::future::{poll_fn, Future};
-use core::task::Poll;
-use core::pin::Pin;
 
 /// Establishes a network connection to a given peer
 pub struct PeerConnector {
@@ -21,10 +22,7 @@ pub struct PeerConnector {
 impl PeerConnector {
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
-    pub fn new(
-        connect_timeout: Duration,
-        network_adapter: Arc<TcpNetworkAdapter>,
-    ) -> Self {
+    pub fn new(connect_timeout: Duration, network_adapter: Arc<TcpNetworkAdapter>) -> Self {
         Self {
             connect_timeout,
             network_adapter,
@@ -48,6 +46,7 @@ impl PeerConnector {
 
     /// Establish a network connection to the given peer
     pub fn connect_to(&self, peer: SocketAddrV6) -> Result<(), NetworkError> {
+        tracing::debug!("Connecting to {}", peer);
         self.connect_listener.emit(peer);
 
         if self.cancel_token.is_cancelled() {
@@ -55,8 +54,7 @@ impl PeerConnector {
         }
 
         match self.network_adapter.add_outbound_attempt(peer) {
-            Ok(_) => {
-            }
+            Ok(_) => {}
             Err(NetworkError::DuplicateConnection) => {
                 // Silently skip if already attempting or connected
                 return Ok(());
@@ -67,36 +65,40 @@ impl PeerConnector {
         let network_l = self.network_adapter.clone();
         let cancel_token = self.cancel_token.clone();
 
-        async_rt::spawn(async move {
+        async_rt::spawn_named(async move {
             // Add a timeout to the connection attempt to prevent task leaks
             let mut connect_fut = Box::pin(connect_impl(peer, &network_l));
             let mut cancel_fut = Box::pin(cancel_token.cancelled());
-            
-            // Simple timeout implementation for bare-metal
+
             let start = kernel_common::clint::mtime();
-            let timeout_ticks = 5 * kernel_common::clint::FREQ; 
-            
-            poll_fn(|cx| {
-                if let Poll::Ready(_) = Pin::new(&mut cancel_fut).poll(cx) {
-                    debug!("Connection attempt cancelled: {}", peer);
-                    return Poll::Ready(());
+            let timeout_ticks = 5 * kernel_common::clint::FREQ;
+
+            loop {
+                let mtime = kernel_common::clint::mtime();
+                if mtime - start > timeout_ticks {
+                    break;
                 }
-                
-                if let Poll::Ready(_) = Pin::new(&mut connect_fut).poll(cx) {
-                    return Poll::Ready(());
+
+                // Try polling the futures once
+                let is_done = poll_fn(|cx| {
+                    if let Poll::Ready(_) = Pin::new(&mut cancel_fut).poll(cx) {
+                        return Poll::Ready(true);
+                    }
+                    if let Poll::Ready(_) = Pin::new(&mut connect_fut).poll(cx) {
+                        return Poll::Ready(true);
+                    }
+                    Poll::Ready(false)
+                }).await;
+
+                if is_done {
+                    break;
                 }
-                
-                if kernel_common::clint::mtime() - start > timeout_ticks {
-                    return Poll::Ready(());
-                }
-                
-                // Re-register waker to ensure we check the timeout
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }).await;
+
+                async_rt::yield_now().await;
+            }
 
             network_l.remove_attempt(&peer);
-        });
+        }, Some("Peer Connection"));
 
         Ok(())
     }
@@ -112,7 +114,7 @@ async fn connect_impl(peer: SocketAddrV6, network_adapter: &TcpNetworkAdapter) {
             let _ = network_adapter.add(stream, ChannelDirection::Outbound);
         }
         Err(e) => {
-            tracing::warn!("Failed to connect to {}: {:?}", peer, e);
+            tracing::debug!("Failed to connect to {}: {:?}", peer, e);
             network_adapter.connect_error(peer, e);
         }
     }

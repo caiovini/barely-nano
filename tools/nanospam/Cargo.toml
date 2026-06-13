@@ -1,3 +1,6 @@
+[workspace]
+# This package is isolated from the main workspace to avoid build conflicts between no_std and std dependencies.
+
 [package]
 name = "nanospam"
 version = "0.1.0"

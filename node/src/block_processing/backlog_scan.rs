@@ -30,8 +30,8 @@ impl Default for BacklogScanConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            batch_size: 1000,
-            rate_limit: 10_000,
+            batch_size: 10_000,
+            rate_limit: 100_000,
         }
     }
 }

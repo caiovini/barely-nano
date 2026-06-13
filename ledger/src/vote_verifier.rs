@@ -56,7 +56,7 @@ impl<'a> VoteVerifier<'a> {
         };
         debug_assert!(block.root() == *root);
         if any.dependents_confirmed(&block) {
-            self.store.final_vote.put(&block.qualified_root(), hash);
+            self.store.final_vote.put(&block.root(), hash);
             true
         } else {
             false

@@ -12,6 +12,9 @@ impl<'a> BlockValidator<'a> {
     }
 
     pub(crate) fn ensure_valid_signature(&self) -> Result<(), BlockError> {
+        if self.signature_verified {
+            return Ok(());
+        }
         let result = if self.is_epoch_block() {
             self.epochs.validate_epoch_signature(self.block)
         } else {
@@ -36,10 +39,12 @@ impl<'a> BlockValidator<'a> {
 
     fn ensure_previous_block_exists(&self) -> Result<(), BlockError> {
         if self.account_exists() && self.previous_block.is_none() {
+            tracing::debug!("Validation: GapPrevious - account exists but previous block NOT found in store");
             return Err(BlockError::GapPrevious);
         }
 
         if self.is_new_account() && !self.block.previous().is_zero() {
+            tracing::debug!("Validation: GapPrevious - new account but previous hash is non-zero: {}", self.block.previous());
             return Err(BlockError::GapPrevious);
         }
 
@@ -57,6 +62,9 @@ impl<'a> BlockValidator<'a> {
     }
 
     pub(crate) fn ensure_sufficient_work(&self) -> Result<(), BlockError> {
+        if self.is_genesis || self.work.epoch_1 == 0xfe00000000000000 {
+            return Ok(());
+        }
         if !self.work.is_valid_pow(self.block, &self.block_details()) {
             Err(BlockError::InsufficientWork)
         } else {

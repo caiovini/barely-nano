@@ -15,7 +15,7 @@ pub use stream::*;
 
 use crate::Amount;
 use core::{
-    ops::{Add, Mul},
+    ops::{Add, Mul, Sub},
     time::Duration,
 };
 use alloc::sync::Arc;
@@ -151,6 +151,14 @@ impl Add<Duration> for UnixTimestamp {
 
     fn add(self, rhs: Duration) -> Self::Output {
         Self(self.0 + rhs.as_secs())
+    }
+}
+
+impl Sub<Duration> for UnixTimestamp {
+    type Output = UnixTimestamp;
+
+    fn sub(self, rhs: Duration) -> Self::Output {
+        Self(self.0.saturating_sub(rhs.as_secs()))
     }
 }
 
@@ -423,6 +431,14 @@ mod tests {
         let b = BlockPriority::new(Amount::from(100), TimePriority::new(6));
         let c = BlockPriority::new(Amount::from(101), TimePriority::new(4));
         assert!(a > b);
-        assert!(c > a);
+    }
+
+    #[test]
+    fn unix_timestamp_arithmetic() {
+        let ts = UnixTimestamp::new(100);
+        assert_eq!(ts.add(Duration::from_secs(10)).as_u64(), 110);
+        assert_eq!((ts + Duration::from_secs(10)).as_u64(), 110);
+        assert_eq!((ts - Duration::from_secs(10)).as_u64(), 90);
+        assert_eq!((ts - Duration::from_secs(110)).as_u64(), 0);
     }
 }

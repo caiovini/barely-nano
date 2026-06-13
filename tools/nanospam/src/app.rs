@@ -17,7 +17,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::debug;
 
 use rsnano_core::{Block, Networks, PrivateKey, ProtocolInfo, RawKey};
 use rsnano_messages::{Message, MessageSerializer, Publish};
@@ -183,12 +183,12 @@ impl NanoSpamApp {
 
         for node_index in 0..args.prs {
             let peer_addr = SocketAddrV6::new(Ipv6Addr::LOCALHOST, peering_port(node_index), 0, 0);
-            info!(?peer_addr, "Connecting to node PR{node_index}...");
+            debug!(?peer_addr, "Connecting to node PR{node_index}...");
             let mut node_writers = Vec::with_capacity(CONNECTIONS_PER_NODE);
             let mut node_readers = Vec::with_capacity(CONNECTIONS_PER_NODE);
             for i in 0..CONNECTIONS_PER_NODE {
                 let mut tcp_stream = self.tcp_stream_factory.connect(peer_addr).await?;
-                info!("Performing handshake...");
+                debug!("Performing handshake...");
                 let node_id_key: PrivateKey = RawKey::from(42 + i as u64).into();
                 perform_handshake(protocol, genesis_hash, node_id_key, &mut tcp_stream).await?;
                 let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
@@ -221,9 +221,9 @@ impl NanoSpamApp {
             strategy,
         ));
 
-        info!("Connecting to websocket...");
+        debug!("Connecting to websocket...");
         let mut conf_receiver = ConfirmationReceiver::connect().await?;
-        info!("Starting with {} BPS", current_bps.load(Ordering::Relaxed));
+        debug!("Starting with {} BPS", current_bps.load(Ordering::Relaxed));
         let started = Instant::now();
         std::thread::scope(|s| {
             s.spawn(|| {
@@ -283,10 +283,10 @@ impl NanoSpamApp {
         let duration_secs = started.elapsed().as_secs_f64();
         let created_blocks = block_factory.lock().unwrap().created();
         let cps = (created_blocks as f64 / duration_secs) as i32;
-        info!("Confirming all blocks took {duration_secs:.2}s");
-        info!("Confirmation rate: {cps} cps");
+        debug!("Confirming all blocks took {duration_secs:.2}s");
+        debug!("Confirmation rate: {cps} cps");
         let conf_time = sum_conf_time.as_millis() / created_blocks as u128;
-        info!("Average conf time: {conf_time} ms");
+        debug!("Average conf time: {conf_time} ms");
 
         if !args.no_kill {
             for mut child in node_handles {

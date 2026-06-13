@@ -1,8 +1,8 @@
+use alloc::string::ToString;
 use core::future::poll_fn;
 use core::task::Poll;
 use embedded_nal_async::{Dns, IpAddr, AddrType};
 use smoltcp::socket::dns::{Socket as DnsSocket, GetQueryResultError};
-use alloc::string::ToString;
 use kernel_common::net::NET;
 
 pub struct AsyncDns;

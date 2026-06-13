@@ -69,13 +69,13 @@ impl Default for BootstrapConfig {
             frontier_rate_limit: 8,
             database_warmup_ratio: 10,
             max_pull_count: BlocksAckPayload::MAX_BLOCKS,
-            request_timeout: Duration::from_secs(15),
+            request_timeout: Duration::from_secs(60),
             throttle_coefficient: 8 * 1024,
             throttle_wait: Duration::from_millis(100),
             block_processor_theshold: 1000,
             min_protocol_version: 0x14, // TODO don't hard code
             max_requests: 1024,
-            optimistic_request_percentage: 75,
+            optimistic_request_percentage: 10,
             candidate_accounts: Default::default(),
             frontier_scan: Default::default(),
             max_pending_frontier_responses: 16,
@@ -100,6 +100,9 @@ struct Threads {
 }
 
 impl Bootstrapper {
+    pub fn get_state(&self) -> Arc<Mutex<BootstrapState>> {
+        self.state.clone()
+    }
     pub(crate) fn new(
         block_processor_queue: Arc<BlockProcessorQueue>,
         ledger: Arc<Ledger>,
@@ -175,7 +178,7 @@ impl Bootstrapper {
             .state
             .lock()
             .candidate_accounts
-            .priority_set_initial(genesis_account);
+            .priority_set(genesis_account, crate::bootstrap::state::CandidateAccounts::PRIORITY_MAX);
 
         if inserted {
             self.priority_inserted()
@@ -214,6 +217,7 @@ impl Bootstrapper {
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
         let mut state = self.state.lock();
         cleanup.cleanup(&mut state);
+        self.prune_banned_peers(&mut state);
         self.state_changed.notify_all();
     }
 
@@ -222,12 +226,29 @@ impl Bootstrapper {
         let mut state = self.state.lock();
         while !state.stopped {
             cleanup.cleanup(&mut state);
+            self.prune_banned_peers(&mut state);
             self.state_changed.notify_all();
 
             state = self
                 .state_changed
                 .wait_timeout_while(state, Duration::from_secs(1), |s| !s.stopped)
                 .unwrap().0;
+        }
+    }
+
+    async fn run_timeouts_async(self: Arc<Self>) {
+        tracing::info!("Bootstrap timeout loop started");
+        let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
+        loop {
+            {
+                let mut state = self.state.lock();
+                if state.stopped {
+                    break;
+                }
+                cleanup.cleanup(&mut state);
+                self.prune_banned_peers(&mut state);
+            }
+            kernel_common::async_rt::sleep(Duration::from_secs(1)).await;
         }
     }
 
@@ -268,6 +289,16 @@ impl Bootstrapper {
     fn priority_insertion_failed(&self) {
         self.stats
             .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
+    }
+
+    fn prune_banned_peers(&self, state: &mut BootstrapState) {
+        let banned = state.scoring.banned_channels();
+        if !banned.is_empty() {
+            let mut network = self.requesters.network.write();
+            for id in banned {
+                network.remove(id);
+            }
+        }
     }
 
     pub fn inspect_blocks(&self, batch: &[ProcessedResult]) {
@@ -335,13 +366,10 @@ impl BootstrapExt for Arc<Bootstrapper> {
 
         self.requesters.start();
 
-        // let self_l = Arc::clone(self);
-        // let timeout = std::thread::Builder::new()
-        //     .name("Bootstrap clean".to_string())
-        //     .spawn(Box::new(move || self_l.run_timeouts()))
-        //     .unwrap();
-
-        // *self.threads.lock() = Some(Threads { cleanup: timeout });
+        let self_l = Arc::clone(self);
+        kernel_common::async_rt::spawn(async move {
+            self_l.run_timeouts_async().await;
+        });
     }
 }
 

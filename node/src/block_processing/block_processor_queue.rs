@@ -105,6 +105,7 @@ impl BlockProcessorQueue {
             return None;
         }
 
+        let _len = queue.process_queue.len();
         let batch = queue.process_queue.next_batch();
         if !batch.is_empty() {
             return Some(batch);
@@ -156,6 +157,19 @@ impl BlockProcessorQueue {
         added
     }
 
+    pub fn try_push(&self, context: impl Into<Arc<BlockContext>>) -> Result<bool, ()> {
+        let context = context.into();
+        if let Some(mut queue) = self.queue.try_lock() {
+            let added = queue.push(context);
+            if added {
+                self.condition.notify_one();
+            }
+            Ok(added)
+        } else {
+            Err(())
+        }
+    }
+
     pub fn push_blocking(
         &self,
         block: Arc<Block>,
@@ -183,6 +197,10 @@ impl BlockProcessorQueue {
 
     pub fn info(&self) -> FairQueueInfo<BlockSource> {
         self.queue.lock().process_queue.info()
+    }
+
+    pub(crate) fn try_lock_internal(&self) -> Option<spin::MutexGuard<'_, BlockProcessorQueueImpl>> {
+        self.queue.try_lock()
     }
 }
 
@@ -216,7 +234,7 @@ impl ContainerInfoProvider for BlockProcessorQueue {
     }
 }
 
-struct BlockProcessorQueueImpl {
+pub(crate) struct BlockProcessorQueueImpl {
     process_queue: ProcessQueue,
     stopped: bool,
     cool_down: bool,
@@ -249,6 +267,10 @@ impl BlockProcessorQueueImpl {
         }
 
         self.process_queue.is_empty()
+    }
+
+    pub fn total_queue_len(&self) -> usize {
+        self.process_queue.len()
     }
 
     pub fn push(&mut self, context: Arc<BlockContext>) -> bool {

@@ -74,7 +74,7 @@ impl ResponseProcessor {
         now: Timestamp,
     ) -> Result<ProcessInfo, ProcessError> {
         let query = self.take_running_query_for(&response)?;
-        self.process_response(&query, response)?;
+        self.process_response(&query, response, channel_id)?;
         self.update_peer_scoring(channel_id);
         Ok(ProcessInfo::new(&query, now))
     }
@@ -105,9 +105,10 @@ impl ResponseProcessor {
         &self,
         query: &RunningQuery,
         response: AscPullAck,
+        channel_id: ChannelId,
     ) -> Result<(), ProcessError> {
         let ok = match response.pull_type {
-            AscPullAckType::Blocks(blocks) => self.blocks.process(query, &blocks),
+            AscPullAckType::Blocks(blocks) => self.blocks.process(query, &blocks, channel_id),
             AscPullAckType::AccountInfo(info) => self.accounts.process(query, &info),
             AscPullAckType::Frontiers(frontiers) => self.frontiers.process(query, frontiers),
         };

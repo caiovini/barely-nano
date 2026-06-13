@@ -1,0 +1,10 @@
+/home/cvini/rust-workspace/barely-nano/tools/nanospam/target/riscv64imac-unknown-none-elf/release/deps/log-d56dee66edf97596.d: /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs
+
+/home/cvini/rust-workspace/barely-nano/tools/nanospam/target/riscv64imac-unknown-none-elf/release/deps/liblog-d56dee66edf97596.rlib: /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs
+
+/home/cvini/rust-workspace/barely-nano/tools/nanospam/target/riscv64imac-unknown-none-elf/release/deps/liblog-d56dee66edf97596.rmeta: /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs /home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs
+
+/home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs:
+/home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs:
+/home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs:
+/home/cvini/.asdf/installs/rust/1.93.1/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs:

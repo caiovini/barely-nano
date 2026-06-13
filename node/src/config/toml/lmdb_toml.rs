@@ -1,5 +1,5 @@
-use alloc::string::String;
 use alloc::string::ToString;
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, Default)]

@@ -19,20 +19,18 @@ pub(crate) fn spawn_backpressure_processor<T, I>(
     async_rt::spawn(async move {
         let mut previous_cooldown_state = false;
         loop {
-            // In no_std, we use try_recv and yield if empty to avoid blocking the executor
-            if let Ok(event) = receiver.try_recv() {
-                // Check if we need to cool down the processing to avoid overwhelming the system
-                let current_cooldown = receiver.should_cool_down();
-
-                if current_cooldown != previous_cooldown_state {
-                    if current_cooldown {
-                        processor.cool_down();
-                    } else {
-                        processor.recovered();
-                    }
-                    previous_cooldown_state = current_cooldown;
+            // Always check if we need to cool down or recover, even if the queue is empty
+            let current_cooldown = receiver.should_cool_down();
+            if current_cooldown != previous_cooldown_state {
+                if current_cooldown {
+                    processor.cool_down();
+                } else {
+                    processor.recovered();
                 }
+                previous_cooldown_state = current_cooldown;
+            }
 
+            if let Ok(event) = receiver.try_recv() {
                 processor.process(event);
             } else {
                 async_rt::yield_now().await;

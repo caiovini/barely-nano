@@ -30,6 +30,14 @@ impl<'a> FrontierWorker<'a> {
 
     pub fn process(&mut self, frontiers: Vec<Frontier>) {
         let outdated = self.checker.get_outdated_accounts(&frontiers);
+        if !outdated.accounts.is_empty() {
+            tracing::debug!(
+                "FrontierAckProcessor: Found {} outdated accounts (outdated: {}, pending: {})",
+                outdated.accounts.len(),
+                outdated.outdated,
+                outdated.pending
+            );
+        }
         self.update_stats(&frontiers, &outdated);
         self.state.lock().frontiers_processed(&outdated);
     }

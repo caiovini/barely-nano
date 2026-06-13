@@ -47,6 +47,7 @@ pub struct Channel {
     closed: AtomicBool,
 
     socket_type: AtomicU8,
+    realtime_start_ms: AtomicI64,
     write_queue: WriteQueue,
     cancel_token: CancellationToken,
     limiter: Arc<BandwidthLimiter>,
@@ -54,7 +55,7 @@ pub struct Channel {
 }
 
 impl Channel {
-    pub const MAX_QUEUE_SIZE: usize = 64;
+    pub const MAX_QUEUE_SIZE: usize = 128;
 
     pub(crate) fn new(
         channel_id: ChannelId,
@@ -77,6 +78,7 @@ impl Channel {
             timeout_seconds: AtomicU64::new(DEFAULT_TIMEOUT),
             timed_out: AtomicBool::new(false),
             socket_type: AtomicU8::new(ChannelMode::Undefined as u8),
+            realtime_start_ms: AtomicI64::new(0),
             closed: AtomicBool::new(false),
             data: Mutex::new(PeerInfo {
                 node_id: None,
@@ -199,6 +201,7 @@ impl Channel {
         if already_closed {
             return;
         }
+        kernel_common::uart::putchar(b'#');
         self.set_timeout(Duration::ZERO);
         self.write_queue.close();
         self.cancel_token.cancel();
@@ -217,7 +220,24 @@ impl Channel {
     }
 
     pub fn set_mode(&self, mode: ChannelMode) {
+        let old_mode = self.mode();
         self.socket_type.store(mode as u8, Ordering::SeqCst);
+        if mode == ChannelMode::Realtime && old_mode != ChannelMode::Realtime {
+            self.realtime_start_ms.store(rsnano_nullable_clock::Timestamp::now().millis(), Ordering::SeqCst);
+        }
+    }
+
+    pub fn seconds_since_realtime(&self) -> f64 {
+        let start = self.realtime_start_ms.load(Ordering::SeqCst);
+        if start == 0 {
+            return 0.0;
+        }
+        let now = rsnano_nullable_clock::Timestamp::now().millis();
+        if now < start {
+            0.0
+        } else {
+            (now - start) as f64 / 1000.0
+        }
     }
 
     pub fn last_bootstrap_attempt(&self) -> Timestamp {

@@ -205,7 +205,7 @@ impl AscPullReq {
 
     pub fn deserialize(stream: &mut impl Stream) -> Option<Self> {
         let pull_type = AscPullPayloadId::from_u8(stream.read_u8().ok()?)?;
-        let id = stream.read_u64_be().ok()?;
+        let id = stream.read_u64_le().ok()?;
 
         let req_type = match pull_type {
             AscPullPayloadId::Blocks => {
@@ -246,7 +246,7 @@ impl AscPullReq {
 impl Serialize for AscPullReq {
     fn serialize(&self, writer: &mut dyn BufferWriter) {
         writer.write_u8_safe(self.payload_type() as u8);
-        writer.write_u64_be_safe(self.id);
+        writer.write_u64_le_safe(self.id);
         self.req_type.serialize(writer);
     }
 }

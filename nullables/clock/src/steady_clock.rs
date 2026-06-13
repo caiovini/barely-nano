@@ -112,7 +112,12 @@ impl Timestamp {
     }
 
     pub fn elapsed(&self, now: Timestamp) -> Duration {
-        Duration::from_nanos(now.0.checked_sub(self.0).unwrap_or_default() as u64)
+        let diff = now.0 - self.0;
+        if diff < 0 {
+            Duration::from_nanos(0)
+        } else {
+            Duration::from_nanos(diff as u64)
+        }
     }
 
     pub fn checked_sub(&self, rhs: Duration) -> Option<Self> {

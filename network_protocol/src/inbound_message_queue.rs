@@ -48,14 +48,17 @@ impl InboundMessageQueue {
             .push(channel.channel_id(), (message.clone(), channel.clone()));
 
         if added {
+            kernel_common::uart::putchar(b'>');
             self.stats.processed.fetch_add(1, Ordering::Relaxed);
             self.stats.processed_type[message_type as usize].fetch_add(1, Ordering::Relaxed);
             if let Some(cb) = &self.inbound_callback {
                 cb(channel.channel_id(), &message);
             }
         } else {
+            kernel_common::uart::putchar(b'<');
             self.stats.overfill.fetch_add(1, Ordering::Relaxed);
             self.stats.overfill_type[message_type as usize].fetch_add(1, Ordering::Relaxed);
+            tracing::debug!("InboundMessageQueue: dropped message from {} due to full queue", channel.peer_addr());
             if let Some(cb) = &self.inbound_dropped_callback {
                 cb(channel.channel_id(), &message);
             }
@@ -68,7 +71,11 @@ impl InboundMessageQueue {
         &self,
         max_batch_size: usize,
     ) -> VecDeque<(ChannelId, (Message, Arc<Channel>))> {
-        self.state.lock().queue.next_batch(max_batch_size)
+        let batch = self.state.lock().queue.next_batch(max_batch_size);
+        if !batch.is_empty() {
+            kernel_common::uart::putchar(b'{');
+        }
+        batch
     }
 
     pub fn wait_for_messages(&self) {

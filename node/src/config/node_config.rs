@@ -1,19 +1,16 @@
-use spin::Lazy;
 use alloc::string::String;
-use core::time::Duration;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
+use core::time::Duration;
+use spin::Lazy;
 
-use rsnano_core::{
-    utils::Peer,
-    Account, Amount, PublicKey,
-};
+use rsnano_core::{Account, Amount, PublicKey, utils::Peer};
 use rsnano_network::NetworkConfig;
 use rsnano_nullable_http_client::Url;
 // // use rsnano_store_lmdb::LmdbConfig;
 use rsnano_work::OpenClConfig;
 
-use super::{websocket_config::WebsocketConfig, NetworkParams, Networks, DEV_NETWORK_PARAMS};
+use super::{DEV_NETWORK_PARAMS, NetworkParams, Networks, websocket_config::WebsocketConfig};
 use crate::{
     block_processing::{
         BacklogScanConfig, BoundedBacklogConfig, LocalBlockBroadcasterConfig, ProcessQueueConfig,
@@ -21,11 +18,11 @@ use crate::{
     bootstrap::{BootstrapConfig, BootstrapServerConfig},
     cementation::ConfirmingSetConfig,
     consensus::{
-        election_schedulers::{
-            priority::PriorityBucketConfig, HintedSchedulerConfig, OptimisticSchedulerConfig,
-        },
         ActiveElectionsConfig, BootstrapStaleElections, ForkCache, RebroadcastHistoryConfig,
         RequestAggregatorConfig, VoteCacheConfig, VoteProcessorConfig, VoteRebroadcastQueue,
+        election_schedulers::{
+            HintedSchedulerConfig, OptimisticSchedulerConfig, priority::PriorityBucketConfig,
+        },
     },
     transport::MessageProcessorConfig,
 };
@@ -114,8 +111,7 @@ pub struct NodeConfig {
     pub cps_limit: u32,
 }
 
-static DEFAULT_LIVE_PEER_NETWORK: Lazy<String> =
-    Lazy::new(|| String::from("peering.nano.org"));
+static DEFAULT_LIVE_PEER_NETWORK: Lazy<String> = Lazy::new(|| String::from("peering.nano.org"));
 
 static DEFAULT_BETA_PEER_NETWORK: Lazy<String> =
     Lazy::new(|| String::from("peering-beta.nano.org"));
@@ -125,7 +121,6 @@ static DEFAULT_TEST_PEER_NETWORK: Lazy<String> =
 
 impl NodeConfig {
     pub fn default_for(network: Networks, parallelism: usize) -> Self {
-        // kernel_common::uart::print(b"[node] NodeConfig::default_for starting\n");
         let net_params = NetworkParams::new(network);
         Self::new(
             Some(net_params.network.default_node_port),
@@ -237,7 +232,7 @@ impl NodeConfig {
             bootstrap_fraction_numerator: 1,
             receive_minimum: Amount::micronano(1),
             online_weight_minimum: Amount::nano(60_000_000),
-            representative_vote_weight_minimum: Amount::nano(10),
+            representative_vote_weight_minimum: Amount::nano(10 * 1000 * 1000 * 1000),
             password_fanout: 1024,
             io_threads: core::cmp::max(parallelism, 4),
             network_threads: core::cmp::max(parallelism, 4) as u32,
@@ -261,11 +256,10 @@ impl NodeConfig {
             confirming_set_batch_time: Duration::from_millis(250),
             backup_before_upgrade: false,
             max_work_generate_multiplier: 64_f64,
-            max_queued_requests: 512,
+            max_queued_requests: 1024,
             request_aggregator_threads: core::cmp::max(parallelism, 4) as u32,
-            max_unchecked_blocks: 4096,
-            rep_crawler_weight_minimum: Amount::decode_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
-                .unwrap(),
+            max_unchecked_blocks: 65536,
+            rep_crawler_weight_minimum: Amount::zero(),
             work_peers: Vec::new(),
             secondary_work_peers: vec![Peer::new("127.0.0.1", 8076)],
             preconfigured_peers,
@@ -380,8 +374,8 @@ impl TcpConfig {
 impl Default for TcpConfig {
     fn default() -> Self {
         Self {
-            max_inbound_connections: 32,
-            max_outbound_connections: 32,
+            max_inbound_connections: 128,
+            max_outbound_connections: 128,
             max_attempts: 16,
             max_attempts_per_ip: 1,
             connect_timeout: Duration::from_secs(60),

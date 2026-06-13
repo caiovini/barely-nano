@@ -48,11 +48,7 @@ impl LedgerPruning {
             u64::MAX
         };
         let cutoff_time: UnixTimestamp = if bootstrap_weight_reached {
-            // SystemTime::now() replacement
-            // (SystemTime::now() - Duration::from_secs(self.config.max_pruning_age_s as u64))
-            //     .try_into()
-            //     .unwrap()
-            UnixTimestamp::MAX // TODO: fix this
+            UnixTimestamp::now() - Duration::from_secs(self.config.max_pruning_age_s as u64)
         } else {
             UnixTimestamp::MAX
         };

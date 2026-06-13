@@ -1,68 +1,144 @@
-extern crate alloc;
-
-use alloc::vec::Vec;
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{Device, DeviceCapabilities, RxToken, TxToken};
 use smoltcp::time::Instant;
-use virtio_drivers::device::net::VirtIONet;
-use virtio_drivers::transport::mmio::MmioTransport;
-use crate::net::virtio_hal::VirtioHal;
+use crate::uboot;
+use crate::uart;
+use core::marker::PhantomData;
 
-pub struct VirtioNetDevice<'a> {
-    pub driver: VirtIONet<VirtioHal, MmioTransport<'a>, 128>,
+pub struct UbootNetDevice {
+    info: uboot::DeviceInfo,
+    rx_buffer: [u8; 2048],
+    tx_buffer: TxBuffer,
 }
 
-impl<'a> VirtioNetDevice<'a> {
-    pub fn new(driver: VirtIONet<VirtioHal, MmioTransport<'a>, 128>) -> Self {
-        Self { driver }
+struct TxBuffer {
+    data: [u8; 2048],
+}
+
+impl UbootNetDevice {
+    pub fn new(info: uboot::DeviceInfo) -> Self {
+        Self {
+            info,
+            rx_buffer: [0u8; 2048],
+            tx_buffer: TxBuffer { data: [0u8; 2048] },
+        }
     }
 }
 
-impl<'a> Device for VirtioNetDevice<'a> {
-    type RxToken<'b> = VirtioRxToken where Self: 'b;
-    type TxToken<'b> = VirtioTxToken<'b, 'a> where Self: 'b;
+impl Device for UbootNetDevice {
+    type RxToken<'a> = UbootRxToken<'a> where Self: 'a;
+    type TxToken<'a> = UbootTxToken<'a> where Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        match self.driver.receive() {
-            Ok(buf) => {
-                let packet = buf.packet();
-                if packet.len() < 14 {
-                    // Discard too-short packets to prevent panics in smoltcp wire layer
-                    let _ = self.driver.recycle_rx_buffer(buf);
-                    return None;
-                }
-                let rx_token = VirtioRxToken { buf: packet.to_vec() };
-                let _ = self.driver.recycle_rx_buffer(buf);
-                let tx_token = VirtioTxToken { driver: &mut self.driver };
-                Some((rx_token, tx_token))
-            }
-            Err(_) => None,
+        let buffer = &mut self.rx_buffer[..];
+        let bytes_read = uboot::eth_receive(&self.info, buffer);
+        
+        if bytes_read > 0 {
+            let buffer = &buffer[..bytes_read as usize];
+            
+            let rx = UbootRxToken { buf: buffer };
+            let tx = UbootTxToken { 
+                info: &self.info,
+                tx_buffer: &mut self.tx_buffer.data,
+            };
+            Some((rx, tx))
+        } else {
+            None
         }
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-
-        Some(VirtioTxToken { driver: &mut self.driver })
+        Some(UbootTxToken { 
+            info: &self.info,
+            tx_buffer: &mut self.tx_buffer.data,
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.max_transmission_unit = 1500;
         caps.max_burst_size = Some(1);
-        caps.medium = Medium::Ethernet;
+        caps.medium = smoltcp::phy::Medium::Ethernet;
+        caps.checksum.ipv4 = smoltcp::phy::Checksum::Tx;
+        caps.checksum.tcp = smoltcp::phy::Checksum::Tx;
+        caps.checksum.udp = smoltcp::phy::Checksum::Tx;
+        caps.checksum.icmpv4 = smoltcp::phy::Checksum::Tx;
+        caps
+    }
+}
+
+pub struct UbootRxToken<'a> {
+    buf: &'a [u8],
+}
+
+impl<'a> RxToken for UbootRxToken<'a> {
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(self.buf)
+    }
+}
+
+pub struct UbootTxToken<'a> {
+    info: &'a uboot::DeviceInfo,
+    tx_buffer: &'a mut [u8],
+}
+
+impl<'a> TxToken for UbootTxToken<'a> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let res = f(&mut self.tx_buffer[..len]);
         
-        // Re-enable checksum validation
-        caps.checksum.ipv4 = smoltcp::phy::Checksum::Both;
-        caps.checksum.udp = smoltcp::phy::Checksum::Both;
-        caps.checksum.tcp = smoltcp::phy::Checksum::Both;
-        caps.checksum.icmpv4 = smoltcp::phy::Checksum::Both;
-        caps.checksum.icmpv6 = smoltcp::phy::Checksum::Both;
-        
+        let transmit_len = core::cmp::max(len, 60);
+        if transmit_len > len {
+            for i in len..transmit_len {
+                self.tx_buffer[i] = 0;
+            }
+        }
+        let _ = uboot::eth_send(&self.info, &self.tx_buffer[..transmit_len]);
+        res
+    }
+}
+
+pub struct VirtioNetDevice<'a> {
+    pub device: virtio_drivers::device::net::VirtIONet<crate::net::virtio_hal::VirtioHal, virtio_drivers::transport::mmio::MmioTransport<'static>, 128>,
+    _phantom: PhantomData<&'a ()>,
+}
+
+impl<'a> VirtioNetDevice<'a> {
+    pub fn new(device: virtio_drivers::device::net::VirtIONet<crate::net::virtio_hal::VirtioHal, virtio_drivers::transport::mmio::MmioTransport<'static>, 128>) -> Self {
+        Self {
+            device,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn receive<'b>(&'b mut self, _timestamp: Instant) -> Option<(VirtioRxToken, VirtioTxToken<'b, 'a, virtio_drivers::transport::mmio::MmioTransport<'static>>)> {
+        if let Ok(rx_buf) = self.device.receive() {
+            uart::putchar(b'.');
+            Some((VirtioRxToken { buf: rx_buf }, VirtioTxToken { device: self, _phantom: PhantomData }))
+        } else {
+            None
+        }
+    }
+
+    pub fn transmit<'b>(&'b mut self, _timestamp: Instant) -> Option<VirtioTxToken<'b, 'a, virtio_drivers::transport::mmio::MmioTransport<'static>>> {
+        Some(VirtioTxToken { device: self, _phantom: PhantomData })
+    }
+
+    pub fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.max_transmission_unit = 1500;
+        caps.max_burst_size = Some(1);
+        caps.medium = smoltcp::phy::Medium::Ethernet;
         caps
     }
 }
 
 pub struct VirtioRxToken {
-    buf: Vec<u8>,
+    buf: virtio_drivers::device::net::RxBuffer,
 }
 
 impl RxToken for VirtioRxToken {
@@ -70,27 +146,23 @@ impl RxToken for VirtioRxToken {
     where
         F: FnOnce(&[u8]) -> R,
     {
-        f(&self.buf)
+        f(self.buf.packet())
     }
 }
 
-pub struct VirtioTxToken<'b, 'a> {
-    driver: &'b mut VirtIONet<VirtioHal, MmioTransport<'a>, 128>,
+pub struct VirtioTxToken<'a, 'b, T: virtio_drivers::transport::Transport> {
+    device: &'a mut VirtioNetDevice<'b>,
+    _phantom: PhantomData<T>,
 }
 
-impl<'b, 'a> TxToken for VirtioTxToken<'b, 'a> {
+impl<'a, 'b, T: virtio_drivers::transport::Transport> TxToken for VirtioTxToken<'a, 'b, T> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        if len == 0 {
-             // smoltcp should not do this, but we'll be safe
-             let mut empty = [0u8; 0];
-             return f(&mut empty);
-        }
-        let mut tx_buf = self.driver.new_tx_buffer(len);
-        let result = f(tx_buf.packet_mut());
-        let _ = self.driver.send(tx_buf);
-        result
+        let mut tx_buf = self.device.device.new_tx_buffer(len);
+        let res = f(tx_buf.packet_mut());
+        self.device.device.send(tx_buf).expect("Failed to send VirtIO packet");
+        res
     }
 }

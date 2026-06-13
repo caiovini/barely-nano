@@ -47,16 +47,21 @@ impl BootstrapCleanup {
             self.stats.inc(StatType::Bootstrap, DetailType::Timeout);
             self.stats
                 .inc(StatType::BootstrapTimeout, front.query_type.into());
-            state.running_queries.pop_front();
+            
+            let query = state.running_queries.pop_front().unwrap();
+            
+            state.scoring.punish(query.channel_id, 1); // Punish for timeout
+            state.scoring.request_finished(query.channel_id); // Decrement running queries
         }
     }
 
     fn reinsert_known_dependencies(&mut self, state: &mut BootstrapState) {
-        if self.last_dependency_sync.elapsed(rsnano_nullable_clock::Timestamp::new_test_instance()) < Duration::from_secs(30) {
+        let now = self.clock.now();
+        if self.last_dependency_sync.elapsed(now) < Duration::from_secs(5) {
             return;
         }
 
-        self.last_dependency_sync = rsnano_nullable_clock::Timestamp::new_test_instance();
+        self.last_dependency_sync = now;
         self.stats
             .inc(StatType::Bootstrap, DetailType::SyncDependencies);
 

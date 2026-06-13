@@ -271,3 +271,50 @@ impl From<ConfirmationTypeFilter> for &'static str {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::net::{IpAddr, Ipv4Addr};
+
+    #[tokio::test]
+    async fn test_subscription() {
+        // Mock handshake response from server
+        // This is a minimal HTTP 101 Switching Protocols response
+        let mut handshake_resp = Vec::new();
+        handshake_resp.extend_from_slice(b"HTTP/1.1 101 Switching Protocols\r\n");
+        handshake_resp.extend_from_slice(b"Upgrade: websocket\r\n");
+        handshake_resp.extend_from_slice(b"Connection: Upgrade\r\n");
+        handshake_resp.extend_from_slice(b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n");
+
+        let stream = TcpStream::new_null_with(handshake_resp);
+        let rng = NullableRng::rng();
+        let ws = WebSocketClient::new_client(rng);
+        
+        let mut client = NanoWebSocketClient {
+            stream,
+            ws,
+            read_buffer: [0u8; 4096],
+            read_len: 0,
+        };
+
+        let args = SubscribeArgs {
+            topic: TopicSub::Confirmation(ConfirmationSubArgs {
+                include_election_info: true,
+                include_election_info_with_votes: false,
+                include_linked_account: true,
+                include_sideband_info: true,
+                include_block: true,
+                all_local_accounts: false,
+                confirmation_types: ConfirmationTypeFilter::All,
+                accounts: Vec::new(),
+            }),
+            ack: true,
+            id: Some("123"),
+        };
+
+        // This should not fail
+        let result = client.subscribe(args).await;
+        assert!(result.is_ok());
+    }
+}

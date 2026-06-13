@@ -1,11 +1,11 @@
 use alloc::sync::Arc;
-use spin::{ Mutex};
+use spin::Mutex;
 
 use rsnano_core::{Account, BlockHash};
 use rsnano_messages::AccountInfoAckPayload;
 use rsnano_stats::{DetailType, StatType, Stats};
 
-use crate::bootstrap::state::{BootstrapState, CandidateAccounts, RunningQuery};
+use crate::bootstrap::state::{BootstrapState, RunningQuery};
 
 /// Processes responses to an AscPullReq for account info
 pub(crate) struct AccountAckProcessor {
@@ -22,7 +22,11 @@ impl AccountAckProcessor {
         if response.account.is_zero() {
             self.stats
                 .inc(StatType::BootstrapProcess, DetailType::AccountInfoEmpty);
-            // OK, but nothing to do
+            
+            let mut guard = self.state.lock();
+            let now = rsnano_nullable_clock::Timestamp::now();
+            guard.dependency_failed(&query.hash, now);
+            guard.candidate_accounts.priority_down(&query.account);
             return true;
         }
 
@@ -49,6 +53,7 @@ impl AccountAckProcessor {
             .dependency_update(hash, dep_account);
 
         if updated > 0 {
+
             self.stats.add(
                 StatType::BootstrapAccountSets,
                 DetailType::DependencyUpdate,
@@ -63,10 +68,13 @@ impl AccountAckProcessor {
     }
 
     fn prioritize(&self, state: &mut BootstrapState, account: &Account) {
-        // Use the lowest possible priority here
+        tracing::debug!(
+            "AccountAckProcessor: Prioritizing dependency account {}",
+            account.encode_account()
+        );
         if state
             .candidate_accounts
-            .priority_set(account, CandidateAccounts::PRIORITY_CUTOFF)
+            .priority_set(account, crate::bootstrap::state::Priority::new(1024.0))
         {
             self.stats
                 .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
@@ -140,12 +148,14 @@ mod tests {
             1
         );
 
-        assert!(fixture
-            .state
-            .lock()
-            .unwrap()
-            .candidate_accounts
-            .prioritized(&response.account));
+        assert!(
+            fixture
+                .state
+                .lock()
+                .unwrap()
+                .candidate_accounts
+                .prioritized(&response.account)
+        );
 
         assert_eq!(
             fixture.stats.count(

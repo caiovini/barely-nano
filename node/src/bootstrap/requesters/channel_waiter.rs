@@ -1,11 +1,11 @@
+use crate::bootstrap::{BootstrapPromise, PollResult, state::BootstrapState};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::bootstrap::{state::BootstrapState, BootstrapPromise, PollResult};
-use rsnano_network::{token_bucket::TokenBucket, Channel, ChannelId, Network};
+use core::sync::atomic::{AtomicU64, Ordering};
+use rsnano_network::{Channel, ChannelId, Network, token_bucket::TokenBucket};
 use rsnano_nullable_clock::Timestamp;
 use rsnano_stats::StatsCollection;
-use spin::{ Mutex, RwLock };
-use core::sync::atomic::{ AtomicU64, Ordering };
+use spin::{Mutex, RwLock};
 
 /// Waits until a channel becomes available
 #[derive(Clone)]
@@ -71,7 +71,10 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
                     return PollResult::Progress;
                 }
                 self.stats.queries_overfill.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!("ChannelWaiter: waiting for running queries (count: {})", boot_state.running_queries.len());
+                tracing::debug!(
+                    "ChannelWaiter: waiting for running queries (count: {})",
+                    boot_state.running_queries.len()
+                );
             }
             ChannelWaitState::WaitLimiter => {
                 // Wait until more requests can be sent
@@ -80,7 +83,7 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
                     return PollResult::Progress;
                 }
                 self.stats.rate_limit.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!("ChannelWaiter: rate limited");
+                // tracing::info!("ChannelWaiter: rate limited");
             }
             ChannelWaitState::WaitChannel => {
                 // Wait until a channel is available

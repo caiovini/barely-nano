@@ -1,6 +1,5 @@
-use alloc::sync::{ Arc };
-use core::sync::atomic::{ AtomicU64, Ordering };
-use tracing::debug;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use rsnano_ledger::Ledger;
 use rsnano_network::Channel;
@@ -14,9 +13,9 @@ use super::{
 use crate::{
     block_processing::{BlockProcessorQueue, BlockSource},
     bootstrap::{
+        AscPullQuerySpec, BootstrapConfig, BootstrapPromise, PollResult,
         requesters::channel_waiter::{ChannelWaiter, ChannelWaiterStats},
         state::BootstrapState,
-        AscPullQuerySpec, BootstrapConfig, BootstrapPromise, PollResult,
     },
 };
 
@@ -52,7 +51,7 @@ impl PriorityRequester {
             stats,
             channel_waiter,
             query_factory,
-            block_processor_threshold: 32,
+            block_processor_threshold: 1024,
             clock,
         }
     }
@@ -106,7 +105,6 @@ impl BootstrapPromise<AscPullQuerySpec> for PriorityRequester {
                     self.query_factory
                         .next_priority_query(state, channel.clone(), self.clock.now())
                 {
-                    debug!("PriorityRequester: issuing query for account {} to channel {}", query.account.encode_account(), channel.channel_id());
                     self.state = PriorityState::Initial;
                     PollResult::Finished(query)
                 } else {
@@ -153,22 +151,21 @@ impl StatsSource for PriorityRequesterStats {
 
 #[cfg(test)]
 mod tests {
-use spin::{ Mutex, RwLock};
+    use spin::{Mutex, RwLock};
 
     use rsnano_core::Account;
-    use rsnano_network::{token_bucket::TokenBucket, Network};
+    use rsnano_network::{Network, token_bucket::TokenBucket};
     use rsnano_nullable_clock::SteadyClock;
 
     use super::PriorityRequester;
     use crate::{
         block_processing::BlockProcessorQueue,
         bootstrap::{
-            progress,
+            BootstrapConfig, PollResult, progress,
             requesters::{
                 channel_waiter::ChannelWaiter, priority::priority_requester::PriorityState,
             },
             state::BootstrapState,
-            BootstrapConfig, PollResult,
         },
     };
 

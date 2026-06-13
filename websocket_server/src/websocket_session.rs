@@ -1,8 +1,8 @@
 extern crate alloc;
 
+use alloc::string::ToString;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicUsize, Ordering};

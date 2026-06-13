@@ -1,3 +1,4 @@
+use alloc::string::ToString;
 use std::fs::remove_dir_all;
 
 use tracing::info;

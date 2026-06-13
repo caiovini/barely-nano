@@ -1,13 +1,11 @@
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::Any;
 use core::any::TypeId;
-use alloc::sync::Arc;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use spin::{ RwLock };
-// // // // // // // use std::{    any::Any, any::TypeId    }; // TODO: fix this
-
 use rsnano_core::utils::{CancellationToken, Tickable};
 use rsnano_nullable_clock::SteadyClock;
+use spin::RwLock;
 
 use super::ActiveElectionsContainer;
 
@@ -83,9 +81,9 @@ pub trait AecTickerPlugin: Send + Sync + 'static {
 mod tests {
     use super::*;
     use crate::consensus::AecInsertRequest;
-    use rsnano_core::{utils::BlockPriority, SavedBlock};
-    use rsnano_nullable_clock::Timestamp;
     use core::sync::atomic::{AtomicBool, Ordering};
+    use rsnano_core::{SavedBlock, utils::BlockPriority};
+    use rsnano_nullable_clock::Timestamp;
 
     #[test]
     fn call_plugins() {

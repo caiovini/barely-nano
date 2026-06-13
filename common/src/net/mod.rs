@@ -1,14 +1,11 @@
 pub mod virtio_hal;
 pub mod device;
 pub mod async_tcp;
+pub use async_tcp::AsyncTcpStream;
 
-use core::ptr::NonNull;
-use virtio_drivers::device::net::VirtIONet;
-use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
-use virtio_drivers::transport::{DeviceType, Transport};
-use crate::net::virtio_hal::VirtioHal;
-use crate::net::device::VirtioNetDevice;
+use crate::net::device::UbootNetDevice;
 use crate::uart;
+use crate::uboot;
 use spin::Mutex;
 
 pub static NET: Mutex<Option<NetworkContext<'static>>> = Mutex::new(None);
@@ -19,18 +16,97 @@ const VIRTIO_MAX: usize = 0x10008000;
 
 extern crate alloc;
 use alloc::vec;
-use smoltcp::iface::{Config, Interface, SocketSet};
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
+use smoltcp::iface::{Config, Interface, SocketSet, PollResult};
+use smoltcp::phy::Device;
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::socket::AnySocket;
 use smoltcp::socket::icmp::{Socket as IcmpSocket, PacketBuffer as IcmpPacketBuffer};
 use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer as TcpSocketBuffer};
 use smoltcp::socket::dns::{Socket as DnsSocket};
 use smoltcp::time::Instant;
 
+pub enum NetDevice<'a> {
+    Virtio(device::VirtioNetDevice<'a>),
+    Uboot(device::UbootNetDevice),
+}
+
+impl<'a> smoltcp::phy::Device for NetDevice<'a> {
+    type RxToken<'b> = NetRxToken<'b> where Self: 'b;
+    type TxToken<'b> = NetTxToken<'b> where Self: 'b;
+
+    fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        match self {
+            NetDevice::Virtio(d) => {
+                let (rx, tx) = d.receive(timestamp)?;
+                let tx_static = unsafe { core::mem::transmute(tx) };
+                Some((NetRxToken::Virtio(rx), NetTxToken::Virtio(tx_static)))
+            }
+            NetDevice::Uboot(d) => {
+                let (rx, tx) = d.receive(timestamp)?;
+                Some((NetRxToken::Uboot(rx), NetTxToken::Uboot(tx)))
+            }
+        }
+    }
+
+    fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        match self {
+            NetDevice::Virtio(d) => {
+                let tx = d.transmit(timestamp)?;
+                let tx_static = unsafe { core::mem::transmute(tx) };
+                Some(NetTxToken::Virtio(tx_static))
+            },
+            NetDevice::Uboot(d) => Some(NetTxToken::Uboot(d.transmit(timestamp)?)),
+        }
+    }
+
+    fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
+        match self {
+            NetDevice::Virtio(d) => d.capabilities(),
+            NetDevice::Uboot(d) => d.capabilities(),
+        }
+    }
+}
+
+pub enum NetRxToken<'a> {
+    Virtio(device::VirtioRxToken),
+    Uboot(device::UbootRxToken<'a>),
+}
+
+impl<'a> smoltcp::phy::RxToken for NetRxToken<'a> {
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        match self {
+            NetRxToken::Virtio(t) => t.consume(f),
+            NetRxToken::Uboot(t) => t.consume(f),
+        }
+    }
+}
+
+pub enum NetTxToken<'b> {
+    Virtio(device::VirtioTxToken<'b, 'static, virtio_drivers::transport::mmio::MmioTransport<'static>>),
+    Uboot(device::UbootTxToken<'b>),
+}
+
+impl<'b> smoltcp::phy::TxToken for NetTxToken<'b> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        match self {
+            NetTxToken::Virtio(t) => t.consume(len, f),
+            NetTxToken::Uboot(t) => t.consume(len, f),
+        }
+    }
+}
+
 pub struct NetworkContext<'a> {
     pub iface: Interface,
-    pub device: VirtioNetDevice<'a>,
+    pub device: NetDevice<'a>,
     pub sockets: SocketSet<'a>,
     pub tcp_handle: smoltcp::iface::SocketHandle,
+    pub icmp_handle: smoltcp::iface::SocketHandle,
     pub dns_handle: smoltcp::iface::SocketHandle,
     pub peering_handle: smoltcp::iface::SocketHandle,
     pub udp_handle: smoltcp::iface::SocketHandle,
@@ -61,14 +137,42 @@ impl<'a> NetworkContext<'a> {
     }
 
     pub fn poll(&mut self, mtime: u64) -> bool {
-        let timestamp = Instant::from_micros((mtime / 10) as i64);
-        let res = self.iface.poll(timestamp, &mut self.device, &mut self.sockets);
-        res != smoltcp::iface::PollResult::None
+        let timestamp = Instant::from_micros((mtime as u128 * 1_000_000 / crate::clint::FREQ as u128) as i64);
+        
+        let mut progress = false;
+        loop {
+            match self.iface.poll(timestamp, &mut self.device, &mut self.sockets) {
+                PollResult::None => break,
+                _ => {
+                    progress = true;
+                }
+            }
+        }
+        progress
+    }
+
+    pub fn ping(&mut self, target: Ipv4Address) {
+        use smoltcp::socket::icmp::Socket as IcmpSocket;
+        use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr};
+        
+        let socket = self.sockets.get_mut::<IcmpSocket>(self.icmp_handle);
+        if socket.can_send() {
+            let mut buffer = [0u8; 8];
+            let icmp_repr = Icmpv4Repr::EchoRequest {
+                ident: 0x1234,
+                seq_no: 1,
+                data: &[],
+            };
+            let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut buffer);
+            icmp_repr.emit(&mut icmp_packet, &self.device.capabilities().checksum);
+            
+            let _ = socket.send_slice(&buffer, target.into());
+        }
     }
 
     pub fn create_tcp_socket(&mut self) -> smoltcp::iface::SocketHandle {
-        let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
-        let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
+        let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
+        let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
         let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
         self.sockets.add(tcp_socket)
     }
@@ -121,106 +225,133 @@ pub async fn resolve(name: &str) -> Result<alloc::vec::Vec<IpAddress>, ()> {
     }).await
 }
 
-
-pub fn init_virtio_net<'a>() -> Option<NetworkContext<'a>> {
-    for addr in (VIRTIO0..=VIRTIO_MAX).step_by(VIRTIO_STEP) {
-        let header = NonNull::new(addr as *mut VirtIOHeader).unwrap();
-        match unsafe { MmioTransport::new(header, VIRTIO_STEP) } {
-            Ok(transport) => {
-                if transport.device_type() == DeviceType::Network {
-                    /*
-                    uart::print(b"[net] Found VirtIO Network device at ");
-                    uart::print_usize(addr);
-                    uart::print(b"\n");
-                    */
-
-                    match VirtIONet::<VirtioHal, MmioTransport, 128>::new(transport, 2048) {
-                        Ok(driver) => {
-                            let mac = driver.mac_address();
-                            /*
-                            uart::print(b"[net] MAC address: ");
-                            for (i, &b) in mac.iter().enumerate() {
-                                uart::print_usize(b as usize);
-                                if i < 5 { uart::print(b":"); }
-                            }
-                            uart::print(b"\n");
-                            */
-
-                            let mut device = VirtioNetDevice::new(driver);
-                            let hardware_addr = HardwareAddress::Ethernet(EthernetAddress([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]));
-                            let mut config = Config::new(hardware_addr);
-                            config.random_seed = 0x12345678;
-
-                            let mtime = crate::clint::mtime();
-                            let start_ts = Instant::from_micros((mtime / 10) as i64);
-                            let mut iface = Interface::new(config, &mut device, start_ts);
-                            iface.update_ip_addrs(|ip_addrs| {
-                                ip_addrs.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::new(10, 0, 2, 15)), 24)).unwrap();
-                                ip_addrs.push(IpCidr::new(IpAddress::Ipv6(Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)), 64)).unwrap();
-                            });
-                            iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(10, 0, 2, 2)).unwrap();
-
-                            let mut sockets = SocketSet::new(vec![]);
-                            let icmp_rx_buffer = IcmpPacketBuffer::new(vec![smoltcp::socket::icmp::PacketMetadata::EMPTY], vec![0; 256]);
-                            let icmp_tx_buffer = IcmpPacketBuffer::new(vec![smoltcp::socket::icmp::PacketMetadata::EMPTY], vec![0; 256]);
-                            let icmp_socket = IcmpSocket::new(icmp_rx_buffer, icmp_tx_buffer);
-                            sockets.add(icmp_socket);
-
-                            let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 32768]);
-                            let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 32768]);
-                            let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
-                            let tcp_handle = sockets.add(tcp_socket);
-
-                            let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 32768]);
-                            let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 32768]);
-                            let mut tcp_peering = TcpSocket::new(tcp_rx_buffer_2, tcp_tx_buffer_2);
-                            let _ = tcp_peering.listen(7075);
-                            let peering_handle = sockets.add(tcp_peering);
-
-                            let dns_servers = &[smoltcp::wire::Ipv4Address::new(10, 0, 2, 3).into()];
-                            let dns_socket = DnsSocket::new(dns_servers, vec![]);
-                            let dns_handle = sockets.add(dns_socket);
-
-                            let udp_rx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4], vec![0; 1024]);
-                            let udp_tx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4], vec![0; 1024]);
-                            let udp_socket = smoltcp::socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
-                            let udp_handle = sockets.add(udp_socket);
-
-                            let tcp_rx_buffer_3 = TcpSocketBuffer::new(vec![0; 4096]);
-                            let tcp_tx_buffer_3 = TcpSocketBuffer::new(vec![0; 4096]);
-                            let mut tcp_rpc = TcpSocket::new(tcp_rx_buffer_3, tcp_tx_buffer_3);
-                            let _ = tcp_rpc.listen(7076);
-                            let rpc_handle = sockets.add(tcp_rpc);
-
-                            return Some(NetworkContext {
-                                iface,
-                                device,
-                                sockets,
-                                tcp_handle,
-                                dns_handle,
-                                peering_handle,
-                                udp_handle,
-                                rpc_handle,
-                            });
-                        }
-                        Err(e) => {
-                            uart::print(b"[net] Failed to initialize VirtIONet: ");
-                            match e {
-                                virtio_drivers::Error::NotReady => uart::print(b"NotReady\n"),
-                                virtio_drivers::Error::InvalidParam => uart::print(b"InvalidParam\n"),
-                                virtio_drivers::Error::DmaError => uart::print(b"DmaError\n"),
-                                virtio_drivers::Error::IoError => uart::print(b"IoError\n"),
-                                virtio_drivers::Error::Unsupported => uart::print(b"Unsupported\n"),
-                                virtio_drivers::Error::ConfigSpaceTooSmall => uart::print(b"ConfigSpaceTooSmall\n"),
-                                _ => uart::print(b"Other\n"),
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {} // not a virtio device or unsupported
-        }
+pub fn initialize_net() {
+    if let Some(ctx) = init_uboot_net() {
+        *NET.lock() = Some(ctx);
     }
-    uart::print(b"[net] No VirtIO Network device found\n");
+}
+
+pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
+    uart::print(b"[net] Scanning U-Boot devices for Network Interface...\n");
+    
+    let mut net_info = None;
+    let mut last_info = None;
+    let mut max_devices = 16;
+    while max_devices > 0 {
+        if let Some(info) = uboot::dev_enum(last_info.as_ref()) {
+            if info.type_ == uboot::DEV_TYP_NET {
+                net_info = Some(info);
+                break;
+            }
+            last_info = Some(info);
+        } else {
+            break;
+        }
+        max_devices -= 1;
+    }
+
+    if let Some(mut info) = net_info {
+        uart::print(b"[net] Found U-Boot Network Device!\n");
+        let _ = uboot::dev_close(&mut info);
+        let res = uboot::dev_open(&mut info);
+        if res != 0 {
+            return None;
+        }
+
+        let mut device = NetDevice::Uboot(UbootNetDevice::new(info));
+        
+        // Hardcode the real MAC found in the log: c0:74:2b:f9:15:ec
+        let mut mac_bytes = [0xc0, 0x74, 0x2b, 0xf9, 0x15, 0xec];
+        let mac_found = true;
+        
+        crate::uart::print(b"[net] Using HARDCODED real MAC: c0:74:2b:f9:15:ec\n");
+
+        if !mac_found {
+            crate::uart::print(b"[net] Using fallback randomized MAC\n");
+            mac_bytes = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
+            let mut seed = crate::clint::mtime();
+            for i in 1..6 {
+                seed = seed.wrapping_mul(0x6364136229384751).wrapping_add(1);
+                mac_bytes[i] = (seed % 256) as u8;
+            }
+        }
+
+        let mtime = crate::clint::mtime();
+        crate::uart::print(b"[net] MAC: ");
+        for i in 0..6 {
+            crate::uart::print_u8_hex(mac_bytes[i]);
+            if i < 5 { crate::uart::print(b":"); }
+        }
+        crate::uart::print(b"\n");
+        let hardware_addr = HardwareAddress::Ethernet(EthernetAddress(mac_bytes));
+        let mut config = Config::new(hardware_addr);
+        
+        // Better randomness for ISNs
+        let mut seed = mtime;
+        for _ in 0..16 {
+            seed = seed.wrapping_mul(0x6364136229384751).wrapping_add(1);
+        }
+        config.random_seed = seed;
+
+        // Initialize ephemeral port counter with randomness
+        let start_port = (seed % 16384) as u16 + 49152;
+        crate::net::async_tcp::set_starting_port(start_port);
+
+        let start_ts = Instant::from_micros((mtime / (crate::clint::FREQ / 1_000_000)) as i64);
+        let mut iface = Interface::new(config, &mut device, start_ts);
+        
+        let static_ip = Ipv4Address::new(192, 168, 0, 200);
+        iface.update_ip_addrs(|ip_addrs| {
+            ip_addrs.push(IpCidr::new(IpAddress::Ipv4(static_ip), 24)).unwrap();
+        });
+        iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(192, 168, 0, 1)).unwrap();
+        
+        crate::uart::print(b"[net] IP: 192.168.0.200\n");
+
+        let mut sockets = SocketSet::new(vec![]);
+        let icmp_rx_buffer = IcmpPacketBuffer::new(vec![smoltcp::socket::icmp::PacketMetadata::EMPTY], vec![0; 256]);
+        let icmp_tx_buffer = IcmpPacketBuffer::new(vec![smoltcp::socket::icmp::PacketMetadata::EMPTY], vec![0; 256]);
+        let icmp_socket = IcmpSocket::new(icmp_rx_buffer, icmp_tx_buffer);
+        let icmp_handle = sockets.add(icmp_socket);
+
+        let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
+        let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
+        let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
+        let tcp_handle = sockets.add(tcp_socket);
+
+        let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 65535]);
+        let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 65535]);
+        let mut tcp_peering = TcpSocket::new(tcp_rx_buffer_2, tcp_tx_buffer_2);
+        let _ = tcp_peering.listen(7075);
+        let peering_handle = sockets.add(tcp_peering);
+
+        let dns_servers = &[smoltcp::wire::Ipv4Address::new(1, 1, 1, 1).into()];
+        let dns_socket = DnsSocket::new(dns_servers, vec![]);
+        let dns_handle = sockets.add(dns_socket);
+
+        let udp_rx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4], vec![0; 1024]);
+        let udp_tx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4], vec![0; 1024]);
+        let udp_socket = smoltcp::socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
+        let udp_handle = sockets.add(udp_socket);
+
+        let tcp_rx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
+        let tcp_tx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
+        let mut tcp_rpc = TcpSocket::new(tcp_rx_buffer_3, tcp_tx_buffer_3);
+        let _ = tcp_rpc.listen(7076);
+        let rpc_handle = sockets.add(tcp_rpc);
+
+        return Some(NetworkContext {
+            iface,
+            device,
+            sockets,
+            tcp_handle,
+            icmp_handle,
+            dns_handle,
+            peering_handle,
+            udp_handle,
+            rpc_handle,
+        });
+    }
+
     None
 }

@@ -1,14 +1,12 @@
-use core::sync::atomic::Ordering;
 use alloc::sync::{Arc, Weak};
+use core::sync::atomic::Ordering;
 use spin::{Mutex, RwLock};
 
-use tracing::{debug, warn};
+use tracing::warn;
 
 use rsnano_core::{NodeId, ProtocolInfo};
 use rsnano_messages::*;
-use rsnano_network::{
-    Channel, ChannelDirection, ChannelMode, DataReceiver, Network, ReceiveResult, TrafficType,
-};
+use rsnano_network::{Channel, ChannelMode, DataReceiver, Network, ReceiveResult, TrafficType};
 use rsnano_stats::{DetailType, Direction, StatType, Stats};
 
 use crate::{HandshakeProcess, HandshakeStats, HandshakeStatus, LatestKeepalives};
@@ -57,7 +55,7 @@ impl NanoDataReceiver {
     }
 
     pub fn ensure_handshake(&mut self) {
-        if self.channel.direction() == ChannelDirection::Outbound {
+        if self.channel.direction() == rsnano_network::ChannelDirection::Outbound {
             self.initiate_handshake();
         }
     }
@@ -68,26 +66,40 @@ impl NanoDataReceiver {
 
         match result {
             Ok(_) => {
-                debug!("Initiating handshake query ({})", peer);
+                tracing::debug!(
+                    "Initiating handshake query for {} ({:?})",
+                    peer,
+                    self.channel.direction()
+                );
                 self.handshake_stats
                     .handshakes_sent
                     .fetch_add(1, Ordering::Relaxed);
+                kernel_common::uart::putchar(b'q');
                 self.handshake_stats
                     .initiate
                     .fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
-                warn!("Could not initiate handshake: {:?}", e);
+                warn!("Could not initiate handshake for {}: {:?}", peer, e);
                 self.channel.close();
             }
         }
     }
 
     fn queue_realtime(&mut self, message: Message) -> ReceiveResult {
+        tracing::debug!(
+            "Queuing realtime message: {:?} from {}",
+            message.message_type(),
+            self.channel.peer_addr()
+        );
         let enqueued = self.try_enqueue(message.clone());
         if enqueued {
             ReceiveResult::Continue
         } else {
+            tracing::warn!(
+                "Message queue full! Pausing receiver for {}",
+                self.channel.peer_addr()
+            );
             self.retry_enqueue = Some(message);
             ReceiveResult::Pause
         }
@@ -106,11 +118,15 @@ impl NanoDataReceiver {
     fn process_realtime(&mut self, message: Message) -> ReceiveResult {
         let process = match &message {
             Message::Keepalive(keepalive) => {
+                kernel_common::uart::putchar(b'K');
                 self.set_last_keepalive(keepalive.clone());
                 true
             }
-            Message::Publish(_)
-            | Message::AscPullAck(_)
+            Message::Publish(_) => {
+                kernel_common::uart::putchar(b'B');
+                true
+            }
+            Message::AscPullAck(_)
             | Message::AscPullReq(_)
             | Message::ConfirmAck(_)
             | Message::ConfirmReq(_)
@@ -122,6 +138,7 @@ impl NanoDataReceiver {
         if process {
             self.queue_realtime(message)
         } else {
+            kernel_common::uart::putchar(b'*');
             ReceiveResult::Continue
         }
     }
@@ -144,6 +161,7 @@ impl NanoDataReceiver {
                 observer(channel.clone());
             }
 
+            kernel_common::uart::putchar(b'u');
             self.stats
                 .inc(StatType::TcpChannels, DetailType::ChannelAccepted);
             true
@@ -173,15 +191,17 @@ impl NanoDataReceiver {
                         .fetch_add(1, Ordering::Relaxed);
 
                     let (status, response) = self.handshake_process.process_handshake(payload);
+                    kernel_common::uart::putchar(b'h');
                     if response.is_some() {
-                         self.handshake_stats
+                        kernel_common::uart::putchar(b'k');
+                        self.handshake_stats
                             .response_ok
                             .fetch_add(1, Ordering::Relaxed);
                     }
                     (status, response)
                 }
 
-                _ => (HandshakeStatus::Abort, None),
+                _ => (HandshakeStatus::Handshake, None),
             };
 
             if let Some(response) = response {
@@ -195,13 +215,19 @@ impl NanoDataReceiver {
                         .handshakes_sent
                         .fetch_add(1, Ordering::Relaxed);
                 } else {
+                    kernel_common::uart::putchar(b'X');
                     status = HandshakeStatus::Abort;
                 }
             }
 
             match status {
                 HandshakeStatus::Abort | HandshakeStatus::AbortOwnNodeId => {
-                    tracing::info!("Handshake aborted with {} (status: {:?})", self.channel.peer_addr(), status);
+                    kernel_common::uart::putchar(b'f');
+                    tracing::warn!(
+                        "Handshake aborted with {} (status: {:?})",
+                        self.channel.peer_addr(),
+                        status
+                    );
                     if matches!(status, HandshakeStatus::AbortOwnNodeId) {
                         if let Some(peering_addr) = self.channel.peering_addr() {
                             if let Some(network) = self.network.upgrade() {
@@ -215,6 +241,7 @@ impl NanoDataReceiver {
                     return ReceiveResult::Continue;
                 }
                 HandshakeStatus::Realtime(node_id) => {
+                    kernel_common::uart::putchar(b'h');
                     self.node_id = node_id;
                     return ReceiveResult::Pause;
                 }
@@ -223,18 +250,19 @@ impl NanoDataReceiver {
             return self.process_realtime(message);
         }
 
+        kernel_common::uart::putchar(b'!');
         ReceiveResult::Abort
     }
 }
 
 impl DataReceiver for NanoDataReceiver {
     fn receive(&mut self, data: &[u8]) -> ReceiveResult {
-        
-
+        kernel_common::uart::putchar(b'i');
         self.message_deserializer.push(data);
         while let Some(result) = self.message_deserializer.try_deserialize() {
             let result = match result {
                 Ok(msg) => {
+                    kernel_common::uart::putchar(b'm');
                     if self.first_message {
                         self.channel
                             .set_protocol_version(msg.protocol.version_using);
@@ -243,10 +271,18 @@ impl DataReceiver for NanoDataReceiver {
                     self.process_message(msg.message)
                 }
                 Err(e) => {
-                    if matches!(e, ParseMessageError::DuplicateConfirmAckMessage | ParseMessageError::DuplicatePublishMessage) {
+                    if matches!(
+                        e,
+                        ParseMessageError::DuplicateConfirmAckMessage
+                            | ParseMessageError::DuplicatePublishMessage
+                    ) {
                         ReceiveResult::Continue
                     } else {
-                        warn!("Message deserialization error: {:?} (addr: {})", e, self.channel.peer_addr());
+                        tracing::debug!(
+                            "Message deserialization error: {:?} (addr: {})",
+                            e,
+                            self.channel.peer_addr()
+                        );
                         ReceiveResult::Abort
                     }
                 }
@@ -261,8 +297,8 @@ impl DataReceiver for NanoDataReceiver {
     }
 
     fn ensure_handshake(&mut self) {
-        if self.channel.direction() == ChannelDirection::Outbound {
-            let _ = self.handshake_process.initiate_handshake(&self.channel.peer_addr());
+        if self.channel.direction() == rsnano_network::ChannelDirection::Outbound {
+            self.initiate_handshake();
         }
     }
 
@@ -270,11 +306,13 @@ impl DataReceiver for NanoDataReceiver {
         let mode = self.channel.mode();
         match mode {
             ChannelMode::Undefined => {
+                kernel_common::uart::putchar(b'P');
                 let q_len = self.channel.queue_len();
                 if q_len > 0 {
                     return ReceiveResult::Pause;
                 }
 
+                kernel_common::uart::putchar(b'C');
                 if !self.to_realtime_connection(&self.node_id) {
                     return ReceiveResult::Abort;
                 }

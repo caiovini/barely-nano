@@ -76,10 +76,10 @@ use crate::{
     transport::{
         keepalive::{KeepaliveMessageFactory, KeepalivePublisher},
         run_loopback_channel_adapter, BlockFlooder, MessageFlooder, MessageProcessor,
-        MessageSender, NetworkThreads, PeerCacheConnector, PeerCacheUpdater,
+        MessageSender, NetworkThreads, PeerCacheConnector, PeerCacheConnectorExt, PeerCacheUpdater,
         RealtimeMessageHandler,
     },
-    utils::{spawn_backpressure_processor, ThreadPool, ThreadPoolImpl},
+    utils::{spawn_backpressure_processor, ThreadPool, ThreadPoolImpl, Spammer},
     wallets::{ReceivableSearch, WalletBackup, Wallets, WalletsExt},
     work::{WorkFactory, WorkRequest},
     NodeCallbacks, OnlineWeightSampler,
@@ -155,9 +155,12 @@ pub struct Node {
     block_rates: Arc<CurrentBlockRates>,
     pub aec_voter: Mutex<AecVoter>,
     pub dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
+    pub syn_cookies: Arc<SynCookies>,
+    pub spammer: Arc<Spammer>,
+    pub signature_checker: Arc<crate::signatures::SignatureChecker>,
 }
 
-pub(crate) struct NodeArgs {
+pub struct NodeArgs {
     pub data_path: String,
     pub config: NodeConfig,
     pub network_params: NetworkParams,
@@ -185,20 +188,25 @@ impl NodeArgs {
 
 impl Node {
     pub fn tick(&self) {
-        self.backlog_scan.lock().run_once();
+        if let Some(mut guard) = self.backlog_scan.try_lock() {
+            guard.run_once();
+        }
         self.bounded_backlog.run_once();
         self.bounded_backlog.run_scan_once();
         self.election_schedulers.run_once();
         self.unchecked.run_once();
 
         let cancel_token = rsnano_core::utils::CancellationToken::new();
-        self.block_rate_calculator.lock().tick(&cancel_token);
+        if let Some(mut guard) = self.block_rate_calculator.try_lock() {
+            guard.tick(&cancel_token);
+        }
     }
 
     pub fn tick_monitor(&self) {
-        let mut guard = self.monitor.lock();
-        let cancel_token = rsnano_core::utils::CancellationToken::new();
-        rsnano_core::utils::Tickable::tick(&mut *guard, &cancel_token);
+        if let Some(mut guard) = self.monitor.try_lock() {
+            let cancel_token = rsnano_core::utils::CancellationToken::new();
+            rsnano_core::utils::Tickable::tick(&mut *guard, &cancel_token);
+        }
     }
     pub fn new_null() -> Self {
         Self::new_null_with_callbacks(Default::default())
@@ -225,8 +233,14 @@ impl Node {
             PrivateKey::from_bytes(&[0u8; 32])
         });
         let node_id = NodeId::from(&node_id_key);
-        info!("--- DYNAMIC NODE START ---");
+        info!("Node started");
         info!("Node ID: {}", node_id);
+        kernel_common::uart::print(b"[node] Node ID: ");
+        let pk = node_id_key.public_key();
+        for b in pk.as_bytes() {
+            kernel_common::uart::print_u8_hex(*b);
+        }
+        kernel_common::uart::print(b"\n");
         let global_config = GlobalConfig::default();
         let (ledger_tx, ledger_rx) = backpressure_channel(1024 * 5);
         let mut event_queues_info = ContainerInfoFactory::new();
@@ -240,6 +254,7 @@ impl Node {
         info!("Node started");
         info!("Version: 27.1");
         info!("Network: {}", network_label);
+        info!("Protocol version: {}", network_params.network.protocol_info().version_using);
         info!("Data path: {}", application_path);
         info!(
             "Genesis block: {}",
@@ -256,14 +271,7 @@ impl Node {
             config.enable_voting = true;
         }
 
-        let work_factory = Arc::new(
-            WorkFactory::builder()
-                .local_work_pool(|p| {
-                    p.threads(config.work_threads as usize)
-                        .cpu_rate_limit(Duration::from_millis(config.pow_sleep_interval_ns as u64))
-                })
-                .finish(),
-        );
+        let work_factory = Arc::new(WorkFactory::disabled());
 
         let steady_clock = if is_nulled {
             Arc::new(SteadyClock::new_null())
@@ -285,13 +293,14 @@ impl Node {
             Default::default()
         };
 
-        info!("Loading ledger, this may take a while...");
+        kernel_common::uart::print(b"[node] Loading ledger via LedgerBuilder...\n");
         let ledger = LedgerBuilder::new()
             .constants(network_params.ledger.clone())
             .min_rep_weight(config.representative_vote_weight_minimum)
             .bootstrap_weights(bootstrap_weights.clone())
             .stats(stats.clone())
             .finish();
+        kernel_common::uart::print(b"[node] Loading ledger done.\n");
 
         let ledger = match ledger {
             Ok(i) => i,
@@ -309,7 +318,9 @@ impl Node {
         info!("Confirmed count: {}", ledger.confirmed_count());
         info!("Account count: {}", ledger.account_count());
 
-        let syn_cookies = Arc::new(SynCookies::new(network_params.network.max_peers_per_ip, steady_clock.clone()));
+        // In the QEMU environment, all inbound connections come from the same IP (10.0.2.2).
+        // We increase the cookie limit to allow all connections to complete the handshake.
+        let syn_cookies = Arc::new(SynCookies::new(64, steady_clock.clone()));
 
         // In bare-metal we don't have multiple threads, so we use a dummy thread pool
         let workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::create(1, "Workers"));
@@ -653,6 +664,16 @@ impl Node {
         let backlog_scan =
             BacklogScan::new(Default::default(), ledger.clone(), steady_clock.clone());
         let backlog_scan = Arc::new(Mutex::new(backlog_scan));
+        
+        let bootstrap_state_w = Arc::downgrade(&bootstrapper.get_state());
+        backlog_scan.lock().on_unconfirmed_found(move |batch| {
+            if let Some(state) = bootstrap_state_w.upgrade() {
+                let mut guard = state.lock();
+                for info in batch {
+                    guard.candidate_accounts.priority_set(&info.account, crate::bootstrap::state::CandidateAccounts::PRIORITY_MAX);
+                }
+            }
+        });
 
         //  TODO: Hook this direclty in the schedulers
         let schedulers_w = Arc::downgrade(&election_schedulers);
@@ -800,13 +821,33 @@ impl Node {
         ));
 
         let ledger_tx_clone = ledger_tx.clone();
+        let signature_checker = Arc::new(crate::signatures::SignatureChecker::new());
         let block_processor = Arc::new(BlockProcessor::new(
             block_processor_queue.clone(),
             ledger.clone(),
             unchecked.clone(),
             backlog_waiter.clone(),
             ledger_tx_clone,
+            signature_checker.clone(),
         ));
+
+    let genesis_account = ledger.constants.genesis_block.account();
+    let genesis_info = ledger.any().get_account(&genesis_account);
+    tracing::info!("Genesis account: {}, info: {:?}", genesis_account.encode_account(), genesis_info);
+    
+    let genesis_info = genesis_info.unwrap_or_else(|| {
+        rsnano_core::AccountInfo {
+            head: ledger.constants.genesis_block.hash(),
+            balance: ledger.constants.genesis_block.balance(),
+            ..Default::default()
+        }
+    });
+
+    let spammer = Arc::new(Spammer::new(
+        block_processor.clone(),
+        genesis_info.head,
+        genesis_info.balance,
+    ));
 
         let mut dead_channel_cleanup = DeadChannelCleanup::new(
             steady_clock.clone(),
@@ -844,6 +885,7 @@ impl Node {
             bootstrap_server.clone(),
             bootstrapper.clone(),
             network_params.work.clone(),
+            latest_keepalives.clone(),
         ));
 
         let network_threads = Arc::new(Mutex::new(NetworkThreads::new(
@@ -890,7 +932,7 @@ impl Node {
 
         // Requeue blocks that could not be immediately processed
         let queue_w = Arc::downgrade(&block_processor_queue);
-        unchecked.set_satisfied_observer(Box::new(move |info| {
+        unchecked.set_satisfied_observer(Arc::new(move |info| {
             if let Some(queue) = queue_w.upgrade() {
                 queue.push(BlockContext::new(
                     info.block.clone().into(),
@@ -921,17 +963,24 @@ impl Node {
         network
             .write()
             .on_new_realtime_channel(Arc::new(move |channel| {
-                // Send a keepalive message to the new channel
-                let Some(factory) = keepalive_factory_w.upgrade() else {
-                    return;
-                };
-                let Some(publisher) = message_publisher_w.upgrade() else {
-                    return;
-                };
-                let keepalive = factory.create_keepalive_self();
-                publisher
-                    .lock()
-                    .try_send(&channel, &keepalive, TrafficType::Keepalive);
+                // Send a keepalive message to the new channel after a small delay
+                // to allow the remote peer's async event loop to complete its transition to Realtime mode.
+                let keepalive_factory_w = keepalive_factory_w.clone();
+                let message_publisher_w = message_publisher_w.clone();
+                let channel = channel.clone();
+                async_rt::spawn(async move {
+                    async_rt::sleep(core::time::Duration::from_millis(1200)).await;
+                    let Some(factory) = keepalive_factory_w.upgrade() else {
+                        return;
+                    };
+                    let Some(publisher) = message_publisher_w.upgrade() else {
+                        return;
+                    };
+                    let keepalive = factory.create_keepalive_self();
+                    publisher
+                        .lock()
+                        .try_send(&channel, &keepalive, TrafficType::Keepalive);
+                });
             }));
 
         if !work_factory.work_generation_enabled() {
@@ -1024,6 +1073,8 @@ impl Node {
             active_elections.clone(),
             block_rates.clone(),
             bootstrapper.clone(),
+            unchecked.clone(),
+            block_processor.clone(),
         )));
 
         let mut wallet_reps_checker = WalletRepsChecker::new(wallets.wallet_reps.clone());
@@ -1159,7 +1210,7 @@ impl Node {
         // container_info.add("ledger", ledger.clone());
         container_info.add("active", active_elections.clone());
         // container_info.add("network", network.clone());
-        container_info.add("syn_cookies", syn_cookies);
+        container_info.add("syn_cookies", syn_cookies.clone());
         container_info.add("telemetry", telemetry.clone());
         container_info.add("wallets", wallets.clone());
         container_info.add("vote_processor", vote_processor_queue.clone());
@@ -1183,7 +1234,7 @@ impl Node {
         container_info.add("fork_cache", fork_cache.clone());
         // container_info.add("event_queues", event_queues_info);
 
-        Self {
+        let node_instance = Self {
             is_nulled,
             steady_clock,
             peer_cache_updater: Arc::new(peer_cache_updater),
@@ -1251,7 +1302,12 @@ impl Node {
             block_rates,
             aec_voter: Mutex::new(aec_voter),
             dead_channel_cleanup,
-        }
+            syn_cookies,
+            spammer,
+            signature_checker,
+        };
+        kernel_common::uart::print(b"[node] Node construction completed successfully!\n");
+        node_instance
     }
 
     pub fn container_info(&self) -> ContainerInfo {
@@ -1426,6 +1482,7 @@ impl Node {
 
     /// Note: Start must not be called from an async thread, because it blocks!
     pub fn start(&mut self) {
+        kernel_common::uart::print(b"[node] start() entered...\n");
         self.start_stop_listener.emit("start");
         if self.is_nulled {
             return; // TODO better nullability implementation
@@ -1440,6 +1497,7 @@ impl Node {
 
             panic!("Genesis block not found!");
         }
+        kernel_common::uart::print(b"[node] start() genesis block verified.\n");
 
         // In bare-metal we spawn async tasks instead of starting TimerThreads
         // Block rate calculator is now ticked in Node::tick
@@ -1457,6 +1515,7 @@ impl Node {
 
         self.network_threads.lock().start();
         self.message_processor.lock().start();
+        kernel_common::uart::print(b"[node] start() network & message processor threads running.\n");
         // self.aec_voter.start(Duration::from_millis(20));
 
         if self.flags.enable_pruning {
@@ -1469,6 +1528,11 @@ impl Node {
 
         if self.config.tcp.max_inbound_connections > 0 {
             self.tcp_listener.run();
+            // Advertise our listening port in keepalives (peers[0]) so remote nodes
+            // can identify our peering address and avoid duplicate connection rejections.
+            self.network
+                .write()
+                .set_listening_port(self.network_params.network.default_node_port);
         } else {
             warn!("Peering is disabled");
         }
@@ -1514,27 +1578,15 @@ impl Node {
         self.bootstrapper.start();
         self.telemetry.start();
         self.local_block_broadcaster.start();
-        self.rep_crawler.start();
-
-        /*
-        self.peer_cache_updater.start_delayed(if is_dev_network {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_secs(15)
-        });
-        */
-
-/*
         if !self.config.network.peer_reachout.is_zero() {
-            self.peer_cache_connector.lock()
-                .tick(&rsnano_core::utils::CancellationToken::new());
+            self.peer_cache_connector.start(Duration::from_secs(15));
         }
-*/
+
 
         let cleanup = self.dead_channel_cleanup.clone();
         let stats = self.stats.clone();
         let clock = self.steady_clock.clone();
-        async_rt::spawn(async move {
+        async_rt::spawn_named(async move {
             let mut last_cleanup = clock.now();
             let mut last_stats_flush = clock.now();
             let cleanup_interval = core::time::Duration::from_secs(5);
@@ -1551,7 +1603,7 @@ impl Node {
                 }
                 async_rt::yield_now().await;
             }
-        });
+        }, Some("Node Cleanup/Stats"));
         /*
         if self.config.enable_monitor {
             self.monitor.start_delayed(self.config.monitor.interval);
@@ -1560,6 +1612,7 @@ impl Node {
         if self.config.enable_vote_rebroadcast {
             self.vote_rebroadcaster.start();
         }
+        kernel_common::uart::print(b"[node] start() completed successfully!\n");
     }
 
     pub fn stop(&mut self) {

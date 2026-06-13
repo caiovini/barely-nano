@@ -71,6 +71,9 @@ impl PriorityContainer {
 
     pub fn insert(&mut self, entry: PriorityEntry) -> bool {
         let account = entry.account;
+        if account.is_zero() {
+            return false;
+        }
         let priority = entry.priority;
 
         if self.by_account.contains_key(&account) {
@@ -129,21 +132,13 @@ impl PriorityContainer {
 
     pub fn next_priority(
         &self,
-        cutoff: Timestamp,
-        filter: impl Fn(&Account) -> bool,
+        filter: impl Fn(&PriorityEntry) -> bool,
     ) -> Option<&PriorityEntry> {
         self.by_priority
             .values()
             .flatten()
             .map(|account| self.by_account.get(account).unwrap())
-            .find(|entry| {
-                if let Some(ts) = entry.last_request {
-                    if ts > cutoff {
-                        return false;
-                    }
-                }
-                filter(&entry.account)
-            })
+            .find(|entry| filter(entry))
     }
 
     pub fn remove(&mut self, account: &Account) -> Option<PriorityEntry> {
@@ -276,7 +271,7 @@ mod tests {
         #[test]
         fn empty() {
             let priorities = PriorityContainer::default();
-            let next = priorities.next_priority(Timestamp::new_test_instance(), |_account| true);
+            let next = priorities.next_priority(|_entry| true);
             assert!(next.is_none());
         }
 
@@ -287,7 +282,7 @@ mod tests {
             priorities.insert(PriorityEntry::new(account, Priority::new(2.5)));
 
             let next = priorities
-                .next_priority(Timestamp::new_test_instance(), |_account| true)
+                .next_priority(|_entry| true)
                 .unwrap();
 
             assert_eq!(next.account, account);
@@ -301,7 +296,7 @@ mod tests {
             priorities.insert(PriorityEntry::new(Account::from(3), Priority::new(3.5)));
 
             let next = priorities
-                .next_priority(Timestamp::new_test_instance(), |_account| true)
+                .next_priority(|_entry| true)
                 .unwrap();
 
             assert_eq!(next.account, Account::from(2));
@@ -321,7 +316,13 @@ mod tests {
             priorities.insert(c);
 
             let next = priorities
-                .next_priority(now - Duration::from_secs(30), |_account| true)
+                .next_priority(|entry| {
+                    if let Some(ts) = entry.last_request {
+                        ts <= now - Duration::from_secs(30)
+                    } else {
+                        true
+                    }
+                })
                 .unwrap();
 
             assert_eq!(next.account, Account::from(3));
@@ -338,8 +339,8 @@ mod tests {
             priorities.insert(c);
 
             let next = priorities
-                .next_priority(Timestamp::new_test_instance(), |account| {
-                    *account == Account::from(1)
+                .next_priority(|entry| {
+                    entry.account == Account::from(1)
                 })
                 .unwrap();
 
@@ -370,7 +371,7 @@ mod tests {
         );
 
         let next = priorities
-            .next_priority(Timestamp::new_test_instance(), |_| true)
+            .next_priority(|_| true)
             .unwrap();
         assert_eq!(next.account, Account::from(2));
     }

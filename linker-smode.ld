@@ -1,9 +1,9 @@
-/* S-mode: OpenSBI sits at 0x80000000, our kernel loads at 0x80200000 */
+/* S-mode: Kernel loads at 0x11000000 (Orange Pi RV2 hardware layout) */
 ENTRY(_start);
 
 MEMORY
 {
-  RAM (rwx) : ORIGIN = 0x80200000, LENGTH = 1024M
+  RAM (rwx) : ORIGIN = 0x11000000, LENGTH = 1792M
 }
 
 SECTIONS
@@ -26,15 +26,15 @@ SECTIONS
 
   /* Stack: 256MB (32MB per Hart) */
   . = ALIGN(4096);
-  . = 0x81000000;
+  . = 0x12000000;
   _stack_bottom = .;
   . = . + 0x10000000;
   _stack_top = .;
 
-  /* Heap: 512MB */
+  /* Heap: ~1.45GB - stops before U-Boot's reserved area at 0x7dd8b000 */
   . = ALIGN(4096);
-  . = 0xA0000000;
+  . = 0x22000000;
   _heap_start = .;
-  . = . + 0x20000000;
+  . = . + 0x5B000000;
   _heap_end = .;
 }

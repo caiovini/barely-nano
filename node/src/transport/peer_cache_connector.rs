@@ -40,18 +40,6 @@ impl PeerCacheConnector {
         }
     }
 
-    pub fn start(self: &Arc<Self>, interval: Duration) {
-        let this = self.clone();
-        kernel_common::async_rt::spawn(async move {
-            let cancel = CancellationToken::new();
-            loop {
-                let mut connector = (*this).clone(); // This is a bit hacky but PeerCacheConnector is small
-                connector.tick(&cancel);
-                kernel_common::async_rt::sleep(interval).await;
-            }
-        });
-    }
-
     fn load_peers_from_cache(&self) -> Vec<SocketAddrV6> {
         self.ledger
             .store
@@ -62,6 +50,40 @@ impl PeerCacheConnector {
             .collect()
     }
 }
+
+pub trait PeerCacheConnectorExt {
+    fn start(&self, interval: Duration);
+}
+
+impl PeerCacheConnectorExt for Arc<PeerCacheConnector> {
+    fn start(&self, interval: Duration) {
+        let this = self.clone();
+        kernel_common::async_rt::spawn(async move {
+            let cancel = CancellationToken::new();
+            loop {
+                let mut connector = (*this).clone();
+                connector.tick(&cancel);
+                kernel_common::async_rt::sleep(interval).await;
+            }
+        });
+    }
+}
+
+impl PeerCacheConnectorExt for Arc<spin::Mutex<PeerCacheConnector>> {
+    fn start(&self, interval: Duration) {
+        let this = self.clone();
+        kernel_common::async_rt::spawn(async move {
+            let cancel = CancellationToken::new();
+            loop {
+                if let Some(mut guard) = this.try_lock() {
+                    guard.tick(&cancel);
+                }
+                kernel_common::async_rt::sleep(interval).await;
+            }
+        });
+    }
+}
+
 
 impl Tickable for PeerCacheConnector {
     fn tick(&mut self, cancel_token: &CancellationToken) {
