@@ -1,1 +1,22 @@
 /target
+
+# Build outputs
+barely-nano
+barely-nano.bin
+barely-nano.img
+disk.img
+*.img
+*.bin
+*.elf
+
+# Logs
+orpi.log
+*.log
+
+# Temp/Misc
+scratch/
+test-results/
+.agents/
+
+# IDE
+.vscode/
