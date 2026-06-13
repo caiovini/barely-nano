@@ -17,7 +17,6 @@ orpi.log
 scratch/
 test-results/
 .agents/
-.agents/
 .cargo/
 
 # IDE
