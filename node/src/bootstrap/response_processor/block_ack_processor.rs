@@ -73,17 +73,6 @@ impl BlockAckProcessor {
         assert!(blocks.len() >= 1);
         let start_hash = match query.query_type {
             crate::bootstrap::state::QueryType::BlocksByHash => query.start.into(),
-            crate::bootstrap::state::QueryType::BlocksByAccount => {
-                // If it's by account, we might want to skip the open block if we already have it.
-                // But query.start is the account, not the open block hash.
-                // For now, let's just skip if it's an open block for the right account.
-                let first = blocks.front().unwrap();
-                if first.is_open() && first.account_field().unwrap() == query.start.into() {
-                    first.hash()
-                } else {
-                    rsnano_core::BlockHash::zero()
-                }
-            }
             _ => rsnano_core::BlockHash::zero(),
         };
 

@@ -1,5 +1,5 @@
 mod bootstrap_state;
-mod candidate_accounts;
+pub mod candidate_accounts;
 mod frontier_scan;
 mod peer_scoring;
 mod running_query;

@@ -25,11 +25,10 @@ impl Subscriber for UartSubscriber {
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        if let Some(_guard) = uart::UART_LOCK.try_lock() {
-            let mut visitor = UartVisitor;
-            event.record(&mut visitor);
-            uart::print_no_lock(b"\n");
-        }
+        let _guard = uart::UART_LOCK.lock();
+        let mut visitor = UartVisitor;
+        event.record(&mut visitor);
+        uart::print_no_lock(b"\n");
     }
 
     fn enter(&self, _span: &Id) {}

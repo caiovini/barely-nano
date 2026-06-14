@@ -90,7 +90,7 @@ impl Drop for AsyncTcpStream {
         if let Some(ref mut ctx) = *NET.lock() {
             let socket = ctx.sockets.get_mut::<TcpSocket>(self.handle);
             socket.abort();
-            ctx.remove_tcp_socket(self.handle);
+            ctx.sockets_to_drop.push(self.handle);
         }
     }
 }

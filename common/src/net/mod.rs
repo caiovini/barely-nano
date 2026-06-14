@@ -111,6 +111,7 @@ pub struct NetworkContext<'a> {
     pub peering_handle: smoltcp::iface::SocketHandle,
     pub udp_handle: smoltcp::iface::SocketHandle,
     pub rpc_handle: smoltcp::iface::SocketHandle,
+    pub sockets_to_drop: alloc::vec::Vec<smoltcp::iface::SocketHandle>,
 }
 
 impl<'a> NetworkContext<'a> {
@@ -148,6 +149,22 @@ impl<'a> NetworkContext<'a> {
                 }
             }
         }
+
+        let mut i = 0;
+        while i < self.sockets_to_drop.len() {
+            let handle = self.sockets_to_drop[i];
+            let is_closed = {
+                let socket = self.sockets.get::<smoltcp::socket::tcp::Socket>(handle);
+                socket.state() == smoltcp::socket::tcp::State::Closed
+            };
+            if is_closed {
+                self.sockets.remove(handle);
+                self.sockets_to_drop.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        
         progress
     }
 
@@ -204,22 +221,53 @@ pub async fn resolve(name: &str) -> Result<alloc::vec::Vec<IpAddress>, ()> {
         }
     };
 
-    poll_fn(|cx| {
+    struct QueryGuard {
+        handle: smoltcp::socket::dns::QueryHandle,
+        done: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for QueryGuard {
+        fn drop(&mut self) {
+            if !self.done.load(core::sync::atomic::Ordering::SeqCst) {
+                if let Some(ref mut ctx) = *NET.lock() {
+                    let dns_socket = ctx.sockets.get_mut::<DnsSocket>(ctx.dns_handle);
+                    dns_socket.cancel_query(self.handle);
+                }
+            }
+        }
+    }
+
+    let done = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+    let _guard = QueryGuard { handle, done: done.clone() };
+    let start = crate::clint::mtime();
+    let timeout_ticks = 5 * crate::clint::FREQ;
+
+    poll_fn(move |cx| {
+        let mtime = crate::clint::mtime();
+        if mtime - start > timeout_ticks {
+            return Poll::Ready(Err(()));
+        }
+
         if let Some(ref mut ctx) = *NET.lock() {
             let dns_socket = ctx.sockets.get_mut::<DnsSocket>(ctx.dns_handle);
             match dns_socket.get_query_result(handle) {
                 Err(smoltcp::socket::dns::GetQueryResultError::Pending) => {
                     dns_socket.register_query_waker(handle, cx.waker());
+                    // Wake ourselves up frequently to check the timeout
+                    cx.waker().wake_by_ref();
                     Poll::Pending
                 }
                 Ok(addrs) => {
+                    done.store(true, core::sync::atomic::Ordering::SeqCst);
                     Poll::Ready(Ok(addrs.to_vec()))
                 }
                 Err(_) => {
+                    done.store(true, core::sync::atomic::Ordering::SeqCst);
                     Poll::Ready(Err(()))
                 }
             }
         } else {
+            done.store(true, core::sync::atomic::Ordering::SeqCst);
             Poll::Ready(Err(()))
         }
     }).await
@@ -350,6 +398,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
             peering_handle,
             udp_handle,
             rpc_handle,
+            sockets_to_drop: alloc::vec::Vec::new(),
         });
     }
 

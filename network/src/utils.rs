@@ -173,8 +173,11 @@ impl CancellationToken {
 
     pub fn cancel(&self) {
         if !self.inner.cancelled.swap(true, Ordering::SeqCst) {
-            let mut wakers = self.inner.wakers.lock();
-            for waker in wakers.drain(..) {
+            let wakers_to_wake = {
+                let mut wakers = self.inner.wakers.lock();
+                core::mem::take(&mut *wakers)
+            };
+            for waker in wakers_to_wake {
                 waker.wake();
             }
         }
@@ -185,18 +188,19 @@ impl CancellationToken {
     }
 
     pub fn cancelled(&self) -> WaitForCancellationFuture<'_> {
-        WaitForCancellationFuture { token: self }
+        WaitForCancellationFuture { token: self, waker: None }
     }
 }
 
 pub struct WaitForCancellationFuture<'a> {
     token: &'a CancellationToken,
+    waker: Option<Waker>,
 }
 
 impl<'a> Future for WaitForCancellationFuture<'a> {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.token.is_cancelled() {
             Poll::Ready(())
         } else {
@@ -207,8 +211,18 @@ impl<'a> Future for WaitForCancellationFuture<'a> {
                 if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
                     wakers.push(cx.waker().clone());
                 }
+                self.waker = Some(cx.waker().clone());
                 Poll::Pending
             }
+        }
+    }
+}
+
+impl<'a> Drop for WaitForCancellationFuture<'a> {
+    fn drop(&mut self) {
+        if let Some(ref my_waker) = self.waker {
+            let mut wakers = self.token.inner.wakers.lock();
+            wakers.retain(|w| !w.will_wake(my_waker));
         }
     }
 }

@@ -1,8 +1,6 @@
-use super::{
-    pull_count_decider::PullCountDecider,
-    pull_type_decider::{PullType, PullTypeDecider},
-};
+use super::pull_count_decider::PullCountDecider;
 use crate::bootstrap::{
+    state::candidate_accounts::PullType,
     AscPullQuerySpec,
     state::{BootstrapState, PriorityResult},
 };
@@ -16,19 +14,16 @@ use rsnano_nullable_clock::Timestamp;
 /// Creates a query for the next priority account
 pub(super) struct QueryFactory {
     ledger: Arc<Ledger>,
-    pull_type_decider: PullTypeDecider,
     pull_count_decider: PullCountDecider,
 }
 
 impl QueryFactory {
     pub(super) fn new(
         ledger: Arc<Ledger>,
-        pull_type_decider: PullTypeDecider,
         pull_count_decider: PullCountDecider,
     ) -> Self {
         Self {
             ledger,
-            pull_type_decider,
             pull_count_decider,
         }
     }
@@ -45,7 +40,7 @@ impl QueryFactory {
             return None;
         }
         let (head, confirmed_frontier) = self.get_account_info(&next.account);
-        let pull_type = self.pull_type_decider.decide_pull_type();
+        let pull_type = next.pull_type;
 
         Some(self.create_priority_query(&next, channel, pull_type, head, confirmed_frontier))
     }
@@ -147,6 +142,7 @@ impl PullStart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::state::candidate_accounts::PullTypeDecider;
     use rsnano_core::{AccountInfo, ConfirmationHeightInfo};
 
     #[test]
@@ -311,10 +307,11 @@ mod tests {
     fn create_query(input: &TestInput) -> Option<AscPullQuerySpec> {
         let account = input.prioritized_account.unwrap_or_default();
         let ledger = create_ledger(account, input.head, input.confirmed);
-        let pull_type_decider = PullTypeDecider::new_null_with(input.pull_type);
         let pull_count_decider = PullCountDecider::default();
-        let mut factory = QueryFactory::new(ledger, pull_type_decider, pull_count_decider);
+        let mut factory = QueryFactory::new(ledger, pull_count_decider);
         let mut state = BootstrapState::default();
+        let pull_type_decider = PullTypeDecider::new_null_with(input.pull_type);
+        state.candidate_accounts.set_pull_type_decider(pull_type_decider);
 
         if let Some(account) = &input.prioritized_account {
             state.candidate_accounts.priority_up(account);

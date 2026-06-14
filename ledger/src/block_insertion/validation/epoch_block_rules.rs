@@ -94,6 +94,11 @@ impl<'a> BlockValidator<'a> {
                 && (state_block.verify_signature().is_err()
                     && self.epochs.validate_epoch_signature(self.block).is_err())
             {
+                tracing::error!(
+                    "Validation: BadSignature (Epoch Candidate) - Hash: {}, Account: {}",
+                    self.block.hash(),
+                    state_block.account()
+                );
                 return Err(BlockError::BadSignature);
             }
         }

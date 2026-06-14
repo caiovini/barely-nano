@@ -7,7 +7,7 @@ use rsnano_nullable_clock::{SteadyClock, Timestamp};
 use rsnano_stats::{StatsCollection, StatsSource};
 
 use super::{
-    pull_count_decider::PullCountDecider, pull_type_decider::PullTypeDecider,
+    pull_count_decider::PullCountDecider,
     query_factory::QueryFactory,
 };
 use crate::{
@@ -37,9 +37,8 @@ impl PriorityRequester {
         ledger: Arc<Ledger>,
         config: &BootstrapConfig,
     ) -> Self {
-        let pull_type_decider = PullTypeDecider::new(config.optimistic_request_percentage);
         let pull_count_decider = PullCountDecider::new(config.max_pull_count);
-        let query_factory = QueryFactory::new(ledger, pull_type_decider, pull_count_decider);
+        let query_factory = QueryFactory::new(ledger, pull_count_decider);
         let stats = Arc::new(PriorityRequesterStats {
             channel_waiter: channel_waiter.stats(),
             ..Default::default()

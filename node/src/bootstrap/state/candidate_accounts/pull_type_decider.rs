@@ -1,10 +1,11 @@
 use rand::Rng;
 use rsnano_nullable_random::NullableRng;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PullType {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PullType {
     /// Optimistic requests start from the (possibly unconfirmed) account frontier
     /// and are vulnerable to bootstrap poisoning.
+    #[default]
     Optimistic,
     /// Safe requests start from the confirmed frontier and given enough time
     /// will eventually resolve forks
@@ -12,7 +13,7 @@ pub(super) enum PullType {
 }
 
 /// Decides whether to make an optimistic of a safe priority pull request
-pub(super) struct PullTypeDecider {
+pub struct PullTypeDecider {
     optimistic_request_percentage: u8,
     rng: NullableRng,
 }

@@ -21,6 +21,16 @@ impl<'a> BlockValidator<'a> {
             let pub_key: PublicKey = self.account.into();
             pub_key.verify(self.block.hash().as_bytes(), self.block.signature())
         };
+        
+        if result.is_err() {
+            tracing::error!(
+                "Validation: BadSignature - Hash: {}, Account: {}, is_epoch: {}",
+                self.block.hash(),
+                self.account,
+                self.is_epoch_block()
+            );
+        }
+        
         result.map_err(|_| BlockError::BadSignature)
     }
 

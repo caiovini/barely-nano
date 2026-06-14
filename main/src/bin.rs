@@ -1269,6 +1269,8 @@ fn panic(info: &PanicInfo) -> ! {
         uart::print_usize(loc.line() as usize);
     }
     uart::print(b"\n");
+    use core::fmt::Write;
+    let _ = write!(kernel_common::uart::UartWriter, "Message: {}\n", info.message());
     loop {}
 }
 
@@ -1352,6 +1354,7 @@ fn run_maintenance_and_network_loop(
         // 0. Process delegated storage requests from other harts
         kernel_common::storage::process_delegated_requests();
 
+        let mut retry_net = false;
         {
             let _intr = kernel_common::uart::InterruptGuard::new();
             let mut ctx = kernel_common::net::NET.lock();
@@ -1367,6 +1370,20 @@ fn run_maintenance_and_network_loop(
                     ));
                     last_ping = mtime;
                 }
+            } else {
+                if mtime - last_ping > seconds(5) {
+                    retry_net = true;
+                    last_ping = mtime;
+                }
+            }
+        }
+
+        if retry_net {
+            kernel_common::uart::print(b"[net] Retrying network initialization...\n");
+            if let Some(new_ctx) = kernel_common::net::init_uboot_net() {
+                let _intr = kernel_common::uart::InterruptGuard::new();
+                *kernel_common::net::NET.lock() = Some(new_ctx);
+                kernel_common::uart::print(b"[net] Network initialized successfully!\n");
             }
         }
         node_arc.message_processor.lock().run_once();

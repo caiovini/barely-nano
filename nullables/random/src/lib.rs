@@ -43,7 +43,8 @@ impl NullableRng {
     fn get_global_rng() -> u32 {
         let mut lock = GLOBAL_RNG.lock();
         if lock.is_none() {
-            *lock = Some(ChaCha8Rng::seed_from_u64(0xDEADBEEF));
+            let seed = kernel_common::clint::mtime() as u64;
+            *lock = Some(ChaCha8Rng::seed_from_u64(seed));
         }
         lock.as_mut().unwrap().next_u32()
     }
@@ -51,7 +52,8 @@ impl NullableRng {
     fn fill_global_bytes(dest: &mut [u8]) {
         let mut lock = GLOBAL_RNG.lock();
         if lock.is_none() {
-            *lock = Some(ChaCha8Rng::seed_from_u64(0xDEADBEEF));
+            let seed = kernel_common::clint::mtime() as u64;
+            *lock = Some(ChaCha8Rng::seed_from_u64(seed));
         }
         lock.as_mut().unwrap().fill_bytes(dest);
     }

@@ -71,10 +71,8 @@ impl BlockBatchProcessor {
 
         for ((i, ctx), (result, _)) in batch.iter().enumerate().zip(verifications) {
             let res_u8 = result.load(core::sync::atomic::Ordering::Acquire);
-            if res_u8 != crate::signatures::SignatureResult::Invalid as u8 {
-                valid_indices.push(i);
-                ledger_input.push((&ctx.block, res_u8 == crate::signatures::SignatureResult::Valid as u8));
-            }
+            valid_indices.push(i);
+            ledger_input.push((&ctx.block, res_u8 == crate::signatures::SignatureResult::Valid as u8));
         }
 
         let ledger_res = self.ledger.process_batch_with_verifications(ledger_input);

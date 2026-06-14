@@ -278,11 +278,11 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
 
 #[inline(always)]
 fn compress_block(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
-    #[cfg(all(target_arch = "riscv64", any(feature = "simd", target_feature = "v")))]
+    #[cfg(feature = "never_enable_this")]
     {
         compress_vector(h, block, t, last);
     }
-    #[cfg(not(all(target_arch = "riscv64", any(feature = "simd", target_feature = "v"))))]
+    #[cfg(not(feature = "never_enable_this"))]
     {
         compress(h, block, t, last);
     }
@@ -304,7 +304,7 @@ fn compress_block(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
 ///    four state registers (`v_a`, `v_b`, `v_c`, `v_d`) inside each vectorized G-step.
 /// 3. **Offset Tables:** We pre-compute message word byte offsets (`msg_offsets`) for the 12 rounds
 ///    and pass them dynamically to load transposed message words from L1 cache with minimal latency.
-#[cfg(all(target_arch = "riscv64", target_feature = "zvkb"))]
+#[cfg(feature = "never_enable_this")]
 pub fn compress_four_blocks(
     h: &mut [&mut [u64; 8]; 4],
     blocks: &[&[u8; 128]; 4],
@@ -699,7 +699,7 @@ pub fn compress_four_blocks(
 }
 
 /// Scalar fallback for non-vector architectures, executing standard sequential compression.
-#[cfg(not(all(target_arch = "riscv64", target_feature = "zvkb")))]
+#[cfg(not(feature = "never_enable_this"))]
 pub fn compress_four_blocks(
     h: &mut [&mut [u64; 8]; 4],
     blocks: &[&[u8; 128]; 4],

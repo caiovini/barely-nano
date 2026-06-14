@@ -39,8 +39,8 @@ impl SynCookies {
         let ip_addr = endpoint.ip();
         let mut lock = self.data.lock();
 
-        if let Some(info) = lock.cookies.get(endpoint) {
-            return Some(info.cookie);
+        if lock.cookies.contains_key(endpoint) {
+            return None;
         }
 
         let ip_cookies = lock.cookies_per_ip.entry(*ip_addr).or_default();

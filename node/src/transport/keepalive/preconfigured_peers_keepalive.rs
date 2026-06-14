@@ -23,9 +23,12 @@ impl PreconfiguredPeersKeepalive {
             self.peers.len()
         );
         for peer in &self.peers {
-            self.keepalive
-                .keepalive_or_connect(peer.address.clone(), peer.port)
-                .await;
+            let keepalive = self.keepalive.clone();
+            let address = peer.address.clone();
+            let port = peer.port;
+            kernel_common::async_rt::spawn(async move {
+                keepalive.keepalive_or_connect(address, port).await;
+            });
         }
     }
 }

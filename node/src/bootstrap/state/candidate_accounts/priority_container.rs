@@ -6,21 +6,37 @@ use core::mem::size_of;
 use super::priority::{Priority, PriorityKeyDesc};
 use hashbrown::HashSet as FxHashSet;
 
-#[derive(Clone, Default)]
+use super::pull_type_decider::PullType;
+
+#[derive(Clone)]
 pub(super) struct PriorityEntry {
     pub account: Account,
     pub priority: Priority,
     pub fails: usize,
     pub last_request: Option<Timestamp>,
+    pub pull_type: PullType,
+}
+
+impl Default for PriorityEntry {
+    fn default() -> Self {
+        Self {
+            account: Default::default(),
+            priority: Default::default(),
+            fails: Default::default(),
+            last_request: Default::default(),
+            pull_type: PullType::Optimistic,
+        }
+    }
 }
 
 impl PriorityEntry {
-    pub fn new(account: Account, priority: Priority) -> Self {
+    pub fn new(account: Account, priority: Priority, pull_type: PullType) -> Self {
         Self {
             account,
             priority,
             fails: 0,
             last_request: None,
+            pull_type,
         }
     }
 
@@ -28,9 +44,10 @@ impl PriorityEntry {
     pub fn new_test_instance() -> Self {
         Self {
             account: Account::from(7),
-            priority: Priority::new(3.0),
+            priority: Priority::new(10.0),
             fails: 0,
             last_request: None,
+            pull_type: PullType::Optimistic,
         }
     }
 }

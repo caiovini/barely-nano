@@ -36,11 +36,11 @@ impl<'a> BlockValidator<'a> {
         self.epoch_block_pre_checks()?;
         self.ensure_block_does_not_exist_yet()?;
         self.ensure_valid_predecessor()?;
-        self.ensure_valid_signature()?;
-        self.ensure_block_is_not_for_burn_account()?;
         self.ensure_account_exists_for_none_open_block()?;
         self.ensure_no_double_account_open()?;
         self.ensure_previous_block_is_correct()?;
+        self.ensure_valid_signature()?;
+        self.ensure_block_is_not_for_burn_account()?;
         self.ensure_open_block_has_link()?;
         self.ensure_no_reveive_balance_change_without_link()?;
         self.ensure_pending_receive_is_correct()?;

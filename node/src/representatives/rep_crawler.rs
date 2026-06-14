@@ -253,6 +253,7 @@ impl RepCrawler {
                 kernel_common::async_rt::spawn(async move {
                     let this = unsafe { &*(self_ptr as *const RepCrawler) };
                     preconfigured.keepalive().await;
+                    kernel_common::async_rt::sleep(core::time::Duration::from_secs(2)).await;
                     this.keepalive_in_progress.store(false, Ordering::SeqCst);
                 });
             }

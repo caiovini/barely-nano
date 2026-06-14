@@ -4,6 +4,7 @@ use super::{
     blocking_container::{BlockingContainer, BlockingEntry},
     priority::Priority,
     priority_container::{ChangePriorityResult, PriorityContainer, PriorityEntry},
+    pull_type_decider::PullTypeDecider,
 };
 use rsnano_core::{utils::ContainerInfo, Account, BlockHash};
 use rsnano_nullable_clock::Timestamp;
@@ -52,6 +53,7 @@ pub struct CandidateAccounts {
     config: CandidateAccountsConfig,
     priorities: PriorityContainer,
     blocking: BlockingContainer,
+    pull_type_decider: PullTypeDecider,
 }
 
 impl CandidateAccounts {
@@ -62,11 +64,17 @@ impl CandidateAccounts {
     pub const PRIORITY_CUTOFF: Priority = Priority::new(0.1);
     pub const MAX_FAILS: usize = 10;
 
+    #[allow(dead_code)]
+    pub fn set_pull_type_decider(&mut self, decider: PullTypeDecider) {
+        self.pull_type_decider = decider;
+    }
+
     pub fn new(config: CandidateAccountsConfig) -> Self {
         Self {
             config,
             priorities: Default::default(),
             blocking: Default::default(),
+            pull_type_decider: Default::default(),
         }
     }
 
@@ -90,8 +98,9 @@ impl CandidateAccounts {
                     PriorityUpResult::Updated
                 }
                 ChangePriorityResult::NotFound => {
+                    let pull_type = self.pull_type_decider.decide_pull_type();
                     self.priorities
-                        .insert(PriorityEntry::new(*account, increment));
+                        .insert(PriorityEntry::new(*account, increment, pull_type));
 
                     self.trim_overflow();
                     PriorityUpResult::Inserted
@@ -137,8 +146,9 @@ impl CandidateAccounts {
     }
 
     pub fn priority_set(&mut self, account: &Account, priority: Priority) -> bool {
+        let pull_type = self.pull_type_decider.decide_pull_type();
         let inserted =
-            Self::priority_set_impl(account, priority, &self.blocking, &mut self.priorities);
+            Self::priority_set_impl(account, priority, pull_type, &self.blocking, &mut self.priorities);
         self.trim_overflow();
         inserted
     }
@@ -146,6 +156,7 @@ impl CandidateAccounts {
     fn priority_set_impl(
         account: &Account,
         priority: Priority,
+        pull_type: super::pull_type_decider::PullType,
         _blocking: &BlockingContainer,
         priorities: &mut PriorityContainer,
     ) -> bool {
@@ -156,7 +167,7 @@ impl CandidateAccounts {
         // An account can be prioritized even if it is blocked.
         // This is necessary to fetch the missing blocks for a blocked account.
         if !priorities.contains(account) {
-            priorities.insert(PriorityEntry::new(*account, priority));
+            priorities.insert(PriorityEntry::new(*account, priority, pull_type));
             true
         } else {
             false
@@ -206,8 +217,9 @@ impl CandidateAccounts {
 
             if hash_matches {
                 debug_assert!(!self.priorities.contains(&account));
+                let pull_type = self.pull_type_decider.decide_pull_type();
                 self.priorities
-                    .insert(PriorityEntry::new(account, Priority::new(1024.0)));
+                    .insert(PriorityEntry::new(account, Priority::new(1024.0), pull_type));
                 self.blocking.remove(&account);
                 self.trim_overflow();
                 return true;
@@ -294,11 +306,13 @@ impl CandidateAccounts {
             let account = entry.account;
             let priority = entry.priority;
             let fails = entry.fails;
+            let pull_type = entry.pull_type;
             self.set_last_request(&account, now);
             PriorityResult {
                 account,
                 priority,
                 fails,
+                pull_type,
             }
         } else {
             Default::default()
@@ -329,9 +343,11 @@ impl CandidateAccounts {
                 break;
             }
 
+            let pull_type = self.pull_type_decider.decide_pull_type();
             if Self::priority_set_impl(
                 &entry.dependency_account,
                 Self::PRIORITY_MAX,
+                pull_type,
                 &self.blocking,
                 &mut self.priorities,
             ) {
@@ -438,11 +454,14 @@ impl Default for CandidateAccounts {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+use super::pull_type_decider::PullType;
+
+#[derive(Default, Debug)]
 pub struct PriorityResult {
     pub account: Account,
     pub priority: Priority,
     pub fails: usize,
+    pub pull_type: PullType,
 }
 
 #[cfg(test)]
