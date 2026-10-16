@@ -215,7 +215,7 @@ impl BTree {
         self.meta.to_bytes(guard.data_mut());
     }
 
-    pub fn flush(&mut self) -> Result<(), virtio_drivers::Error> {
+    pub fn flush(&mut self) -> Result<(), crate::storage::StorageError> {
         self.bpm.flush_all()
     }
 

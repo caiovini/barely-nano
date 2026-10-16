@@ -1,88 +1,70 @@
-# Bare-Metal RISC-V OS (barely-nano)
+# Bare-Metal RISC-V Nano Node (barely-nano)
 
-This project is a bare-metal RISC-V application designed to run on the QEMU `virt` machine, with the ultimate goal of porting network applications (specifically a high-performance Nano cryptocurrency node) to custom RISC-V hardware like the **Orange Pi RV2 (JH7110)**.
+This project is a bare-metal `no_std` RISC-V Nano cryptocurrency node designed to run directly on the **Orange Pi RV2 (SpacemiT K1 / Ky X1 SoC)** with 8× X60 RISC-V harts, 8 GB RAM, and a 1 TB NVMe SSD.
 
-Currently, it establishes a foundational operating environment, complete with a massive heap allocator, multi-core interrupt handling, hardware-accelerated cryptography, and a full TCP/IP networking stack.
+It establishes a self-contained operating environment on top of OpenSBI and U-Boot (`CONFIG_API=y`), complete with a heap allocator, multi-core exception handling, hardware-accelerated cryptography, a 16-shard B-Tree storage engine on NVMe, and a full TCP/IP networking stack.
 
 ## Features Implemented
 
-### 1. Dual Execution Modes
-The kernel can be built to run in two distinct privilege modes using Cargo features (`mmode` or `smode`):
-- **Machine Mode (M-mode):** Runs directly on the hardware without any underlying firmware.
-- **Supervisor Mode (S-mode):** Runs on top of OpenSBI firmware. This mirrors the boot chain of the JH7110 SoC used on the Orange Pi, utilizing SBI `ecall`s for console and timer configuration.
+### 1. S-Mode Execution on OpenSBI & U-Boot
+The kernel runs in **Supervisor Mode (S-mode)** launched from U-Boot on top of OpenSBI firmware, utilizing SBI `ecall`s for multi-hart management (HSM) and IPIs, and U-Boot's Standalone Jump Table & Syscall API (`CONFIG_API=y`) for raw Ethernet and NVMe block device I/O.
 
 ### 2. Memory Management
-- **Boot sequence:** Written in custom assembly to set up stack pointers for all 8 harts, zero BSS, and jump into Rust.
-- **Heap Allocator:** Uses `linked_list_allocator` to provide a global dynamic memory allocator (`ALLOCATOR`).
-- **Configuration:** Currently configured with a **1.5GB heap** and **256MB stack** (32MB per hart). The physical hardware target (Orange Pi RV2) supports up to **8GB LPDDR4 RAM**.
+- **Boot sequence:** Written in custom assembly (`main/src/entry.S`) to set up stack pointers for all 8 harts, capture U-Boot's Jump Table pointer, zero BSS, and jump into Rust.
+- **Heap Allocator:** Uses `linked_list_allocator` wrapped in `InterruptSafeAllocator` to provide a global dynamic memory allocator (`ALLOCATOR`).
+- **Configuration:** Configured in `linker-smode.ld` with a **~1.45 GB heap** and **256 MB stack** (32 MB per hart) mapped starting at `0x11000000`.
 
 ### 3. Exception and Trap Handling
-- **Trap Vector:** Custom assembly trap vector (`trap_vector`) saves and restores the full register context upon interrupts and exceptions.
-- **Trap Dispatcher:** The Rust-based trap handler evaluates the `xcause` CSR to differentiate between asynchronous interrupts (like timers) and synchronous exceptions (like access faults).
-- **Diagnostics:** Exceptions automatically print out the `xcause`, `sepc`/`mepc`, and `stval`/`mtval` registers over UART to ease debugging.
+- **Trap Vector:** Custom S-mode assembly trap vector (`trap_vector`) saves and restores the full register context upon interrupts and exceptions.
+- **Trap Dispatcher:** The Rust-based trap handler evaluates the `scause` CSR to differentiate between asynchronous interrupts and synchronous exceptions (like access faults).
+- **Diagnostics:** Exceptions automatically print out the `scause`, `sepc`, and `ra` registers over the SpacemiT K1 UART0 (`0xD401_7000`) to ease debugging.
 
-### 4. Timer Interrupts
-- Configured to issue a hardware interrupt every 1 second.
-- In M-mode, accesses the hardware `CLINT` MMIO registers to set `mtimecmp`.
-- In S-mode, issues an `sbi::set_timer` ecall to request the firmware to trigger the next timer interrupt.
+### 4. Hardware Watchdogs & Timers
+- **CLINT Timer:** Reads the 24 MHz hardware `time` CSR for cooperative async scheduling and timestamps.
+- **Watchdog Management:** Disables and periodically kicks both the SpacemiT K1 SoC watchdog (`0xD408_0000`) and the SPM8821 PMIC watchdog over PWR I2C bus 8 (`0xD401_D800`).
 
 ### 5. Hardware Accelerated Cryptography & Optimizations
 To achieve high transaction throughput and maximize CPU efficiency, the node leverages a comprehensive suite of advanced RISC-V architecture extensions:
 - **Vector Extension (V):** SIMD processing for vectorized implementations of Blake2b compression and high-throughput cryptography.
-- **Vector-Crypto (Zvkb):** Optimized vector rotation and logic instructions to accelerate Blake2b and Ed25519 routines.
-- **Bit-Manipulation (Zbb, Zba, Zbs, Zbc):** Comprehensive scalar bit-manipulation, address generation, single-bit operations, and carry-less multiplication, which dramatically speed up cryptographic primitives and index calculations.
+- **Bit-Manipulation (Zbb, Zba, Zbs, Zbc):** Comprehensive scalar bit-manipulation, address generation, single-bit operations, and carry-less multiplication, which dramatically speed up cryptographic primitives (e.g., compiling 64-bit rotations to single `rori` instructions) and index calculations.
 - **Cache-Block Zero (Zicboz):** Fast memory clearing instructions used to efficiently zeroize memory pages and large structures.
-- **Pause Hint (Zihintpause):** Crucial for our wait-free spinlocks. It reduces power consumption and bus contention while harts are spinning on atomic variables.
-- **Cache-Block Management (Zicbom):** Explicit cache maintenance operations, essential for managing VirtIO DMA consistency between the CPU and hardware devices.
+- **Pause Hint (Zihintpause):** Crucial for wait-free spinlocks. It reduces power consumption and bus contention while harts are spinning on atomic variables.
+- **Cache-Block Management (Zicbom):** Explicit cache maintenance operations (`cbo.clean`, `cbo.inval`), essential for managing cross-cluster cache coherency between Cluster 0 (harts 0–3) and Cluster 1 (harts 4–7).
 
 These extensions allow the bare-metal node to perform hashing, signature verification, and lock-free concurrency significantly faster than standard scalar architectures.
 
-### 6. VirtIO Networking & TCP/IP Stack
-- **Hardware Probing:** Discovers and initializes VirtIO Network devices via MMIO.
-- **TCP/IP Stack (`smoltcp`):** A full-featured network stack integrated with the VirtIO driver.
-- **Nano Node Integration:** Instead of just simple pings, the stack powers a functional **Nano cryptocurrency node**, handling real-time block synchronization, peer discovery, and vote processing.
+### 6. U-Boot Networking & TCP/IP Stack
+- **Hardware Probing:** Discovers and initializes the board's Ethernet controller via the U-Boot Standalone API (`UbootNetDevice`).
+- **TCP/IP Stack (`smoltcp`):** A full-featured `no_std` network stack integrated with the U-Boot Ethernet driver.
+- **Nano Node Integration:** Powers a functional **Nano cryptocurrency node**, handling real-time block synchronization, peer discovery, RPC requests (`7076`), and peering (`7075`).
 
 ### 7. Multi-Hart SMP & Hardware Cache Coherency
-- **SpacemiT K1 SoC Support:** Fully supports all 8 harts across both CPU clusters on the Orange Pi RV2 hardware.
-- **Cache Coherent Interconnect (CCI):** The OpenSBI platform initialization has been patched to correctly configure the CCI hardware snoop domains for all clusters. This guarantees L2 cache coherency between harts without the need for manual software flushing, preventing cross-cluster lockups.
-- **Task Dispatch:** A dedicated heartbeat loop assigns specific node workloads (RPC, Vote Processing, Block Processing, HeavyIO) to individual harts, utilizing wait-free spinlocks and cross-cluster `Arc` sharing for highly efficient concurrent execution.
+- **SpacemiT K1 SoC Support:** Supports multi-hart execution across both CPU clusters on the Orange Pi RV2 hardware (Harts 1–7).
+- **Cross-Cluster Coherency:** Uses explicit `Zicbom` cacheline flushes (`cbo.clean` / `cbo.inval`) and `SeqCst` memory barriers to ensure heap and BSS visibility across both CPU clusters.
+- **Task Dispatch:** Dedicated hart loops assign specific node workloads (RPC, Vote Processing, Block Processing, Consensus/AEC, Heavy I/O, Monitoring) to individual harts, while idle cycles assist with parallel Ed25519 signature verification.
 
 ## Storage Architecture: Bare-Metal Raw Block Database
 
-Traditional filesystems (like FAT32 or EXT4) introduce substantial overhead and cannot easily handle massive 80GB databases natively in a pure `no_std` environment. To address this, `barely-nano` employs a custom **Buffer Pool + B-Tree** stack.
+Traditional filesystems (like FAT32 or EXT4) introduce substantial overhead and cannot easily handle massive ledger databases natively in a pure `no_std` environment. To address this, `barely-nano` employs a custom **16-Shard Buffer Pool + B-Tree** stack.
 
 ### The Stack
-1. **Physical Layer (`virtio-blk`):** The driver exposes raw sectors over the VirtIO Block device interface (representing NVMe or SSD storage).
-2. **Buffer Pool Manager:** A software cache residing in RAM that manages 4KB "frames". It minimizes hardware I/O by caching frequently accessed blocks and persists modifications using an **LRU (Least Recently Used)** eviction policy.
-3. **B-Tree Engine:** A specialized B-Tree implementation built directly on the Buffer Pool. It maps keys and values to persistent 4KB pages, providing an efficient, ordered key-value store without any underlying OS filesystem.
+1. **Physical Layer (`StorageBackend::UBoot`):** Exposes raw 4 KB blocks (8 × 512-byte sectors) over the U-Boot block storage syscall interface directly to the NVMe SSD (starting at a 512 MB LBA offset to preserve boot partitions), with a 128 MB RAM disk fallback.
+2. **Buffer Pool Manager:** A software cache residing in RAM that manages 128 × 4 KB 64-byte-aligned frames per shard. It minimizes hardware I/O by caching frequently accessed blocks and persists modifications using an **LRU (Least Recently Used)** eviction policy.
+3. **B-Tree Engine:** A specialized B-Tree implementation built directly on the Buffer Pool across 16 prefix-partitioned shards. It maps keys and values to persistent 4 KB pages, providing an efficient, ordered key-value store without any underlying OS filesystem.
 
-### 8. Automated Build & Run System
-- A comprehensive `Makefile` handles cross-compilation (`riscv64gc-unknown-none-elf`).
-- Launches the QEMU emulator with the correct configurations for either M-mode or S-mode.
-- Configured with **8 CPUs** and **4GB RAM** by default to simulate high-end RISC-V hardware.
-- Automatically connects the host network to the VM via `-netdev user` and sets up TCP port forwarding for Nano RPC (`7076`) and Peering (`7075`).
+### 8. Build & Deployment System
+- The `Makefile` handles cross-compilation (`riscv64gc-unknown-none-elf`) with all Orange Pi RV2 target features enabled (`+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom`).
+- Converts the ELF binary into a raw bootable image (`barely-nano.bin`) and automatically copies it to a mounted SD card (`/run/media/cvini/NANO_NODE`) if present.
 
-### Build & Run Targets
+### Build Targets
 
 | Target | Feature flag | Purpose |
 |---|---|---|
-| `make run` | _(none)_ | **Live network mode** — connects to real Nano peers, no local block generation |
-| `make build` | _(none)_ | Builds the live-network binary |
-| `make run-spammer` | `spammer` | **Test mode** — runs a local block spammer to stress-test the B-Tree storage |
-| `make build-spammer` | `spammer` | Builds the spammer binary |
-| `make run-mmode` | `mmode` | M-mode (no OpenSBI), direct CLINT access |
-| `make kill` | — | Kills the running QEMU instance |
-
-The `spammer` feature is **off by default**. Switching between live network and test mode requires no code changes — just a different `make` target:
-
-```sh
-# Live network (default)
-make kill && make run
-
-# Local spammer (B-Tree / throughput testing)
-make kill && rm disk.img && make run-spammer
-```
-
+| `make build` / `make build-smode` | `simd` | **Live network mode** — builds `barely-nano.bin` for the Orange Pi RV2 |
+| `make build-spammer` | `spammer,simd` | **Test mode** — builds `barely-nano.bin` with local block spammer enabled |
+| `make run-crypto-tests` | `simd` | Runs host-side cryptographic unit tests |
+| `make run-picocom` | — | Captures serial console output from `/dev/ttyUSB0` to `orpi.log` |
+| `make clean` | — | Cleans Cargo build artifacts |
 
 ## Deployment & Configuration
 
@@ -92,7 +74,7 @@ In a bare-metal `no_std` environment:
 - There is no OS filesystem to parse `.toml` files from.
 - There is no shell to pass command-line arguments.
 
-As a result, all node parameters—such as **Peer IP addresses**, **Network type (Live/Beta/Test)**, and **Resource limits**—are defined directly in [main/src/bin.rs](file:///home/cvini/rust-workspace/barely-nano/main/src/bin.rs). Any change to the deployment environment (e.g., moving to a different hardware node with a different IP) requires updating the source code and recompiling the binary. (Note: The RPC server port is currently managed directly in the `handle_rpc_server` loop within `bin.rs`).
+As a result, all node parameters—such as **Peer IP addresses**, **Network type (Live/Beta/Test)**, and **Resource limits**—are defined directly in [main/src/bin.rs](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs). Any change to the deployment environment (e.g., moving to a different hardware node with a different IP) requires updating the source code and recompiling the binary. (Note: The RPC server port is currently managed directly in the `handle_rpc_server` loop within `bin.rs`).
 
 ### Configuration Example
 
@@ -143,7 +125,7 @@ When `enable_pruning` is set to `true`, the node is programmed to **automaticall
 1.  **Ensure Format Compatibility**: Pruning requires a specific B-Tree metadata format (Page 0) to manage the free-list.
 2.  **Optimize Storage**: Starting from a clean pruned state (0 GB) is significantly more efficient than trying to prune a full 100GB+ ledger in place on bare-metal hardware.
 
-Once initialized, the B-Tree will automatically reuse space from pruned blocks to keep the `disk.img` compact indefinitely.
+Once initialized, the B-Tree will automatically reuse space from pruned blocks on the NVMe SSD indefinitely.
 
 ### Representative Discovery on Bare-Metal
 
@@ -159,11 +141,11 @@ Set `representative_vote_weight_minimum` to `Amount::zero()` in `node/src/config
 
 ## Structure
 - `/main/` - The main executable binary, entry points, and static node configuration.
-- `/common/` - The core kernel library, housing the trap handler, UART/SBI wrappers, and the networking stack.
+- `/common/` - The core kernel library, housing the trap handler, UART/SBI/U-Boot wrappers, storage engine, and networking stack.
 - `/core/` - Core Nano cryptocurrency logic (blocks, accounts, amounts, voting).
 - `/node/` - The high-level Nano node implementation (consensus, block processing, telemetry).
 - `/nullables/` - Shared infrastructure components (clock, random, storage, networking) with nullable support for testing.
 - `/ledger/` & `/ledger_store/` - Ledger state management and the BPM-backed storage implementation.
 - `/network/` & `/network_protocol/` - Nano-specific network message handling and peer management.
 - `/rpc_server/` & `/rpc_client/` - Bare-metal Nano RPC interface.
-- `linker-mmode.ld` / `linker-smode.ld` - Linker scripts mapping the memory layout for the respective privilege modes.
+- `linker-smode.ld` - Linker script mapping the physical memory layout for the Orange Pi RV2.

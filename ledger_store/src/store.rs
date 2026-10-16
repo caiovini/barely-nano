@@ -81,7 +81,7 @@ impl BtreeStore {
         for i in 0..kernel_common::storage::SHARD_COUNT {
             let mut lock = kernel_common::storage::SHARDS[i].lock();
             if let Some(db) = lock.as_mut() {
-                db.flush().map_err(|e: virtio_drivers::Error| anyhow::anyhow!("DB shard {} flush failed: {:?}", i, e))?;
+                db.flush().map_err(|e: kernel_common::storage::StorageError| anyhow::anyhow!("DB shard {} flush failed: {:?}", i, e))?;
             }
         }
         Ok(())

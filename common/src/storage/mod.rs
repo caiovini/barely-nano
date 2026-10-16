@@ -48,9 +48,10 @@ pub fn get_shard_index(key: &[u8]) -> usize {
     (key[1] >> 4) as usize
 }
 
-const VIRTIO0: usize = 0x10001000;
-const VIRTIO_STEP: usize = 0x1000;
-const VIRTIO_MAX: usize = 0x10008000;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageError {
+    IoError,
+}
 
 pub static GLOBAL_STORAGE: Mutex<Option<Arc<Mutex<StorageContext>>>> = Mutex::new(None);
 
@@ -75,7 +76,7 @@ impl StorageContext {
         Self { backend: StorageBackend::RamDisk(alloc::vec![0; size]) }
     }
 
-    pub fn read_block(&mut self, block_id: usize, buf: &mut [u8]) -> Result<(), virtio_drivers::Error> {
+    pub fn read_block(&mut self, block_id: usize, buf: &mut [u8]) -> Result<(), StorageError> {
         match &mut self.backend {
             StorageBackend::UBoot(info) => {
                 let lba = (block_id * 8) as u64 + STORAGE_BASE_LBA;
@@ -84,7 +85,7 @@ impl StorageContext {
                 if ret > 0 {
                     Ok(())
                 } else {
-                    Err(virtio_drivers::Error::IoError)
+                    Err(StorageError::IoError)
                 }
             }
             StorageBackend::RamDisk(vec) => {
@@ -93,13 +94,13 @@ impl StorageContext {
                     buf.copy_from_slice(&vec[offset..offset + 4096]);
                     Ok(())
                 } else {
-                    Err(virtio_drivers::Error::IoError)
+                    Err(StorageError::IoError)
                 }
             }
         }
     }
 
-    pub fn write_block(&mut self, block_id: usize, buf: &[u8]) -> Result<(), virtio_drivers::Error> {
+    pub fn write_block(&mut self, block_id: usize, buf: &[u8]) -> Result<(), StorageError> {
         match &mut self.backend {
             StorageBackend::UBoot(info) => {
                 let lba = (block_id * 8) as u64 + STORAGE_BASE_LBA;
@@ -109,7 +110,7 @@ impl StorageContext {
                     Ok(())
                 } else {
                     tracing::error!("Storage: FAILED to write block {}", block_id);
-                    Err(virtio_drivers::Error::IoError)
+                    Err(StorageError::IoError)
                 }
             }
             StorageBackend::RamDisk(vec) => {
@@ -119,7 +120,7 @@ impl StorageContext {
                     Ok(())
                 } else {
                     tracing::error!("Storage: FAILED to write RAM block {}", block_id);
-                    Err(virtio_drivers::Error::IoError)
+                    Err(StorageError::IoError)
                 }
             }
         }

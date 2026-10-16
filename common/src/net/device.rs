@@ -1,8 +1,6 @@
 use smoltcp::phy::{Device, DeviceCapabilities, RxToken, TxToken};
 use smoltcp::time::Instant;
 use crate::uboot;
-use crate::uart;
-use core::marker::PhantomData;
 
 pub struct UbootNetDevice {
     info: uboot::DeviceInfo,
@@ -98,71 +96,6 @@ impl<'a> TxToken for UbootTxToken<'a> {
             }
         }
         let _ = uboot::eth_send(&self.info, &self.tx_buffer[..transmit_len]);
-        res
-    }
-}
-
-pub struct VirtioNetDevice<'a> {
-    pub device: virtio_drivers::device::net::VirtIONet<crate::net::virtio_hal::VirtioHal, virtio_drivers::transport::mmio::MmioTransport<'static>, 128>,
-    _phantom: PhantomData<&'a ()>,
-}
-
-impl<'a> VirtioNetDevice<'a> {
-    pub fn new(device: virtio_drivers::device::net::VirtIONet<crate::net::virtio_hal::VirtioHal, virtio_drivers::transport::mmio::MmioTransport<'static>, 128>) -> Self {
-        Self {
-            device,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn receive<'b>(&'b mut self, _timestamp: Instant) -> Option<(VirtioRxToken, VirtioTxToken<'b, 'a, virtio_drivers::transport::mmio::MmioTransport<'static>>)> {
-        if let Ok(rx_buf) = self.device.receive() {
-            uart::putchar(b'.');
-            Some((VirtioRxToken { buf: rx_buf }, VirtioTxToken { device: self, _phantom: PhantomData }))
-        } else {
-            None
-        }
-    }
-
-    pub fn transmit<'b>(&'b mut self, _timestamp: Instant) -> Option<VirtioTxToken<'b, 'a, virtio_drivers::transport::mmio::MmioTransport<'static>>> {
-        Some(VirtioTxToken { device: self, _phantom: PhantomData })
-    }
-
-    pub fn capabilities(&self) -> DeviceCapabilities {
-        let mut caps = DeviceCapabilities::default();
-        caps.max_transmission_unit = 1500;
-        caps.max_burst_size = Some(1);
-        caps.medium = smoltcp::phy::Medium::Ethernet;
-        caps
-    }
-}
-
-pub struct VirtioRxToken {
-    buf: virtio_drivers::device::net::RxBuffer,
-}
-
-impl RxToken for VirtioRxToken {
-    fn consume<R, F>(self, f: F) -> R
-    where
-        F: FnOnce(&[u8]) -> R,
-    {
-        f(self.buf.packet())
-    }
-}
-
-pub struct VirtioTxToken<'a, 'b, T: virtio_drivers::transport::Transport> {
-    device: &'a mut VirtioNetDevice<'b>,
-    _phantom: PhantomData<T>,
-}
-
-impl<'a, 'b, T: virtio_drivers::transport::Transport> TxToken for VirtioTxToken<'a, 'b, T> {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut tx_buf = self.device.device.new_tx_buffer(len);
-        let res = f(tx_buf.packet_mut());
-        self.device.device.send(tx_buf).expect("Failed to send VirtIO packet");
         res
     }
 }

@@ -4,7 +4,7 @@
 //! we don't have access to high-level abstractions like memory-mapped files (mmap)
 //! or sophisticated filesystem caches.
 //!
-//! The BPM provides a middle layer between our storage hardware (e.g., NVMe SSD via VirtIO)
+//! The BPM provides a middle layer between our storage hardware (e.g., NVMe SSD via U-Boot API)
 //! and our high-level data structures (like the B-Tree). It maintains a fixed-size cache
 //! of "Frames" in memory to minimize slow hardware I/O.
 
@@ -110,7 +110,7 @@ impl BufferPool {
     ///
     /// If all frames are full, it will select a "victim" frame using LRU, 
     /// flush it to disk if it's dirty, and reuse the frame for the new page.
-    pub fn fetch_page(&mut self, page_id: usize) -> Result<PageGuard, virtio_drivers::Error> {
+    pub fn fetch_page(&mut self, page_id: usize) -> Result<PageGuard, crate::storage::StorageError> {
         let frame_id = self.fetch_frame_id(page_id)?;
         Ok(PageGuard {
             bpm: self as *mut _,
@@ -119,7 +119,7 @@ impl BufferPool {
         })
     }
 
-    fn fetch_frame_id(&mut self, page_id: usize) -> Result<usize, virtio_drivers::Error> {
+    fn fetch_frame_id(&mut self, page_id: usize) -> Result<usize, crate::storage::StorageError> {
         // Cache Hit
         if let Some(&frame_id) = self.page_table.get(&page_id) {
             self.mark_mru(frame_id);
@@ -148,7 +148,7 @@ impl BufferPool {
         let victim_frame_id = if let Some(v_idx) = victim_idx {
             self.lru_queue.remove(v_idx)
         } else {
-            return Err(virtio_drivers::Error::IoError); 
+            return Err(crate::storage::StorageError::IoError); 
         };
 
         if let Some(pid) = self.frames[victim_frame_id].page_id {
@@ -187,7 +187,7 @@ impl BufferPool {
     ///
     /// This should be called before shutdown or during critical synchronization points
     /// to ensure data durability.
-    pub fn flush_all(&mut self) -> Result<(), virtio_drivers::Error> {
+    pub fn flush_all(&mut self) -> Result<(), crate::storage::StorageError> {
         let mut storage_guard = self.storage.lock();
 
         for frame in &mut self.frames {
@@ -201,7 +201,7 @@ impl BufferPool {
         Ok(())
     }
 
-    pub fn fetch_page_read_only(&mut self, page_id: usize) -> Result<PageGuard, virtio_drivers::Error> {
+    pub fn fetch_page_read_only(&mut self, page_id: usize) -> Result<PageGuard, crate::storage::StorageError> {
         self.fetch_page(page_id)
     }
 }

@@ -20,5 +20,4 @@ num-derive = { version = "0.4", default-features = false }
 serde = { version = "=1.0.210", default-features = false, features = ["derive"] }
 rsnano_nullable_clock = { path = "../nullables/clock" }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
-virtio-drivers = "0.13"
 tracing = { version = "0.1", default-features = false }

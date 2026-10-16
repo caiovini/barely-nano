@@ -1,4 +1,3 @@
-pub mod virtio_hal;
 pub mod device;
 pub mod async_tcp;
 pub use async_tcp::AsyncTcpStream;
@@ -10,37 +9,26 @@ use spin::Mutex;
 
 pub static NET: Mutex<Option<NetworkContext<'static>>> = Mutex::new(None);
 
-const VIRTIO0: usize = 0x10001000;
-const VIRTIO_STEP: usize = 0x1000;
-const VIRTIO_MAX: usize = 0x10008000;
-
 extern crate alloc;
 use alloc::vec;
 use smoltcp::iface::{Config, Interface, SocketSet, PollResult};
 use smoltcp::phy::Device;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
-use smoltcp::socket::AnySocket;
 use smoltcp::socket::icmp::{Socket as IcmpSocket, PacketBuffer as IcmpPacketBuffer};
 use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer as TcpSocketBuffer};
 use smoltcp::socket::dns::{Socket as DnsSocket};
 use smoltcp::time::Instant;
 
-pub enum NetDevice<'a> {
-    Virtio(device::VirtioNetDevice<'a>),
+pub enum NetDevice {
     Uboot(device::UbootNetDevice),
 }
 
-impl<'a> smoltcp::phy::Device for NetDevice<'a> {
+impl smoltcp::phy::Device for NetDevice {
     type RxToken<'b> = NetRxToken<'b> where Self: 'b;
     type TxToken<'b> = NetTxToken<'b> where Self: 'b;
 
     fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         match self {
-            NetDevice::Virtio(d) => {
-                let (rx, tx) = d.receive(timestamp)?;
-                let tx_static = unsafe { core::mem::transmute(tx) };
-                Some((NetRxToken::Virtio(rx), NetTxToken::Virtio(tx_static)))
-            }
             NetDevice::Uboot(d) => {
                 let (rx, tx) = d.receive(timestamp)?;
                 Some((NetRxToken::Uboot(rx), NetTxToken::Uboot(tx)))
@@ -50,25 +38,18 @@ impl<'a> smoltcp::phy::Device for NetDevice<'a> {
 
     fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>> {
         match self {
-            NetDevice::Virtio(d) => {
-                let tx = d.transmit(timestamp)?;
-                let tx_static = unsafe { core::mem::transmute(tx) };
-                Some(NetTxToken::Virtio(tx_static))
-            },
             NetDevice::Uboot(d) => Some(NetTxToken::Uboot(d.transmit(timestamp)?)),
         }
     }
 
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
         match self {
-            NetDevice::Virtio(d) => d.capabilities(),
             NetDevice::Uboot(d) => d.capabilities(),
         }
     }
 }
 
 pub enum NetRxToken<'a> {
-    Virtio(device::VirtioRxToken),
     Uboot(device::UbootRxToken<'a>),
 }
 
@@ -78,14 +59,12 @@ impl<'a> smoltcp::phy::RxToken for NetRxToken<'a> {
         F: FnOnce(&[u8]) -> R,
     {
         match self {
-            NetRxToken::Virtio(t) => t.consume(f),
             NetRxToken::Uboot(t) => t.consume(f),
         }
     }
 }
 
 pub enum NetTxToken<'b> {
-    Virtio(device::VirtioTxToken<'b, 'static, virtio_drivers::transport::mmio::MmioTransport<'static>>),
     Uboot(device::UbootTxToken<'b>),
 }
 
@@ -95,7 +74,6 @@ impl<'b> smoltcp::phy::TxToken for NetTxToken<'b> {
         F: FnOnce(&mut [u8]) -> R,
     {
         match self {
-            NetTxToken::Virtio(t) => t.consume(len, f),
             NetTxToken::Uboot(t) => t.consume(len, f),
         }
     }
@@ -103,7 +81,7 @@ impl<'b> smoltcp::phy::TxToken for NetTxToken<'b> {
 
 pub struct NetworkContext<'a> {
     pub iface: Interface,
-    pub device: NetDevice<'a>,
+    pub device: NetDevice,
     pub sockets: SocketSet<'a>,
     pub tcp_handle: smoltcp::iface::SocketHandle,
     pub icmp_handle: smoltcp::iface::SocketHandle,

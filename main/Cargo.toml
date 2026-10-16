@@ -10,7 +10,6 @@ path = "src/bin.rs"
 
 [features]
 default = ["smode"]
-mmode = ["kernel-common/mmode"] # -bios none, direct CLINT
 smode = ["kernel-common/smode"] # OpenSBI, SBI ecalls
 spammer = []                    # Local block spammer (disable for live network)
 simd = ["rsnano_sha/simd"]

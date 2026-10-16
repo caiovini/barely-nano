@@ -172,11 +172,6 @@ pub extern "C" fn rust_main(
     opaque: usize,
     jt_ptr: *const kernel_common::uboot::JumpTable,
 ) {
-    #[cfg(feature = "mmode")]
-    unsafe {
-        core::arch::asm!("csrs mstatus, {0}", in(reg) (3usize << 13) | (3usize << 9));
-    }
-
     // CRITICAL: Secondary harts (not Hart 1) must wait for boot to complete,
     // then grab the node from the global NODE static.
     // We do NOT use the Arc-via-opaque approach because:
@@ -437,9 +432,6 @@ fn boot_hart_main(hart_id: usize) {
     kernel_common::logger::init();
     uart::print(b"[boot] logger init done\n");
 
-    #[cfg(feature = "mmode")]
-    let seed = kernel_common::clint::mtime();
-    #[cfg(not(feature = "mmode"))]
     let seed = {
         uart::print(b"[boot] getting seed...\n");
         let s = kernel_common::sbi::get_time();
