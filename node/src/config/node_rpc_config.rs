@@ -17,6 +17,8 @@ impl RpcChildProcessConfig {
 
 #[derive(Debug, PartialEq)]
 pub struct NodeRpcConfig {
+    pub port: u16,
+    pub enable_control: bool,
     pub enable_sign_hash: bool,
     pub child_process: RpcChildProcessConfig,
 }
@@ -24,6 +26,8 @@ pub struct NodeRpcConfig {
 impl NodeRpcConfig {
     pub fn new() -> Self {
         Self {
+            port: 7076,
+            enable_control: true,
             enable_sign_hash: false,
             child_process: RpcChildProcessConfig::new(),
         }
@@ -32,9 +36,6 @@ impl NodeRpcConfig {
 
 impl Default for NodeRpcConfig {
     fn default() -> Self {
-        Self {
-            enable_sign_hash: false,
-            child_process: RpcChildProcessConfig::new(),
-        }
+        Self::new()
     }
 }

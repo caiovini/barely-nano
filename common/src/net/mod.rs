@@ -9,6 +9,55 @@ use spin::Mutex;
 
 pub static NET: Mutex<Option<NetworkContext<'static>>> = Mutex::new(None);
 
+#[derive(Clone, Copy, Debug)]
+pub struct BareMetalNetConfig {
+    pub mac: [u8; 6],
+    pub ipv4: [u8; 4],
+    pub prefix_len: u8,
+    pub gateway: [u8; 4],
+    pub dns_server: [u8; 4],
+    pub peering_port: u16,
+    pub rpc_port: u16,
+    pub rpc_enable: bool,
+    pub rpc_enable_control: bool,
+}
+
+impl Default for BareMetalNetConfig {
+    fn default() -> Self {
+        Self {
+            mac: [0xc0, 0x74, 0x2b, 0xf9, 0x15, 0xec],
+            ipv4: [192, 168, 0, 200],
+            prefix_len: 24,
+            gateway: [192, 168, 0, 1],
+            dns_server: [1, 1, 1, 1],
+            peering_port: 7075,
+            rpc_port: 7076,
+            rpc_enable: true,
+            rpc_enable_control: true,
+        }
+    }
+}
+
+pub static NET_CONFIG: Mutex<BareMetalNetConfig> = Mutex::new(BareMetalNetConfig {
+    mac: [0xc0, 0x74, 0x2b, 0xf9, 0x15, 0xec],
+    ipv4: [192, 168, 0, 200],
+    prefix_len: 24,
+    gateway: [192, 168, 0, 1],
+    dns_server: [1, 1, 1, 1],
+    peering_port: 7075,
+    rpc_port: 7076,
+    rpc_enable: true,
+    rpc_enable_control: true,
+});
+
+pub fn set_net_config(cfg: BareMetalNetConfig) {
+    *NET_CONFIG.lock() = cfg;
+}
+
+pub fn get_net_config() -> BareMetalNetConfig {
+    *NET_CONFIG.lock()
+}
+
 extern crate alloc;
 use alloc::vec;
 use smoltcp::iface::{Config, Interface, SocketSet, PollResult};
@@ -102,11 +151,12 @@ impl<'a> NetworkContext<'a> {
 
         if is_established {
             let established_socket = self.sockets.remove(self.peering_handle);
+            let peering_port = NET_CONFIG.lock().peering_port;
             
             let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
             let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
             let mut new_listener = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
-            let _ = new_listener.listen(7075);
+            let _ = new_listener.listen(peering_port);
             self.peering_handle = self.sockets.add(new_listener);
             
             Some(self.sockets.add(established_socket))
@@ -285,14 +335,9 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         }
 
         let mut device = NetDevice::Uboot(UbootNetDevice::new(info));
-        
-        // Hardcode the real MAC found in the log: c0:74:2b:f9:15:ec
-        let mut mac_bytes = [0xc0, 0x74, 0x2b, 0xf9, 0x15, 0xec];
-        let mac_found = true;
-        
-        crate::uart::print(b"[net] Using HARDCODED real MAC: c0:74:2b:f9:15:ec\n");
-
-        if !mac_found {
+        let net_cfg = get_net_config();
+        let mut mac_bytes = net_cfg.mac;
+        if mac_bytes == [0, 0, 0, 0, 0, 0] {
             crate::uart::print(b"[net] Using fallback randomized MAC\n");
             mac_bytes = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
             let mut seed = crate::clint::mtime();
@@ -326,13 +371,31 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let start_ts = Instant::from_micros((mtime / (crate::clint::FREQ / 1_000_000)) as i64);
         let mut iface = Interface::new(config, &mut device, start_ts);
         
-        let static_ip = Ipv4Address::new(192, 168, 0, 200);
+        let static_ip = Ipv4Address::new(
+            net_cfg.ipv4[0],
+            net_cfg.ipv4[1],
+            net_cfg.ipv4[2],
+            net_cfg.ipv4[3],
+        );
         iface.update_ip_addrs(|ip_addrs| {
-            ip_addrs.push(IpCidr::new(IpAddress::Ipv4(static_ip), 24)).unwrap();
+            ip_addrs.push(IpCidr::new(IpAddress::Ipv4(static_ip), net_cfg.prefix_len)).unwrap();
         });
-        iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(192, 168, 0, 1)).unwrap();
+        let gw_ip = Ipv4Address::new(
+            net_cfg.gateway[0],
+            net_cfg.gateway[1],
+            net_cfg.gateway[2],
+            net_cfg.gateway[3],
+        );
+        iface.routes_mut().add_default_ipv4_route(gw_ip).unwrap();
         
-        crate::uart::print(b"[net] IP: 192.168.0.200\n");
+        crate::uart::print(b"[net] IP: ");
+        for i in 0..4 {
+            crate::uart::print_usize(net_cfg.ipv4[i] as usize);
+            if i < 3 { crate::uart::print(b"."); }
+        }
+        crate::uart::print(b"/");
+        crate::uart::print_usize(net_cfg.prefix_len as usize);
+        crate::uart::print(b"\n");
 
         let mut sockets = SocketSet::new(vec![]);
         let icmp_rx_buffer = IcmpPacketBuffer::new(vec![smoltcp::socket::icmp::PacketMetadata::EMPTY], vec![0; 256]);
@@ -348,10 +411,15 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 65535]);
         let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 65535]);
         let mut tcp_peering = TcpSocket::new(tcp_rx_buffer_2, tcp_tx_buffer_2);
-        let _ = tcp_peering.listen(7075);
+        let _ = tcp_peering.listen(net_cfg.peering_port);
         let peering_handle = sockets.add(tcp_peering);
 
-        let dns_servers = &[smoltcp::wire::Ipv4Address::new(1, 1, 1, 1).into()];
+        let dns_servers = &[smoltcp::wire::Ipv4Address::new(
+            net_cfg.dns_server[0],
+            net_cfg.dns_server[1],
+            net_cfg.dns_server[2],
+            net_cfg.dns_server[3],
+        ).into()];
         let dns_socket = DnsSocket::new(dns_servers, vec![]);
         let dns_handle = sockets.add(dns_socket);
 
@@ -363,7 +431,9 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let tcp_rx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
         let tcp_tx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
         let mut tcp_rpc = TcpSocket::new(tcp_rx_buffer_3, tcp_tx_buffer_3);
-        let _ = tcp_rpc.listen(7076);
+        if net_cfg.rpc_enable {
+            let _ = tcp_rpc.listen(net_cfg.rpc_port);
+        }
         let rpc_handle = sockets.add(tcp_rpc);
 
         return Some(NetworkContext {

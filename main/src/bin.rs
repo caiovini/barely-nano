@@ -93,6 +93,78 @@ fn parse_hex_env(ptr: *const u8) -> Option<usize> {
     }
 }
 
+fn parse_mac_str(s: &str) -> Option<[u8; 6]> {
+    let mut mac = [0u8; 6];
+    let mut count = 0;
+    for part in s.split(':') {
+        if count >= 6 {
+            return None;
+        }
+        let byte = u8::from_str_radix(part.trim(), 16).ok()?;
+        mac[count] = byte;
+        count += 1;
+    }
+    if count == 6 {
+        Some(mac)
+    } else {
+        None
+    }
+}
+
+/// Default RAM address where `boot.cmd` fatloads `config.toml` (`0x10F00000`, 1 MB below kernel `_start`).
+const CONFIG_RAM_ADDR: usize = 0x10F0_0000;
+const CONFIG_RAM_MAX_LEN: usize = 64 * 1024;
+
+/// Reads `config.toml` fatloaded into RAM by U-Boot (`0x10F00000`), or falls back
+/// to the compile-time embedded `config.toml` if not present in RAM.
+fn load_config_toml_str() -> &'static str {
+    let addr = kernel_common::uboot::env_get("config_addr")
+        .and_then(parse_hex_env)
+        .unwrap_or(CONFIG_RAM_ADDR);
+
+    let env_size = kernel_common::uboot::env_get("config_size")
+        .and_then(parse_hex_env)
+        .unwrap_or(0);
+
+    invalidate_cache_range(addr, CONFIG_RAM_MAX_LEN);
+
+    let ptr = addr as *const u8;
+    let slice = unsafe {
+        if env_size > 0 && env_size <= CONFIG_RAM_MAX_LEN {
+            core::slice::from_raw_parts(ptr, env_size)
+        } else {
+            // Scan up to first NUL byte if `mw.b 0x10F00000 0 0x10000` was used
+            let mut len = 0;
+            while len < CONFIG_RAM_MAX_LEN {
+                let b = core::ptr::read_volatile(ptr.add(len));
+                if b == 0 || b == 0xFF {
+                    break;
+                }
+                len += 1;
+            }
+            core::slice::from_raw_parts(ptr, len)
+        }
+    };
+
+    if !slice.is_empty() {
+        if let Ok(s) = core::str::from_utf8(slice) {
+            if s.contains('[') && s.contains('=') {
+                uart::print(b"[boot] Loaded config.toml from SD/RAM at 0x");
+                uart::print_usize_hex(addr);
+                uart::print(b" (");
+                uart::print_usize(slice.len());
+                uart::print(b" bytes)\n");
+                return s;
+            }
+        }
+    }
+
+    uart::print(b"[boot] No valid config.toml in RAM at 0x");
+    uart::print_usize_hex(addr);
+    uart::print(b", using embedded config.toml\n");
+    include_str!("../../config.toml")
+}
+
 fn scan_for_api_sig() -> Option<usize> {
     let start_addr = 0x7b000000_usize;
     let end_addr = 0x7f000000_usize;
@@ -451,6 +523,64 @@ fn boot_hart_main(hart_id: usize) {
     static LEADER_ELECTED: AtomicBool = AtomicBool::new(false);
     if !LEADER_ELECTED.swap(true, Ordering::SeqCst) {
         kernel_common::oled::init();
+
+        #[cfg(feature = "spammer")]
+        let network = rsnano_core::Networks::NanoDevNetwork;
+        #[cfg(not(feature = "spammer"))]
+        let network = rsnano_core::Networks::NanoLiveNetwork;
+
+        let config_str = load_config_toml_str();
+        let daemon_toml = match rsnano_node::config::DaemonToml::from_toml_str(config_str) {
+            Ok(toml) => toml,
+            Err(e) => {
+                uart::print(b"[boot] WARNING: SD config.toml parse error (");
+                uart::print(e.as_bytes());
+                uart::print(b"), falling back to embedded config.toml\n");
+                rsnano_node::config::DaemonToml::from_toml_str(include_str!("../../config.toml"))
+                    .expect("Failed to parse embedded config.toml")
+            }
+        };
+
+        let mut daemon_config = rsnano_node::config::DaemonConfig::new2(network, 8);
+        daemon_config.rpc_enable = true;
+        daemon_config.merge_toml(&daemon_toml);
+
+        // Apply bare-metal network configuration before initializing U-Boot networking
+        {
+            let mut net_cfg = kernel_common::net::get_net_config();
+            net_cfg.peering_port = daemon_config.node.network.listening_port;
+            net_cfg.rpc_port = daemon_config.rpc.port;
+            net_cfg.rpc_enable = daemon_config.rpc_enable;
+            net_cfg.rpc_enable_control = daemon_config.rpc.enable_control;
+
+            if let Some(bm) = &daemon_toml.bare_metal {
+                if let Some(mac_str) = &bm.mac_address {
+                    if let Some(mac) = parse_mac_str(mac_str) {
+                        net_cfg.mac = mac;
+                    }
+                }
+                if let Some(ip_str) = &bm.ipv4_address {
+                    if let Ok(ip) = core::net::Ipv4Addr::from_str(ip_str) {
+                        net_cfg.ipv4 = ip.octets();
+                    }
+                }
+                if let Some(prefix) = bm.ipv4_prefix_len {
+                    net_cfg.prefix_len = prefix;
+                }
+                if let Some(gw_str) = &bm.gateway {
+                    if let Ok(gw) = core::net::Ipv4Addr::from_str(gw_str) {
+                        net_cfg.gateway = gw.octets();
+                    }
+                }
+                if let Some(dns_str) = &bm.dns_server {
+                    if let Ok(dns) = core::net::Ipv4Addr::from_str(dns_str) {
+                        net_cfg.dns_server = dns.octets();
+                    }
+                }
+            }
+            kernel_common::net::set_net_config(net_cfg);
+        }
+
         uart::print(b"[boot] net init...\n");
         let net_ctx = kernel_common::net::init_uboot_net();
         uart::print(b"[boot] net init done\n");
@@ -463,42 +593,17 @@ fn boot_hart_main(hart_id: usize) {
         let exec = kernel_common::async_rt::Executor::new();
         kernel_common::async_rt::set_global_executor(exec);
 
-        #[cfg(feature = "spammer")]
-        let network = rsnano_core::Networks::NanoDevNetwork;
-        #[cfg(not(feature = "spammer"))]
-        let network = rsnano_core::Networks::NanoLiveNetwork;
-
-        let mut config = rsnano_node::config::NodeConfig::default_for(network, 8);
-        config.online_weight_minimum = rsnano_core::Amount::nano(130_000_000);
-        config.network.peer_reachout = core::time::Duration::from_secs(1);
-        config.enable_voting = true;
-        config.enable_vote_processor = true;
-        config.max_pruning_age_s = 2 * 24 * 60 * 60;
-        config.allow_local_peers = true;
-        config.representative_vote_weight_minimum = rsnano_core::Amount::zero();
-
-        // More aggressive bootstrap parameters for native Orange Pi RV2 hardware
-        config.bootstrap.rate_limit = 10000;
-        config.bootstrap.database_rate_limit = 4096;
-        config.bootstrap.frontier_rate_limit = 128;
-        config.bootstrap.channel_limit = 64;
-        config.bootstrap.max_requests = 16384;
-        config.bootstrap.max_pending_frontier_responses = 128;
-
-        // Larger block processing queue limits
-        config.block_processor.max_peer_queue = 65536;
-        config.block_processor.max_system_queue = 131072;
-        config.block_processor.batch_size = 2048;
-
-        // Larger vote processing queue limits
-        config.vote_processor.max_pr_queue = 16384;
-        config.vote_processor.max_non_pr_queue = 16384;
-        config.vote_processor.batch_size = 4096;
-        config.vote_processor.max_triggered = 65536;
+        let config = daemon_config.node;
+        let preconfigured_peers = config.preconfigured_peers.clone();
 
         let mut flags = rsnano_node::config::NodeFlags::new();
-        flags.enable_voting = true;
-        flags.enable_pruning = false;
+        flags.enable_voting = config.enable_voting;
+        flags.enable_pruning = daemon_toml
+            .node
+            .as_ref()
+            .and_then(|n| n.experimental.as_ref())
+            .and_then(|e| e.enable_pruning)
+            .unwrap_or(false);
 
         let mut node = rsnano_node::NodeBuilder::new(network)
             .data_path(".")
@@ -518,35 +623,24 @@ fn boot_hart_main(hart_id: usize) {
         node.start();
         kernel_common::uart::print(b"[boot] node.start() completed!\n");
 
-        // Helper to add a peer from an IPv4 string
-        let add_ipv4_peer = |ip_str: &str, port: u16| {
-            kernel_common::uart::print(b"[boot] adding peer ");
-            for b in ip_str.as_bytes() {
-                kernel_common::uart::putchar(*b);
-            }
-            kernel_common::uart::print(b"...\n");
-            if let Ok(ip) = core::net::Ipv4Addr::from_str(ip_str) {
+        // Connect immediately and persist any IPv4 preconfigured_peers from config.toml
+        for peer in &preconfigured_peers {
+            if let Ok(ip) = core::net::Ipv4Addr::from_str(&peer.address) {
+                kernel_common::uart::print(b"[boot] adding peer ");
+                kernel_common::uart::print(peer.address.as_bytes());
+                kernel_common::uart::print(b"...\n");
                 let addr_v6 = ip.to_ipv6_mapped();
-                let socket_addr = core::net::SocketAddrV6::new(addr_v6, port, 0, 0);
+                let socket_addr = core::net::SocketAddrV6::new(addr_v6, peer.port, 0, 0);
 
-                // Add to persistent peer store so it gets retried by PeerCacheConnector
                 node.ledger
                     .store
                     .peer
                     .put(socket_addr, rsnano_nullable_clock::SystemTime::now());
 
                 let _ = node.peer_connector.connect_to(socket_addr);
+                kernel_common::uart::print(b"[boot] adding peer done\n");
             }
-            kernel_common::uart::print(b"[boot] adding peer done\n");
-        };
-
-        // Add initial bootstrap peers (DNS and Hardcoded IPs)
-        let _peering_host = "peering.nano.org";
-
-        // Hardcoded IPs to bypass initial DNS dependency
-        add_ipv4_peer("37.120.187.138", 7075); // Active public representative
-        add_ipv4_peer("94.130.135.50", 7075); // Active public representative
-        add_ipv4_peer("192.168.0.244", 7075); // Local synced node
+        }
 
         let node_arc = alloc::sync::Arc::new(node);
         {
@@ -921,15 +1015,20 @@ fn run_consensus_loop(
 }
 
 fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Node>) {
+    let net_cfg = kernel_common::net::get_net_config();
+    if !net_cfg.rpc_enable {
+        return;
+    }
     let socket = ctx.sockets.get_mut::<TcpSocket>(ctx.rpc_handle);
     if !socket.is_open() {
-        let _ = socket.listen(7076);
+        let _ = socket.listen(net_cfg.rpc_port);
     }
     if socket.can_recv() {
         let mut response: Option<alloc::string::String> = None;
+        let enable_control = net_cfg.rpc_enable_control;
         let _ = socket.recv(|buffer| {
             let request = core::str::from_utf8(buffer).unwrap_or("");
-            let handler = RpcCommandHandler::new(node.clone(), true);
+            let handler = RpcCommandHandler::new(node.clone(), enable_control);
             let server = BareMetalRpcServer::new(handler);
 
             if let Some(resp_str) = server.handle_request(request) {
@@ -1257,11 +1356,9 @@ fn run_maintenance_and_network_loop(
                 ctx_val.poll(mtime);
 
                 if mtime - last_ping > seconds(5) {
+                    let gw = kernel_common::net::get_net_config().gateway;
                     ctx_val.ping(kernel_common::smoltcp::wire::Ipv4Address::new(
-                        192, 168, 0, 1,
-                    ));
-                    ctx_val.ping(kernel_common::smoltcp::wire::Ipv4Address::new(
-                        192, 168, 0, 244,
+                        gw[0], gw[1], gw[2], gw[3],
                     ));
                     last_ping = mtime;
                 }

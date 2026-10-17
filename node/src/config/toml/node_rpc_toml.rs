@@ -43,12 +43,20 @@ impl From<&RpcChildProcessToml> for RpcChildProcessConfig {
 #[derive(Deserialize, Serialize)]
 pub struct NodeRpcToml {
     pub enable: Option<bool>,
+    pub port: Option<u16>,
+    pub enable_control: Option<bool>,
     pub enable_sign_hash: Option<bool>,
     pub child_process: Option<RpcChildProcessToml>,
 }
 
 impl NodeRpcConfig {
     pub fn merge_toml(&mut self, toml: &NodeRpcToml) {
+        if let Some(port) = toml.port {
+            self.port = port;
+        }
+        if let Some(enable_control) = toml.enable_control {
+            self.enable_control = enable_control;
+        }
         if let Some(enable_sign_hash) = toml.enable_sign_hash {
             self.enable_sign_hash = enable_sign_hash;
         }

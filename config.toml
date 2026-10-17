@@ -1,0 +1,86 @@
+# =============================================================================
+# Bare-Metal RISC-V Nano Node Configuration (config.toml)
+# =============================================================================
+# Compatible with original Nano / RSNano TOML schema (`[node]`, `[rpc]`, etc.),
+# plus `[bare_metal]` for Orange Pi RV2 hardware interface parameters.
+# =============================================================================
+
+[bare_metal]
+# Ethernet MAC address used by the U-Boot / smoltcp interface
+mac_address = "c0:74:2b:f9:15:ec"
+# Static IPv4 address and subnet prefix length
+ipv4_address = "192.168.0.200"
+ipv4_prefix_len = 24
+# Default IPv4 gateway
+gateway = "192.168.0.1"
+# DNS resolver address
+dns_server = "1.1.1.1"
+
+[node]
+peering_port = 7075
+enable_voting = true
+allow_local_peers = true
+
+# 130,000,000 NANO in raw (130_000_000 * 10^30)
+online_weight_minimum = "130000000000000000000000000000000000000"
+# Minimum vote weight that a representative must have for its vote to be counted (in raw)
+representative_vote_weight_minimum = "0"
+
+# Preconfigured peers ("address:port" or hostname)
+preconfigured_peers = [
+    "peering.nano.org:7075",
+    "37.120.187.138:7075",
+    "94.130.135.50:7075",
+    "192.168.0.244:7075",
+]
+
+[node.network]
+# Interval between peer reachout attempts (in milliseconds)
+peer_reachout = 1000
+cached_peer_reachout = 1000
+duplicate_filter_size = 16384
+duplicate_filter_cutoff = 60
+
+[node.tcp]
+max_inbound_connections = 128
+max_outbound_connections = 128
+max_attempts = 16
+max_attempts_per_ip = 1
+connect_timeout = 60
+
+[node.bootstrap]
+enable = true
+enable_priorities = true
+enable_dependency_walker = true
+enable_frontier_scan = true
+rate_limit = 10000
+database_rate_limit = 4096
+frontier_rate_limit = 128
+channel_limit = 64
+max_requests = 16384
+
+[node.bootstrap.frontier_scan]
+max_pending = 128
+
+[node.block_processor]
+max_peer_queue = 65536
+max_system_queue = 131072
+batch_size = 2048
+
+[node.vote_processor]
+max_pr_queue = 16384
+max_non_pr_queue = 16384
+batch_size = 4096
+max_triggered = 65536
+
+[node.experimental]
+enable_pruning = false
+# Time limit for blocks age after pruning (in seconds: 48 hours = 172800)
+max_pruning_age = 172800
+max_pruning_depth = 0
+
+[rpc]
+enable = true
+port = 7076
+enable_control = true
+enable_sign_hash = false

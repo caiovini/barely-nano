@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
 pub struct ExperimentalToml {
+    pub enable_pruning: Option<bool>,
     pub max_pruning_age: Option<u64>,
     pub max_pruning_depth: Option<u64>,
     pub secondary_work_peers: Option<Vec<String>>,
@@ -32,6 +33,7 @@ impl NodeConfig {
 impl From<&NodeConfig> for ExperimentalToml {
     fn from(config: &NodeConfig) -> Self {
         Self {
+            enable_pruning: None,
             secondary_work_peers: Some(
                 config
                     .secondary_work_peers

@@ -41,14 +41,14 @@ use crate::{
     block_processing::{
         BacklogScan, BacklogWaiter, BlockContext, BlockProcessor, BlockProcessorQueue, BlockSource,
         BoundedBacklog, BoundedBacklogPlugin, LocalBlockBroadcaster, LocalBlockBroadcasterExt,
-        LocalBlockBroadcasterPlugin, ProcessQueueConfig, ProcessedResult, UncheckedMap,
+        LocalBlockBroadcasterPlugin, ProcessedResult, UncheckedMap,
     },
     block_rate_calculator::{BlockRateCalculator, CurrentBlockRates},
     bootstrap::{
         BootstrapExt, BootstrapResponderCleanup, BootstrapServer, Bootstrapper, BootstrapperCleanup,
     },
     cementation::{ConfirmingSet, TrackConfirmationTimes},
-    config::{GlobalConfig, NetworkParams, NodeConfig, NodeFlags},
+    config::{NetworkParams, NodeConfig, NodeFlags},
     consensus::{
         election::ConfirmedElection,
         election_schedulers::{ElectionSchedulers, ElectionSchedulersPlugin},
@@ -241,7 +241,6 @@ impl Node {
             kernel_common::uart::print_u8_hex(*b);
         }
         kernel_common::uart::print(b"\n");
-        let global_config = GlobalConfig::default();
         let (ledger_tx, ledger_rx) = backpressure_channel(1024 * 5);
         let mut event_queues_info = ContainerInfoFactory::new();
         let ledger_tx_clone = ledger_tx.clone();
@@ -444,7 +443,7 @@ impl Node {
             config.fork_cache_max_forks_per_root,
         )));
 
-        let block_processor_config = ProcessQueueConfig::default();
+        let block_processor_config = config.block_processor.clone();
         let block_processor_queue = Arc::new(BlockProcessorQueue::new(block_processor_config));
 
 
@@ -550,7 +549,7 @@ impl Node {
             stats.clone(),
             network.clone(),
             message_sender.clone(),
-            global_config.node_config.bootstrap.clone(),
+            config.bootstrap.clone(),
             steady_clock.clone(),
         ));
         bootstrapper.initialize(&network_params.ledger.genesis_account);
@@ -662,7 +661,7 @@ impl Node {
 
 
         let backlog_scan =
-            BacklogScan::new(Default::default(), ledger.clone(), steady_clock.clone());
+            BacklogScan::new(config.backlog_scan.clone(), ledger.clone(), steady_clock.clone());
         let backlog_scan = Arc::new(Mutex::new(backlog_scan));
         
         let bootstrap_state_w = Arc::downgrade(&bootstrapper.get_state());

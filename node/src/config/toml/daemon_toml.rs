@@ -1,12 +1,249 @@
 use super::{NodeRpcToml, NodeToml, OpenclToml};
 use crate::config::DaemonConfig;
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
+pub struct BareMetalToml {
+    pub mac_address: Option<String>,
+    pub ipv4_address: Option<String>,
+    pub ipv4_prefix_len: Option<u8>,
+    pub gateway: Option<String>,
+    pub dns_server: Option<String>,
+}
 
 #[derive(Deserialize, Serialize)]
 pub struct DaemonToml {
     pub node: Option<NodeToml>,
     pub opencl: Option<OpenclToml>,
     pub rpc: Option<NodeRpcToml>,
+    pub bare_metal: Option<BareMetalToml>,
+}
+
+impl DaemonToml {
+    /// Parses a TOML configuration string into `DaemonToml` in a `no_std` environment
+    /// by converting TOML sections, keys, scalars, and arrays into a `serde_json::Value` tree.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self, String> {
+        let root_val = toml_to_json_value(toml_str)?;
+        serde_json::from_value(root_val).map_err(|e| alloc::format!("TOML deserialize error: {}", e))
+    }
+}
+
+fn toml_to_json_value(input: &str) -> Result<Value, String> {
+    let mut root = Map::new();
+    let mut current_path: Vec<String> = Vec::new();
+    let mut lines = input.lines().enumerate().peekable();
+
+    while let Some((line_idx, raw_line)) = lines.next() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Section header: [a.b.c]
+        if line.starts_with('[') && line.ends_with(']') && !line.starts_with("[[") {
+            let section = line[1..line.len() - 1].trim();
+            current_path = section
+                .split('.')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').into())
+                .collect();
+            ensure_table_path(&mut root, &current_path)?;
+            continue;
+        }
+
+        // Key = Value
+        let Some(eq_pos) = line.find('=') else {
+            return Err(alloc::format!(
+                "Line {}: expected '=' in '{}'",
+                line_idx + 1,
+                line
+            ));
+        };
+
+        let key = line[..eq_pos]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let mut val_str = alloc::string::String::from(line[eq_pos + 1..].trim());
+
+        // Handle multi-line arrays `[ ... ]`
+        if val_str.starts_with('[') && ! is_balanced_brackets(&val_str) {
+            while let Some((_, next_raw)) = lines.next() {
+                let next_clean = strip_toml_comment(next_raw).trim();
+                if !next_clean.is_empty() {
+                    val_str.push(' ');
+                    val_str.push_str(next_clean);
+                }
+                if is_balanced_brackets(&val_str) {
+                    break;
+                }
+            }
+        }
+
+        let json_val = parse_toml_value(val_str.trim(), line_idx + 1)?;
+        let target_table = ensure_table_path(&mut root, &current_path)?;
+        target_table.insert(String::from(key), json_val);
+    }
+
+    Ok(Value::Object(root))
+}
+
+fn ensure_table_path<'a>(
+    root: &'a mut Map<String, Value>,
+    path: &[String],
+) -> Result<&'a mut Map<String, Value>, String> {
+    let mut curr = root;
+    for segment in path {
+        let entry = curr
+            .entry(segment.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+        match entry {
+            Value::Object(map) => curr = map,
+            _ => return Err(alloc::format!("Conflicting table path at '{}'", segment)),
+        }
+    }
+    Ok(curr)
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for (i, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_double {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+        } else if ch == '\'' && !in_double {
+            in_single = !in_single;
+        } else if ch == '#' && !in_double && !in_single {
+            return &line[..i];
+        }
+    }
+    line
+}
+
+fn is_balanced_brackets(s: &str) -> bool {
+    let mut depth = 0i32;
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_double {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+        } else if ch == '\'' && !in_double {
+            in_single = !in_single;
+        } else if !in_double && !in_single {
+            if ch == '[' {
+                depth += 1;
+            } else if ch == ']' {
+                depth -= 1;
+            }
+        }
+    }
+    depth <= 0
+}
+
+fn parse_toml_value(s: &str, line_num: usize) -> Result<Value, String> {
+    if s == "true" {
+        return Ok(Value::Bool(true));
+    }
+    if s == "false" {
+        return Ok(Value::Bool(false));
+    }
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        let inner = &s[1..s.len() - 1];
+        return Ok(Value::String(String::from(inner)));
+    }
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = s[1..s.len() - 1].trim();
+        if inner.is_empty() {
+            return Ok(Value::Array(Vec::new()));
+        }
+        let items = split_toml_array(inner);
+        let mut arr = Vec::with_capacity(items.len());
+        for item in items {
+            let trimmed = item.trim();
+            if !trimmed.is_empty() {
+                arr.push(parse_toml_value(trimmed, line_num)?);
+            }
+        }
+        return Ok(Value::Array(arr));
+    }
+
+    // Numeric scalar (strip underscores allowed in TOML numbers)
+    let clean_num: String = s.chars().filter(|&c| c != '_').collect();
+    if let Ok(u) = clean_num.parse::<u64>() {
+        return Ok(Value::Number(u.into()));
+    }
+    if let Ok(i) = clean_num.parse::<i64>() {
+        return Ok(Value::Number(i.into()));
+    }
+    if let Ok(f) = clean_num.parse::<f64>() {
+        if let Some(n) = serde_json::Number::from_f64(f) {
+            return Ok(Value::Number(n));
+        }
+    }
+
+    Err(alloc::format!(
+        "Line {}: unsupported TOML value '{}'",
+        line_num,
+        s
+    ))
+}
+
+fn split_toml_array(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut depth = 0i32;
+    let mut escaped = false;
+
+    for (i, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_double {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+        } else if ch == '\'' && !in_double {
+            in_single = !in_single;
+        } else if !in_double && !in_single {
+            if ch == '[' {
+                depth += 1;
+            } else if ch == ']' {
+                depth -= 1;
+            } else if ch == ',' && depth == 0 {
+                result.push(&s[start..i]);
+                start = i + 1;
+            }
+        }
+    }
+    if start < s.len() {
+        result.push(&s[start..]);
+    }
+    result
 }
 
 impl DaemonConfig {
@@ -43,6 +280,7 @@ impl From<&DaemonConfig> for DaemonToml {
             node: Some((&config.node).into()),
             rpc: Some(config.into()),
             opencl: Some(config.into()),
+            bare_metal: None,
         }
     }
 }
@@ -51,6 +289,8 @@ impl From<&DaemonConfig> for NodeRpcToml {
     fn from(config: &DaemonConfig) -> Self {
         Self {
             enable: Some(config.rpc_enable),
+            port: Some(config.rpc.port),
+            enable_control: Some(config.rpc.enable_control),
             enable_sign_hash: Some(config.rpc.enable_sign_hash),
             child_process: Some((&config.rpc.child_process).into()),
         }

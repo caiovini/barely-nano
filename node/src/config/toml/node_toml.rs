@@ -360,7 +360,17 @@ impl NodeConfig {
             self.tcp.merge_toml(toml);
         }
 
+        if let Some(exp) = &toml.experimental {
+            self.merge_experimental_toml(exp);
+        }
+
         if let Some(network) = &toml.network {
+            if let Some(ms) = network.peer_reachout {
+                self.network.peer_reachout = Duration::from_millis(ms);
+            }
+            if let Some(ms) = network.cached_peer_reachout {
+                self.network.cached_peer_reachout = Duration::from_millis(ms);
+            }
             if let Some(i) = network.duplicate_filter_size {
                 self.network_duplicate_filter_size = i;
             }
@@ -619,6 +629,7 @@ mod tests {
                 priority_bootstrap: Some(45),
                 priority_live: Some(46),
                 priority_local: Some(47),
+                batch_size: Some(48),
             }),
             ..Default::default()
         };

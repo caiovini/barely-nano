@@ -15,6 +15,7 @@ pub use node_config::*;
 pub use node_flags::*;
 pub use node_rpc_config::*;
 pub use rsnano_core::Networks;
+pub use toml::*;
 pub use websocket_config::WebsocketConfig;
 
 pub struct GlobalConfig {

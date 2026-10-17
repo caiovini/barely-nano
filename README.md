@@ -84,70 +84,101 @@ Traditional filesystems (like FAT32 or EXT4) introduce substantial overhead and 
 
 ### 9. Build & Deployment System
 - The `Makefile` handles cross-compilation (`riscv64gc-unknown-none-elf`) with all Orange Pi RV2 target features enabled (`+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom`).
-- Converts the ELF binary into a raw bootable image (`barely-nano.bin`) and automatically copies it to a mounted SD card (`/run/media/cvini/NANO_NODE`) if present.
+- Compiles [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) into `boot.scr` using `mkimage`, converts the ELF binary into a raw bootable image (`barely-nano.bin`), and automatically copies `barely-nano.bin`, `config.toml`, and `boot.scr` to a mounted SD card (`/media/cvini/NANO_NODE` or `/run/media/cvini/NANO_NODE`) if present.
 
 ### Build Targets
 
 | Target | Feature flag | Purpose |
 |---|---|---|
-| `make build` / `make build-smode` | `simd` | **Live network mode** — builds `barely-nano.bin` for the Orange Pi RV2 |
-| `make build-spammer` | `spammer,simd` | **Test mode** — builds `barely-nano.bin` with local block spammer enabled |
+| `make build` / `make build-smode` | `simd` | **Live network mode** — builds `barely-nano.bin` and `boot.scr` for the Orange Pi RV2 |
+| `make build-spammer` | `spammer,simd` | **Test mode** — builds `barely-nano.bin` and `boot.scr` with local block spammer enabled |
 | `make run-crypto-tests` | `simd` | Runs host-side cryptographic unit tests |
 | `make run-picocom` | — | Captures serial console output from `/dev/ttyUSB0` to `orpi.log` |
 | `make clean` | — | Cleans Cargo build artifacts |
 
-## Deployment & Configuration
+## Deployment & Configuration (`config.toml`)
 
-Unlike standard applications that use TOML/YAML files or environment variables, `barely-nano` uses **Static Hardcoded Configuration**.
+Node, RPC, and bare-metal network parameters are configured declaratively in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml), following the original Nano (`config-node.toml` / `config-rpc.toml`) and RSNano (`DaemonToml` / `NodeToml`) TOML schema.
 
-In a bare-metal `no_std` environment:
-- There is no OS filesystem to parse `.toml` files from.
-- There is no shell to pass command-line arguments.
+### Live SD Card Configuration (No Recompilation Needed)
+1. **U-Boot `fatload` (`0x10F00000`):** On boot, [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) (`boot.scr`) zeroes a 64 KB buffer at physical RAM address `0x10F00000` (1 MB below the kernel load address `0x11000000`), runs `fatload mmc 0:1 0x10F00000 config.toml`, and records `config_addr` and `config_size` in the U-Boot environment.
+2. **Kernel Boot Parsing:** [`load_config_toml_str()`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs#L120-L166) reads `config.toml` directly from `0x10F00000` and merges it into `DaemonConfig` (`NodeConfig`, `NodeRpcConfig`, and `BareMetalNetConfig`).
+3. **Compile-Time Fallback:** If `config.toml` is missing from the SD card or fails to parse, the kernel automatically falls back to the copy embedded at compile time (`include_str!("../../config.toml")`).
 
-As a result, all node parameters—such as **Peer IP addresses**, **Network type (Live/Beta/Test)**, and **Resource limits**—are defined directly in [main/src/bin.rs](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs). Any change to the deployment environment (e.g., moving to a different hardware node with a different IP) requires updating the source code and recompiling the binary. (Note: The RPC server port is currently managed directly in the `handle_rpc_server` loop within `bin.rs`).
+You can edit `config.toml` directly on the SD card (`NANO_NODE` partition) and reboot the Orange Pi RV2—no recompilation required.
 
-### Configuration Example
+### Example `config.toml`
 
-Modify `main/src/bin.rs` to adjust settings before the node starts:
+```toml
+[bare_metal]
+mac_address = "c0:74:2b:f9:15:ec"
+ipv4_address = "192.168.0.200"
+ipv4_prefix_len = 24
+gateway = "192.168.0.1"
+dns_server = "1.1.1.1"
 
-```rust
-// In main/src/bin.rs
-let mut config = NodeConfig::default_for(Networks::NanoLiveNetwork, 8);
+[node]
+peering_port = 7075
+enable_voting = true
+allow_local_peers = true
+online_weight_minimum = "130000000000000000000000000000000000000"
+representative_vote_weight_minimum = "0"
+preconfigured_peers = [
+    "peering.nano.org:7075",
+    "37.120.187.138:7075",
+    "94.130.135.50:7075",
+    "192.168.0.244:7075",
+]
 
-// Change Peering port
-config.network.listening_port = 7075;
+[node.network]
+peer_reachout = 1000
+cached_peer_reachout = 1000
 
-// Add static peers (essential for bare-metal discovery)
-config.preconfigured_peers.clear();
-config.preconfigured_peers.push(Peer::new("192.168.0.245".to_string(), 7075));
+[node.bootstrap]
+rate_limit = 10000
+database_rate_limit = 4096
+frontier_rate_limit = 128
+channel_limit = 64
+max_requests = 16384
 
-// Tune TCP limits for hardware constraints
-config.tcp.max_inbound_connections = 128;
-config.tcp.max_outbound_connections = 128;
+[node.bootstrap.frontier_scan]
+max_pending = 128
+
+[node.block_processor]
+max_peer_queue = 65536
+max_system_queue = 131072
+batch_size = 2048
+
+[node.vote_processor]
+max_pr_queue = 16384
+max_non_pr_queue = 16384
+batch_size = 4096
+max_triggered = 65536
+
+[node.experimental]
+enable_pruning = false
+max_pruning_age = 172800
+max_pruning_depth = 0
+
+[rpc]
+enable = true
+port = 7076
+enable_control = true
 ```
 
+### Ledger Pruning
 
 Pruning allows the node to delete old, confirmed blocks to save disk space. In this bare-metal environment, the node uses a custom **B-Tree with Free-List reclamation** to ensure that deleted space is reused physically on the disk.
 
 #### How to Activate Pruning
 
-To enable pruning, modify the `NodeFlags` in `main/src/bin.rs`:
+Set `enable_pruning = true` under `[node.experimental]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml):
 
-```rust
-let mut flags = NodeFlags::new();
-flags.enable_pruning = true; // Enables background pruning workers
-```
-
-#### Configuration
-
-Pruning is guided by age and depth limits in `NodeConfig`:
-
-```rust
-// Retain 48 hours of history (in seconds)
-config.max_pruning_age_s = 2 * 24 * 60 * 60; 
-
-// Maximum blocks per account (0 = unlimited depth, age-only)
-config.max_pruning_depth = 0;
+```toml
+[node.experimental]
+enable_pruning = true
+max_pruning_age = 172800 # Retain 48 hours of history (in seconds)
+max_pruning_depth = 0    # Maximum blocks per account (0 = unlimited depth, age-only)
 ```
 
 #### Important: The Safe Wipe
@@ -167,13 +198,14 @@ In a bare-metal environment with an incomplete ledger (e.g., during the initial 
 - **Discovery Gate:** Consequently, even if the node receives valid votes from these representatives via the `RepCrawler` or network rebroadcasts, it will filter them out of the `OnlineReps` list because they fall below the weight threshold.
 
 **To temporarily observe all representatives (even those with 0 weight):**
-Set `representative_vote_weight_minimum` to `Amount::zero()` in `node/src/config/node_config.rs`. This is useful for debugging network connectivity but should be reverted once the ledger is sufficiently synced to provide accurate weight data.
+Set `representative_vote_weight_minimum = "0"` under `[node]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml). This is useful for debugging network connectivity but can be raised once the ledger is sufficiently synced to provide accurate weight data.
 
 ## Structure
-- `/main/` - The main executable binary, entry points, and static node configuration.
-- `/common/` - The core kernel library, housing the trap handler, UART/SBI/U-Boot wrappers, storage engine, and networking stack.
+- `config.toml` - Declarative TOML configuration for node, bootstrap, queues, RPC, and bare-metal network interface.
+- `/main/` - The main executable binary, entry points, and hart task loops.
+- `/common/` - The core kernel library, housing the trap handler, UART/SBI/U-Boot wrappers, OLED driver, storage engine, and networking stack.
 - `/core/` - Core Nano cryptocurrency logic (blocks, accounts, amounts, voting).
-- `/node/` - The high-level Nano node implementation (consensus, block processing, telemetry).
+- `/node/` - The high-level Nano node implementation (consensus, block processing, telemetry, TOML config).
 - `/nullables/` - Shared infrastructure components (clock, random, storage, networking) with nullable support for testing.
 - `/ledger/` & `/ledger_store/` - Ledger state management and the BPM-backed storage implementation.
 - `/network/` & `/network_protocol/` - Nano-specific network message handling and peer management.
