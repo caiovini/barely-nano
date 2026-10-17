@@ -43,6 +43,36 @@ These extensions allow the bare-metal node to perform hashing, signature verific
 - **Cross-Cluster Coherency:** Uses explicit `Zicbom` cacheline flushes (`cbo.clean` / `cbo.inval`) and `SeqCst` memory barriers to ensure heap and BSS visibility across both CPU clusters.
 - **Task Dispatch:** Dedicated hart loops assign specific node workloads (RPC, Vote Processing, Block Processing, Consensus/AEC, Heavy I/O, Monitoring) to individual harts, while idle cycles assist with parallel Ed25519 signature verification.
 
+### 8. I2C OLED Status Display (`common/src/oled.rs`)
+- **Zero-Allocation `no_std` Driver:** Supports 4-pin I2C **SSD1306** and **SH1106** 128×64 OLED displays (at `0x3C` or `0x3D`) over hardware `I2C4` (`0xD401_2800`), with automatic GPIO I2C fallback if `SCK`/`SDA` are swapped or wired to `I2C3` (Pins 8 & 10).
+- **Differential Refresh on Hart 7:** Refreshes every 2 seconds on the Monitor hart (Hart 7), transmitting only text rows that have changed.
+
+#### Orange Pi RV2 26-Pin Header Wiring (`I2C4`)
+
+| Display Pin | Orange Pi RV2 Physical Pin | Signal / SoC Pad | Notes |
+| :--- | :--- | :--- | :--- |
+| **VDD** (or VCC) | **Pin 1** | `3.3V` | **Use 3.3V only** (Orange Pi RV2 GPIO/I2C pads are 3.3V logic) |
+| **SDA** | **Pin 3** | `I2C4_SDA` (`GPIO_52`) | Data line |
+| **SCK** (or SCL) | **Pin 5** | `I2C4_SCL` (`GPIO_51`) | Clock line |
+| **GND** | **Pin 6** (or Pin 9) | `GND` | Ground |
+
+```text
+    Display VDD ──► 3.3V [ 1]  [ 2] 5V
+    Display SDA ──►  SDA [ 3]  [ 4] 5V
+    Display SCK ──►  SCL [ 5]  [ 6] GND ◄── Display GND
+                    PWM9 [ 7]  [ 8] I2C3_SCL (GPIO_47)
+                     GND [ 9]  [10] I2C3_SDA (GPIO_48)
+                         ...    ...
+                         [25]  [26]
+```
+
+#### Display Telemetry Layout
+Uses a high-contrast 8×16 bold font (4 lines × 15 characters):
+- **Line 1:** `NANO P:<peers> *` — Connected peer count and toggling `.`/`*` heartbeat indicator
+- **Line 2:** `BLK: <count>` — Total blocks stored in the ledger
+- **Line 3:** `CNF: <count>` — Total confirmed (cemented) blocks
+- **Line 4:** `<bps>/S DB:<size>` — Block processing rate (blocks/sec) and NVMe B-Tree database size (`K`/`M`)
+
 ## Storage Architecture: Bare-Metal Raw Block Database
 
 Traditional filesystems (like FAT32 or EXT4) introduce substantial overhead and cannot easily handle massive ledger databases natively in a pure `no_std` environment. To address this, `barely-nano` employs a custom **16-Shard Buffer Pool + B-Tree** stack.
@@ -52,7 +82,7 @@ Traditional filesystems (like FAT32 or EXT4) introduce substantial overhead and 
 2. **Buffer Pool Manager:** A software cache residing in RAM that manages 128 × 4 KB 64-byte-aligned frames per shard. It minimizes hardware I/O by caching frequently accessed blocks and persists modifications using an **LRU (Least Recently Used)** eviction policy.
 3. **B-Tree Engine:** A specialized B-Tree implementation built directly on the Buffer Pool across 16 prefix-partitioned shards. It maps keys and values to persistent 4 KB pages, providing an efficient, ordered key-value store without any underlying OS filesystem.
 
-### 8. Build & Deployment System
+### 9. Build & Deployment System
 - The `Makefile` handles cross-compilation (`riscv64gc-unknown-none-elf`) with all Orange Pi RV2 target features enabled (`+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom`).
 - Converts the ELF binary into a raw bootable image (`barely-nano.bin`) and automatically copies it to a mounted SD card (`/run/media/cvini/NANO_NODE`) if present.
 
