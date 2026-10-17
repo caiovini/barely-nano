@@ -236,7 +236,7 @@ impl Node {
         info!("Node started");
         info!("Node ID: {}", node_id);
         kernel_common::uart::print(b"[node] Node ID: ");
-        let pk = node_id_key.public_key();
+        let pk = node_id_key.public_key(); tracing::info!("My Node ID: {:?}", pk);
         for b in pk.as_bytes() {
             kernel_common::uart::print_u8_hex(*b);
         }

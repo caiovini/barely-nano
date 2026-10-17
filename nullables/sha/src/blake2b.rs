@@ -80,6 +80,7 @@ fn compress(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
     }
 }
 
+#[allow(dead_code)]
 #[cfg(all(target_arch = "riscv64", any(feature = "simd", target_feature = "v")))]
 fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
     let mut v = [0u64; 16];

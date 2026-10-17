@@ -35,6 +35,7 @@ impl WorkRequest {
 
 pub struct WorkFactory {
     pub local_work_pool: WorkPool,
+    #[allow(dead_code)]
     work_peers: Mutex<Vec<Peer>>,
     stopped: AtomicBool,
 }

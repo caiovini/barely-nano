@@ -148,6 +148,7 @@ impl StatsSource for BlockProcessor {
 struct BlockProcessorLoop {
     queue: Arc<BlockProcessorQueue>,
     process: BlockBatchProcessor,
+    #[allow(dead_code)]
     backlog_waiter: Arc<BacklogWaiter>,
 }
 

@@ -37,7 +37,7 @@ impl Keepalive {
             stream.read_bytes(&mut addr_buffer, 16).ok()?;
             stream.read_bytes(&mut port_buffer, 2).ok()?;
 
-            let port = u16::from_be_bytes(port_buffer);
+            let port = u16::from_le_bytes(port_buffer);
             let ip_addr = Ipv6Addr::from(addr_buffer);
 
             peers[i] = SocketAddrV6::new(ip_addr, port, 0, 0);
@@ -67,7 +67,7 @@ impl Serialize for Keepalive {
             let ip_bytes = peer.ip().octets();
             stream.write_bytes_safe(&ip_bytes);
 
-            let port_bytes = peer.port().to_be_bytes();
+            let port_bytes = peer.port().to_le_bytes();
             stream.write_bytes_safe(&port_bytes);
         }
     }

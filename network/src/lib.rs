@@ -115,6 +115,7 @@ impl ChannelMode {
     }
 }
 
+#[allow(async_fn_in_trait)]
 pub trait AsyncBufferReader {
     async fn read(&self, buffer: &mut [u8], count: usize) -> anyhow::Result<()>;
 }

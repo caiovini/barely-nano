@@ -30,7 +30,9 @@ impl MessageProcessorConfig {
 
 /// Process inbound messages from other nodes
 pub struct MessageProcessor {
+    #[allow(dead_code)]
     config: NodeConfig,
+    #[allow(dead_code)]
     processing_threads: Vec<JoinHandle<()>>,
     state: Arc<State>,
 }
@@ -124,7 +126,7 @@ impl State {
 
     #[allow(dead_code)]
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
-        let start = kernel_common::clint::mtime();
+        let _start = kernel_common::clint::mtime();
         let batch_size = batch.len();
         
         kernel_common::uart::putchar(b'~');

@@ -1,6 +1,5 @@
 use crate::{utils::CancellationToken, ChannelDirection, NetworkError, TcpNetworkAdapter};
 use alloc::boxed::Box;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use core::future::{poll_fn, Future};
 use core::pin::Pin;
@@ -9,10 +8,10 @@ use core::{net::SocketAddrV6, time::Duration};
 use kernel_common::async_rt;
 use rsnano_nullable_tcp::{TcpSocket, TcpStream};
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
-use tracing::debug;
 
 /// Establishes a network connection to a given peer
 pub struct PeerConnector {
+    #[allow(dead_code)]
     connect_timeout: Duration,
     network_adapter: Arc<TcpNetworkAdapter>,
     cancel_token: CancellationToken,
@@ -46,7 +45,11 @@ impl PeerConnector {
 
     /// Establish a network connection to the given peer
     pub fn connect_to(&self, peer: SocketAddrV6) -> Result<(), NetworkError> {
-        tracing::debug!("Connecting to {}", peer);
+        kernel_common::uart::print(b"[peer] Reachout to ");
+        let mut ip_str = alloc::string::String::new();
+        let _ = core::fmt::write(&mut ip_str, format_args!("{}", peer));
+        kernel_common::uart::print(ip_str.as_bytes());
+        kernel_common::uart::print(b"\n");
         self.connect_listener.emit(peer);
 
         if self.cancel_token.is_cancelled() {
@@ -114,7 +117,11 @@ async fn connect_impl(peer: SocketAddrV6, network_adapter: &TcpNetworkAdapter) {
             let _ = network_adapter.add(stream, ChannelDirection::Outbound);
         }
         Err(e) => {
-            tracing::debug!("Failed to connect to {}: {:?}", peer, e);
+            kernel_common::uart::print(b"[peer] Connect failed to ");
+            let mut ip_str = alloc::string::String::new();
+            let _ = core::fmt::write(&mut ip_str, format_args!("{}", peer));
+            kernel_common::uart::print(ip_str.as_bytes());
+            kernel_common::uart::print(b"\n");
             network_adapter.connect_error(peer, e);
         }
     }

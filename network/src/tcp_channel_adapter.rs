@@ -11,7 +11,6 @@ use core::future::Future;
 use alloc::string::ToString;
 use alloc::sync::{Arc, Weak};
 use kernel_common::async_rt;
-use kernel_common::uart;
 
 /// Connects a Channel with a TcpStream
 pub struct TcpChannelAdapter {

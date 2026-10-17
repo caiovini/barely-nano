@@ -164,9 +164,7 @@ impl CandidateAccounts {
             return false;
         }
 
-        // An account can be prioritized even if it is blocked.
-        // This is necessary to fetch the missing blocks for a blocked account.
-        if !priorities.contains(account) {
+        if !priorities.contains(account) && !_blocking.contains(account) {
             priorities.insert(PriorityEntry::new(*account, priority, pull_type));
             true
         } else {

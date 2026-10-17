@@ -257,6 +257,7 @@ impl BlockProcessorQueueImpl {
         }
     }
 
+    #[allow(dead_code)]
     pub fn should_wait(&self) -> bool {
         if self.stopped {
             return false;

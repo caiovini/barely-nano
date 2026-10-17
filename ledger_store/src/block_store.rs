@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use crate::LedgerCache;
 
 pub struct BtreeBlockStore {
+    #[allow(dead_code)]
     cache: Arc<LedgerCache>,
 }
 
@@ -36,7 +37,11 @@ impl BtreeBlockStore {
         tracing::debug!("BlockStore: putting block {} into shard {}", block.hash(), shard_idx);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
+            let is_new = db.search(&key).is_none();
             db.insert(key, &buffer[0..len]);
+            if is_new {
+                self.cache.block_count.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            }
         }
     }
 
@@ -73,11 +78,14 @@ impl BtreeBlockStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.delete(key);
+            if db.search(&key).is_some() {
+                db.delete(key);
+                self.cache.block_count.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+            }
         }
     }
 
-    pub fn count(&self) -> usize {
+    pub fn scan_count(&self) -> usize {
         let mut count = 0;
         for i in 0..SHARD_COUNT {
             let mut lock = SHARDS[i].lock();
@@ -86,6 +94,10 @@ impl BtreeBlockStore {
             }
         }
         count
+    }
+
+    pub fn count(&self) -> usize {
+        self.cache.block_count.load(core::sync::atomic::Ordering::SeqCst) as usize
     }
 
     pub fn for_each<F>(&self, mut f: F)

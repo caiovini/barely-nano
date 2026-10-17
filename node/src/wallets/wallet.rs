@@ -11,6 +11,7 @@ use rsnano_work::WorkThresholds;
 pub struct Wallet {
     pub representatives: Mutex<HashSet<PublicKey>>,
     ledger: Arc<Ledger>,
+    #[allow(dead_code)]
     work_thresholds: WorkThresholds,
     pub keys: Mutex<HashMap<PublicKey, PrivateKey>>,
 }

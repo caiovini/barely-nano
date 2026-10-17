@@ -250,6 +250,7 @@ struct ReachoutLoop {
 impl ReachoutLoop {
     #[allow(dead_code)]
     async fn run_async(&self) {
+        let mut loop_count = 0;
         while !*self.stopped.1.lock() {
             async_rt::sleep(self.reachout_interval).await;
 
@@ -257,8 +258,14 @@ impl ReachoutLoop {
                 return;
             }
 
+            loop_count += 1;
+            if loop_count % 10 == 0 {
+                kernel_common::uart::print(b"[reachout] Woke up, checking keepalives...\n");
+            }
+
             let keepalive = self.latest_keepalives.lock().pop_random();
             if let Some(keepalive) = keepalive {
+                kernel_common::uart::print(b"[reachout] Found keepalives!\n");
                 for peer in keepalive.peers {
                     if peer.ip().is_unspecified() {
                         continue;

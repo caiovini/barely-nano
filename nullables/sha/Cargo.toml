@@ -9,3 +9,4 @@ path = "src/lib.rs"
 
 [features]
 simd = []
+never_enable_this = []

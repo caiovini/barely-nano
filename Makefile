@@ -8,8 +8,8 @@ OBJCOPY ?= $(or $(shell which llvm-objcopy 2>/dev/null),$(shell find $(HOME)/.ru
 build-smode:
 	RUSTFLAGS="-C target-feature=+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom" $(CARGO) build -p barely-nano --release --target riscv64gc-unknown-none-elf --features simd
 	$(OBJCOPY) -O binary target/riscv64gc-unknown-none-elf/release/barely-nano barely-nano.bin
-	@if [ -d "/run/media/cvini/NANO_NODE" ]; then \
-		cp barely-nano.bin /run/media/cvini/NANO_NODE/; \
+	@if [ -d "/media/cvini/NANO_NODE" ]; then \
+		cp barely-nano.bin /media/cvini/NANO_NODE/; \
 		sync; \
 		echo "Successfully deployed barely-nano.bin to SD card"; \
 	fi
@@ -19,8 +19,8 @@ build-smode:
 build-spammer:
 	RUSTFLAGS="-C target-feature=+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom" $(CARGO) build -p barely-nano --release --target riscv64gc-unknown-none-elf --features spammer,simd
 	$(OBJCOPY) -O binary target/riscv64gc-unknown-none-elf/release/barely-nano barely-nano.bin
-	@if [ -d "/run/media/cvini/NANO_NODE" ]; then \
-		cp barely-nano.bin /run/media/cvini/NANO_NODE/; \
+	@if [ -d "/media/cvini/NANO_NODE" ]; then \
+		cp barely-nano.bin /media/cvini/NANO_NODE/; \
 		sync; \
 		echo "Successfully deployed barely-nano.bin to SD card"; \
 	fi

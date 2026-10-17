@@ -65,10 +65,10 @@ impl BtreeStore {
         self.cache.reset();
         
         // Block count
-        self.cache.block_count.store(self.block.count() as u64, Ordering::SeqCst);
+        self.cache.block_count.store(self.block.scan_count() as u64, Ordering::SeqCst);
         
         // Account count
-        self.cache.account_count.store(self.account.count() as u64, Ordering::SeqCst);
+        self.cache.account_count.store(self.account.scan_count() as u64, Ordering::SeqCst);
         
         // Confirmed count
         self.cache.confirmed_count.store(self.confirmation_height.sum_heights(), Ordering::SeqCst);

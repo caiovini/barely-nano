@@ -13,7 +13,7 @@ use core::pin::Pin;
 use core::str::FromStr;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use kernel_common::{pmic_wdt, trap, uart};
+use kernel_common::{trap, uart};
 use linked_list_allocator::LockedHeap;
 use rsnano_core::utils::Tickable;
 use rsnano_node::Node;
@@ -149,8 +149,11 @@ pub fn invalidate_cache_range(addr: usize, len: usize) {
     let mut current = start;
     while current < end {
         unsafe {
+            // Use cbo.flush (clean + invalidate) instead of cbo.inval because
+            // cbo.inval in S-mode traps if M-mode firmware leaves menvcfg.CBIE == 0,
+            // whereas cbo.flush is always permitted alongside cbo.clean (CBCFE == 1).
             core::arch::asm!(
-                "cbo.inval ({0})",
+                "cbo.flush ({0})",
                 in(reg) current,
                 options(nostack)
             );
@@ -158,7 +161,7 @@ pub fn invalidate_cache_range(addr: usize, len: usize) {
         current += block_size;
     }
     unsafe {
-        core::arch::asm!("fence r, r", options(nostack));
+        core::arch::asm!("fence rw, rw", options(nostack));
     }
 }
 
@@ -169,7 +172,7 @@ pub static mut SECONDARY_HART_WAKE: [u32; 8] = [0; 8];
 #[no_mangle]
 pub extern "C" fn rust_main(
     hart_id: usize,
-    opaque: usize,
+    _opaque: usize,
     jt_ptr: *const kernel_common::uboot::JumpTable,
 ) {
     // CRITICAL: Secondary harts (not Hart 1) must wait for boot to complete,
@@ -207,7 +210,6 @@ pub extern "C" fn rust_main(
 
         // secondary_hart_main grabs node+exec from globals AFTER trap::init().
         secondary_hart_main(hart_id);
-        return;
     }
 
     kernel_common::uart::print(b"[boot] rust_main started\n");
@@ -234,8 +236,8 @@ pub extern "C" fn rust_main(
             static mut _bss_end: u8;
         }
         unsafe {
-            let bss_start = &mut _bss_start as *mut u8;
-            let bss_end = &mut _bss_end as *mut u8;
+            let bss_start = &raw mut _bss_start;
+            let bss_end = &raw mut _bss_end;
             let len = bss_end as usize - bss_start as usize;
             core::ptr::write_bytes(bss_start, 0, len);
             clean_cache_range(bss_start as usize, len);
@@ -448,6 +450,7 @@ fn boot_hart_main(hart_id: usize) {
 
     static LEADER_ELECTED: AtomicBool = AtomicBool::new(false);
     if !LEADER_ELECTED.swap(true, Ordering::SeqCst) {
+        kernel_common::oled::init();
         uart::print(b"[boot] net init...\n");
         let net_ctx = kernel_common::net::init_uboot_net();
         uart::print(b"[boot] net init done\n");
@@ -550,16 +553,44 @@ fn boot_hart_main(hart_id: usize) {
             *NODE.lock() = Some(NodeWrapper(node_arc.clone()));
         }
 
+        kernel_common::storage::flush_all_shards();
+
         // Signal secondary harts that the node is ready BEFORE starting them,
         // so harts that boot quickly don't spin past the flag before it's set.
         NODE_INIT_COMPLETE.store(true, Ordering::SeqCst);
 
-        kernel_common::uart::print(b"[boot] Starting secondary harts...\n");
+        // On the SpacemiT K1 multi-cluster design, RISC-V fence is NOT sufficient for
+        // cross-cluster cache visibility. We must flush all shared state (statics, locks,
+        // AND heap contents) from Cluster 0's cache to DRAM BEFORE waking Cluster 1 harts.
+        //
+        // CRITICAL: Arc<T> inner data (e.g. Arc<Mutex<BootstrapState>>) lives in the HEAP,
+        // not in BSS. Without flushing the heap before secondary harts dereference Arc<T>,
+        // Cluster 1 harts can read stale DRAM lines.
         let start_addr = unsafe { &_start as *const u8 as usize };
-
-        // Flush the entire kernel (code, data, bss, statics) to DRAM before waking
-        // secondary harts on Cluster 1. Use 3MB to cover the full binary (~2.35MB).
         clean_cache_range(start_addr, 3 * 1024 * 1024);
+
+        {
+            let heap = ALLOCATOR.0.lock();
+            let heap_start = heap.bottom() as usize;
+            let heap_used = heap.used();
+            drop(heap);
+            if heap_used > 0 {
+                clean_cache_range(heap_start, heap_used);
+            }
+        }
+
+        // Signal secondary harts: all state is ready; flush BSS and flag to DRAM.
+        HART_DISPATCH_READY.store(true, Ordering::SeqCst);
+        unsafe {
+            let bss_start = &_bss_start as *const u8 as usize;
+            let bss_end = &_bss_end as *const u8 as usize;
+            let len = bss_end - bss_start;
+            clean_cache_range(bss_start, len);
+        }
+        let flag_addr = &HART_DISPATCH_READY as *const _ as usize;
+        clean_cache_range(flag_addr, 8);
+
+        kernel_common::uart::print(b"[boot] Starting secondary harts...\n");
 
         for id in 0..8 {
             if id != hart_id {
@@ -584,19 +615,17 @@ fn boot_hart_main(hart_id: usize) {
                 kernel_common::uart::print_usize(initial_status);
                 kernel_common::uart::print(b"\n");
 
-                let start_addr_to_use = start_addr;
+                let (err, _) = kernel_common::sbi::hart_start(id, start_addr, 0);
 
-                let (err, _) = kernel_common::sbi::hart_start(id, start_addr_to_use, 0);
-
-                // Workaround for SpacemiT K1 OpenSBI: 
+                // Workaround for SpacemiT K1 OpenSBI:
                 // The firmware might fail to send the wakeup IPI internally,
                 // leaving the hart stuck in START_PENDING state.
                 // We send a manual IPI to force it to wake up.
                 kernel_common::sbi::send_ipi(1 << id, 0);
 
                 // Wait up to ~1s for it to leave START_PENDING (status=2)
-                let mut status = 2;
-                let mut err_status = 0;
+                let mut status;
+                let mut err_status;
                 let start_mtime = kernel_common::clint::mtime();
                 loop {
                     let (es, st) = kernel_common::sbi::hart_get_status(id);
@@ -641,86 +670,31 @@ fn boot_hart_main(hart_id: usize) {
         lock.as_ref().expect("Node not initialized").0.clone()
     };
 
-    kernel_common::storage::flush_all_shards();
-
-    // Monitor and stats tasks are now handled by a dedicated Hart loop (Hart 7)
-    // to ensure reliability and free up the async executor.
-
-    kernel_common::uart::print(b"[boot] Entering task loop for Hart ");
-    kernel_common::uart::print_usize(hart_id);
-    kernel_common::uart::print(b"...\n");
-
     let exec = kernel_common::async_rt::EXECUTOR
         .lock()
         .as_ref()
         .expect("Executor not initialized")
         .clone();
 
-    // On the SpacemiT K1 multi-cluster design, RISC-V fence is NOT sufficient for
-    // cross-cluster cache visibility. We must flush all shared state (statics, locks,
-    // AND heap contents) from Cluster 0's cache to DRAM so Cluster 1 harts can see it.
-    // cbo.flush is always permitted in S-mode.
-    //
-    // CRITICAL: Arc<T> inner data (e.g. Arc<Mutex<BootstrapState>>) lives in the HEAP,
-    // not in BSS. Secondary harts read the Arc pointer correctly from the flushed BSS/globals,
-    // but then dereference into heap memory that is still cached only in Cluster 0's L2.
-    // Without flushing the heap, secondary harts get a Load Access Fault when they
-    // dereference the first level of indirection inside any Arc<T>.
-    //
-    // We flush the used portion of the heap. `LockedHeap` is a bump+free-list allocator,
-    // so all live data is within [heap_start, heap_start + used_bytes].
-    // We conservatively flush the entire allocated range to be safe.
-    {
-        let heap = ALLOCATOR.0.lock();
-        let heap_start = heap.bottom() as usize;
-        let heap_used = heap.used();
-        drop(heap);
-        if heap_used > 0 {
-            // Round up to cache-line boundary.
-            clean_cache_range(heap_start, heap_used);
-        }
-    }
-
-    // Flush BSS (contains global statics: NODE, EXECUTOR, HART_DISPATCH_READY, etc.)
-    unsafe {
-        let bss_start = &_bss_start as *const u8 as usize;
-        let bss_end = &_bss_end as *const u8 as usize;
-        let len = bss_end - bss_start;
-        clean_cache_range(bss_start, len);
-    }
-
-    // Signal secondary harts: all state is flushed to DRAM; go ahead.
-    HART_DISPATCH_READY.store(true, Ordering::SeqCst);
-    // Flush the flag itself last, so secondary harts see it only after all other
-    // state above is already coherent in DRAM.
-    let flag_addr = &HART_DISPATCH_READY as *const _ as usize;
-    clean_cache_range(flag_addr, 8);
+    kernel_common::uart::print(b"[boot] Entering task loop for Hart ");
+    kernel_common::uart::print_usize(hart_id);
+    kernel_common::uart::print(b"...\n");
 
     dispatch_hart_task(hart_id, node_arc, exec);
 }
-fn secondary_hart_main(hart_id: usize) {
+
+fn secondary_hart_main(hart_id: usize) -> ! {
     // Initialize trap vector for this hart BEFORE touching any global locks.
     kernel_common::trap::init();
 
-    // NOTE: Do NOT call invalidate_cache_range (cbo.inval) here.
-    // cbo.inval in S-mode requires menvcfg.CBIE to be set by M-mode firmware.
-    // OpenSBI on this SoC does NOT set CBIE, so the instruction raises an
-    // illegal-instruction trap and kills the hart silently.
-    //
-    // BSS visibility is already guaranteed:
-    //   1. Hart 1 flushed the entire BSS to DRAM via clean_cache_range (cbo.flush,
-    //      always permitted in S-mode) before setting HART_DISPATCH_READY.
-    //   2. Each secondary hart already called invalidate_cache_range on the
-    //      HART_DISPATCH_READY flag word in its spin-wait loop, which forces it
-    //      to re-fetch from DRAM and breaks any stale L1/L2 state.
-    //   3. The SeqCst store/load pair on HART_DISPATCH_READY provides the
-    //      required acquire/release barrier for the BSS contents.
-
-    // Now that traps are initialized and BSS is invalidated,
-    // Hart 1 has released all global locks and we can read them from DRAM.
+    // Hart 1 has flushed kernel, heap, and BSS to DRAM and released all global locks
+    // before setting HART_DISPATCH_READY.
     let node_arc = {
         let lock = NODE.lock();
-        lock.as_ref().expect("[PANIC] Node not initialized on secondary hart").0.clone()
+        lock.as_ref()
+            .expect("[PANIC] Node not initialized on secondary hart")
+            .0
+            .clone()
     };
     let exec = kernel_common::async_rt::EXECUTOR
         .lock()
@@ -738,20 +712,19 @@ fn dispatch_hart_task(
     hart_id: usize,
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
-) {
+) -> ! {
     match hart_id {
-        0 => run_heavy_io_loop(node_arc, exec, hart_id),
         1 => run_maintenance_and_network_loop(node_arc, exec, hart_id),
         2 => run_block_processor_loop(node_arc, exec, hart_id),
         3 => run_consensus_loop(node_arc, exec, hart_id),
         4 => run_rpc_worker_loop(node_arc, exec, hart_id),
-        5 => run_stats_worker_loop(node_arc, exec, hart_id),
+        5 => run_vote_processor_loop(node_arc, exec, hart_id),
         6 => run_heavy_io_loop(node_arc, exec, hart_id),
         7 => run_monitor_loop(node_arc, exec, hart_id),
         _ => {
             kernel_common::uart::print(b"[boot] Hart ");
             kernel_common::uart::print_usize(hart_id);
-            kernel_common::uart::print(b": No task assigned, entering parking loop\n");
+            kernel_common::uart::print(b": Reserved/unassigned, entering parking loop\n");
             loop {
                 core::hint::spin_loop();
             }
@@ -759,48 +732,11 @@ fn dispatch_hart_task(
     }
 }
 
-#[allow(dead_code)]
-fn run_network_loop(node_arc: Arc<Node>, hart_id: usize) {
-    tracing::info!("[boot] Hart 0: Network & RPC loop enter\n");
-    let exec = kernel_common::async_rt::EXECUTOR
-        .lock()
-        .as_ref()
-        .unwrap()
-        .clone();
-    let mut last_heartbeat = kernel_common::clint::mtime();
-    let mut iterations = 0;
-    loop {
-        let mtime = kernel_common::clint::mtime();
-
-        if mtime - last_heartbeat > seconds(1) {
-            last_heartbeat = mtime;
-            iterations = 0;
-        }
-
-        /*
-                {
-                    let _intr = kernel_common::uart::InterruptGuard::new();
-                    let mut ctx = kernel_common::net::NET.lock();
-                    if let Some(ref mut ctx_val) = *ctx {
-                        ctx_val.poll(mtime);
-                    }
-                }
-        */
-
-        node_arc.message_processor.lock().run_once();
-        if !exec.run_once(hart_id) {
-            core::hint::spin_loop();
-        }
-        iterations += 1;
-        core::hint::spin_loop();
-    }
-}
-
 fn run_rpc_worker_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
-) {
+) -> ! {
     tracing::info!("[boot] Hart 4: RPC Server loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
@@ -843,11 +779,11 @@ fn run_rpc_worker_loop(
     }
 }
 
-fn run_stats_worker_loop(
+fn run_vote_processor_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
-) {
+) -> ! {
     kernel_common::uart::print(b"[boot] Hart 5: Vote Processor loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
@@ -870,6 +806,7 @@ fn run_stats_worker_loop(
             }
         }
 
+        node_arc.vote_cache_processor.run_once();
         node_arc.vote_processor.run_once();
         node_arc.signature_checker.try_help_verify();
         if !exec.run_once(hart_id) {
@@ -880,69 +817,11 @@ fn run_stats_worker_loop(
     }
 }
 
-#[allow(dead_code)]
-fn run_maintenance_loop(node_arc: Arc<Node>, hart_id: usize) {
-    kernel_common::uart::print(b"[boot] Hart 1: Maintenance & Async Executor loop enter\n");
-    let exec = kernel_common::async_rt::EXECUTOR
-        .lock()
-        .clone()
-        .expect("Executor not initialized");
-    let mut last_heartbeat = kernel_common::clint::mtime();
-    let mut last_cleanup = kernel_common::clint::mtime();
-    let mut last_aec_tick = kernel_common::clint::mtime();
-    let mut last_online_weight_tick = kernel_common::clint::mtime();
-    let _last_node_tick = kernel_common::clint::mtime();
-    let mut iterations = 0;
-    loop {
-        let mtime = kernel_common::clint::mtime();
-
-        if mtime - last_aec_tick > millis(300) {
-            if let Some(mut guard) = node_arc.aec_ticker.try_lock() {
-                let cancel_token = rsnano_core::utils::CancellationToken::new();
-                rsnano_core::utils::Tickable::tick(&mut *guard, &cancel_token);
-            }
-            last_aec_tick = mtime;
-        }
-
-        if mtime - last_heartbeat > seconds(1) {
-            last_heartbeat = mtime;
-            iterations = 0;
-        }
-        iterations += 1;
-        if mtime - last_cleanup > seconds(5) {
-            if let Some(guard) = node_arc.dead_channel_cleanup.try_lock() {
-                guard.clean_up();
-            }
-            if let Some(mut guard) = node_arc.peer_cache_connector.try_lock() {
-                let cancel_token = rsnano_core::utils::CancellationToken::new();
-                guard.tick(&cancel_token);
-            }
-            last_cleanup = mtime;
-        }
-
-        if mtime - last_online_weight_tick > seconds(2) {
-            if let Some(mut guard) = node_arc.online_weight_calculation.try_lock() {
-                let cancel_token = rsnano_core::utils::CancellationToken::new();
-                guard.tick(&cancel_token);
-            }
-            last_online_weight_tick = mtime;
-        }
-
-        for _ in 0..8 {
-            if !exec.run_once(hart_id) {
-                core::hint::spin_loop();
-                break; // No more work for now
-            }
-        }
-        core::hint::spin_loop();
-    }
-}
-
 fn run_block_processor_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
-) {
+) -> ! {
     kernel_common::uart::print(b"[boot] Hart 2: Block Processor loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
@@ -979,6 +858,11 @@ fn run_block_processor_loop(
                 last_flush = mtime;
             }
         }
+        if node_arc.unchecked.buffer_count() > 0 {
+            node_arc.unchecked.run_once();
+        }
+        node_arc.confirming_set.run_once();
+
         node_arc.signature_checker.try_help_verify();
         if !exec.run_once(hart_id) {
             core::hint::spin_loop();
@@ -991,8 +875,8 @@ fn run_consensus_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
-) {
-    kernel_common::uart::print(b"[boot] Hart 3: Message/Vote Processor loop enter\n");
+) -> ! {
+    kernel_common::uart::print(b"[boot] Hart 3: Consensus loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_aec_voter_tick = kernel_common::clint::mtime();
@@ -1101,40 +985,55 @@ impl rsnano_network::AsyncDnsResolver for BareMetalDnsResolver {
     }
 }
 
-#[allow(dead_code)]
-fn run_async_worker_loop(node_arc: Arc<Node>, hart_id: usize) {
-    tracing::info!("[boot] Hart 6: Async Executor & Ledger Maintenance loop enter\n");
-    let exec = kernel_common::async_rt::EXECUTOR
-        .lock()
-        .clone()
-        .expect("Executor not initialized");
-    loop {
-        for _ in 0..128 {
-            exec.run_once(hart_id);
-        }
-        node_arc.confirming_set.run_once();
-        node_arc.vote_cache_processor.run_once();
-        node_arc.backlog_scan.lock().run_once();
-        node_arc.vote_processor.run_once();
-        node_arc.signature_checker.try_help_verify();
-        core::hint::spin_loop();
-    }
-}
-
-fn run_monitor_loop(node_mon: Arc<Node>, exec: kernel_common::async_rt::Executor, hart_id: usize) {
+fn run_monitor_loop(
+    node_mon: Arc<Node>,
+    exec: kernel_common::async_rt::Executor,
+    hart_id: usize,
+) -> ! {
     kernel_common::uart::print(b"[boot] Hart 7: Monitor loop enter\n");
     let mut last_tick = kernel_common::clint::mtime();
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
-    let mut last_stored_count = 0;
-    let mut last_confirmed_count = 0;
+    let mut last_oled = kernel_common::clint::mtime();
+    let mut last_stored_count = node_mon.ledger.block_count();
+    let mut last_confirmed_count = node_mon.ledger.confirmed_count();
+    let mut last_oled_stored = last_stored_count;
+    let mut cached_db_kb: usize = 0;
     let mut iterations = 0;
+
+    // Initial OLED status render right after boot completes
+    {
+        let peers = node_mon.network.read().channels_info().total;
+        kernel_common::oled::update_status(
+            peers,
+            last_stored_count as usize,
+            last_confirmed_count as usize,
+            0,
+            cached_db_kb,
+        );
+    }
 
     loop {
         let mtime = kernel_common::clint::mtime();
         if mtime - last_watchdog > seconds(1) {
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
+        }
+
+        if mtime - last_oled > seconds(2) {
+            let stored_now = node_mon.ledger.block_count();
+            let confirmed_now = node_mon.ledger.confirmed_count();
+            let oled_bps = stored_now.saturating_sub(last_oled_stored) / 2;
+            last_oled_stored = stored_now;
+            let peers = node_mon.network.read().channels_info().total;
+            kernel_common::oled::update_status(
+                peers,
+                stored_now as usize,
+                confirmed_now as usize,
+                oled_bps as usize,
+                cached_db_kb,
+            );
+            last_oled = mtime;
         }
 
         if mtime - last_heartbeat > seconds(10) {
@@ -1169,6 +1068,7 @@ fn run_monitor_loop(node_mon: Arc<Node>, exec: kernel_common::async_rt::Executor
                     }
                 }
                 let db_kb = total_pages * 4;
+                cached_db_kb = db_kb;
                 let stored_count = node_mon.ledger.block_count();
                 let confirmed_count = node_mon.ledger.confirmed_count();
 
@@ -1230,7 +1130,6 @@ fn run_monitor_loop(node_mon: Arc<Node>, exec: kernel_common::async_rt::Executor
             last_tick = mtime;
         }
 
-        node_mon.vote_processor.run_once();
         if !exec.run_once(hart_id) {
             // Aggressive throttle for the monitor hart to free up system bus
             for _ in 0..5000 {
@@ -1266,7 +1165,11 @@ fn panic(info: &PanicInfo) -> ! {
     loop {}
 }
 
-fn run_heavy_io_loop(node_arc: Arc<Node>, exec: kernel_common::async_rt::Executor, hart_id: usize) {
+fn run_heavy_io_loop(
+    node_arc: Arc<Node>,
+    exec: kernel_common::async_rt::Executor,
+    hart_id: usize,
+) -> ! {
     kernel_common::uart::print(b"[boot] Hart 6: Heavy I/O & Bootstrap loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_flush = kernel_common::clint::mtime();
@@ -1326,16 +1229,16 @@ fn run_heavy_io_loop(node_arc: Arc<Node>, exec: kernel_common::async_rt::Executo
         core::hint::spin_loop();
     }
 }
+
 fn run_maintenance_and_network_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
-) {
+) -> ! {
     kernel_common::uart::print(b"[boot] Hart 1: Maintenance & Network loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_cleanup = kernel_common::clint::mtime();
-    let mut last_aec_tick = kernel_common::clint::mtime();
     let mut last_online_weight_tick = kernel_common::clint::mtime();
     let mut iterations = 0;
 
@@ -1380,15 +1283,7 @@ fn run_maintenance_and_network_loop(
         }
         node_arc.message_processor.lock().run_once();
 
-        // 2. Maintenance Ticks
-        if mtime - last_aec_tick > millis(300) {
-            if let Some(mut guard) = node_arc.aec_ticker.try_lock() {
-                let cancel_token = rsnano_core::utils::CancellationToken::new();
-                rsnano_core::utils::Tickable::tick(&mut *guard, &cancel_token);
-            }
-            last_aec_tick = mtime;
-        }
-
+        // 2. Maintenance Ticks (AEC ticker is driven exclusively by Hart 3)
         if mtime - last_cleanup > seconds(5) {
             if let Some(guard) = node_arc.dead_channel_cleanup.try_lock() {
                 guard.clean_up();

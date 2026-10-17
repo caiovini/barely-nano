@@ -322,7 +322,7 @@ impl Ledger {
         }
 
         kernel_common::uart::print(b"[ledger] Fetching genesis account info...\n");
-        let info = self.any().get_account(&genesis_account).unwrap();
+        let _info = self.any().get_account(&genesis_account).unwrap();
         kernel_common::uart::print(b"[ledger] Fetching genesis account info done.\n");
 
         kernel_common::uart::print(b"[ledger] Iterating accounts...\n");
@@ -334,7 +334,7 @@ impl Ledger {
         let mut count = 0;
         while !current.is_zero() && count < 10 {
             kernel_common::watchdog::kick();
-            if let Some(block) = self.any().get_block(&current) {
+            if let Some(_block) = self.any().get_block(&current) {
                 kernel_common::uart::print(b"[ledger]   Block successor: ");
                 kernel_common::uart::print_usize(count);
                 kernel_common::uart::print(b"\n");

@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use alloc::collections::BTreeSet;
 use spin::Mutex;
 
 use rsnano_core::{Account, Block, BlockType, SavedBlock};
@@ -35,9 +36,17 @@ impl BlockInspector {
     pub fn inspect(&self, batch: &[ProcessedResult]) {
         let mut state = self.state.lock();
         let any = self.ledger.any();
+        let mut failed_accounts = BTreeSet::new();
+        
         for result in batch {
             let account = self.get_account(&any, &result.block, &result.saved_block);
-            self.inspect_block(&mut state, result, &account);
+            let is_cascading = failed_accounts.contains(&account);
+            
+            if result.status.is_err() {
+                failed_accounts.insert(account);
+            }
+            
+            self.inspect_block(&mut state, result, &account, is_cascading);
         }
     }
 
@@ -63,6 +72,7 @@ impl BlockInspector {
         state: &mut BootstrapState,
         result: &ProcessedResult,
         account: &Account,
+        is_cascading: bool,
     ) {
         let hash = result.block.hash();
 
@@ -132,10 +142,6 @@ impl BlockInspector {
                 }
             }
             Err(BlockError::GapSource) => {
-                // Minor punishment for gaps
-                if result.source == BlockSource::Bootstrap {
-                    state.scoring.punish(result.channel_id, 50);
-                }
 
                 // Prevent malicious live traffic from filling up the blocked set
                 if result.source == BlockSource::Bootstrap {
@@ -162,36 +168,9 @@ impl BlockInspector {
                 }
             }
             Err(BlockError::GapPrevious) => {
-                // Minor punishment for gaps
-                if result.source == BlockSource::Bootstrap {
-                    state.scoring.punish(result.channel_id, 50);
-                }
-
-                // Mark account as blocked because it is missing the previous block
-                let previous = result.block.previous();
-                if !account.is_zero() && !previous.is_zero() {
-                    let blocked =
-                        state
-                            .candidate_accounts
-                            .block(*account, previous, self.clock.now());
-                    if blocked {
-                        state.candidate_accounts.dependency_update(&previous, *account);
-                        self.stats.inc(
-                            StatType::BootstrapAccountSets,
-                            DetailType::PriorityEraseBlock,
-                        );
-                        self.stats
-                            .inc(StatType::BootstrapAccountSets, DetailType::Block);
-                    }
-                }
-
-                // Prioritize the account so we pull missing predecessors
-                match state.candidate_accounts.priority_up(account) {
-                    PriorityUpResult::Updated | PriorityUpResult::Inserted => {
-                        self.stats
-                            .inc(StatType::BootstrapAccountSets, DetailType::Prioritize);
-                    }
-                    _ => {}
+                if result.source == BlockSource::Bootstrap && !is_cascading {
+                    // Long-term ban for pruned nodes that return incomplete histories
+                    state.scoring.punish(result.channel_id, 100000);
                 }
 
                 // Prevent live traffic from evicting accounts from the priority list
@@ -218,10 +197,17 @@ impl BlockInspector {
                         .inc(StatType::BootstrapAccountSets, DetailType::PriorityErase);
                 }
             }
-            Err(BlockError::BadSignature) | Err(BlockError::Fork) => {
+            Err(BlockError::BadSignature) => {
                 // Severe punishment for invalid data
                 state.scoring.punish(result.channel_id, 500);
 
+                if state.candidate_accounts.priority_erase(account) {
+                    self.stats
+                        .inc(StatType::BootstrapAccountSets, DetailType::PriorityErase);
+                }
+            }
+            Err(BlockError::Fork) => {
+                // Fork means our local ledger disagrees. Do not punish the peer, as our ledger might be the one that is wrong.
                 if state.candidate_accounts.priority_erase(account) {
                     self.stats
                         .inc(StatType::BootstrapAccountSets, DetailType::PriorityErase);
@@ -231,8 +217,9 @@ impl BlockInspector {
                 // Ignore old blocks, don't erase from priority
             }
             _ => {
-                // Any other error (BalanceMismatch, InsufficientWork, etc.) is invalid data
-                state.scoring.punish(result.channel_id, 500);
+                // Any other error (BalanceMismatch, InsufficientWork, etc.) might just be local state inconsistencies.
+                // Apply a mild de-prioritization rather than a ban.
+                state.scoring.punish(result.channel_id, 10);
 
                 if state.candidate_accounts.priority_erase(account) {
                     self.stats

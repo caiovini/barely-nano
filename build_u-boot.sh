@@ -16,12 +16,15 @@ BOARD_CONFIG=x1_defconfig
 UBOOT_DIR="u-boot-orangepi"
 
 # Parse arguments
-DEVICE="/dev/sdb"
+DEVICE="/dev/sda"
 FLASH_AUTO=false
 
 for arg in "$@"; do
     if [[ "$arg" == "--flash" ]]; then
         FLASH_AUTO=true
+    elif [[ "$arg" =~ ^/dev/sd[a-z][0-9]+$ ]]; then
+        echo "Error: '$arg' is a partition, not a whole disk. Use the raw disk device (e.g. ${arg%%[0-9]*})."
+        exit 1
     elif [[ "$arg" =~ ^/dev/ ]]; then
         DEVICE="$arg"
     else

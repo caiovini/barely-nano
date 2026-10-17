@@ -106,7 +106,8 @@ impl Executor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let hart_id = self.next_spawn_hart.fetch_add(1, Ordering::Relaxed) % 8;
+        // Hart 0 is reserved/skipped on SpacemiT K1, so only schedule on harts 1-7
+        let hart_id = (self.next_spawn_hart.fetch_add(1, Ordering::Relaxed) % 7) + 1;
         
         let task = Arc::new(Task {
             future: Mutex::new(Some(Box::pin(future))),

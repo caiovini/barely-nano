@@ -54,6 +54,7 @@ pub struct BacklogScan {
      *  backlog population is disabled, so that it can service a manual trigger (e.g. via RPC). */
     thread: Option<JoinHandle<()>>,
     next_account: Account,
+    #[allow(dead_code)]
     last_run: rsnano_core::utils::UnixMillisTimestamp,
 }
 
@@ -178,6 +179,7 @@ impl BacklogScan {
         self.stats.clone()
     }
 
+    #[allow(dead_code)]
     fn predicate(&self, flags: &BacklogScanFlags) -> bool {
         if let Some(loop_val) = &self.scan_loop {
             flags.triggered || loop_val.config.enabled

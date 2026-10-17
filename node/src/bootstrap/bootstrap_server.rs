@@ -42,6 +42,7 @@ impl Default for BootstrapServerConfig {
 }
 
 pub struct BootstrapServer {
+    #[allow(dead_code)]
     config: BootstrapServerConfig,
     stats: Arc<Stats>,
     threads: Mutex<Vec<JoinHandle<()>>>,

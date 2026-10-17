@@ -117,6 +117,7 @@ impl<T: Tickable> TimerThread<T> {
     }
 }
 
+#[allow(dead_code)]
 struct TimerLoop<T: Tickable> {
     interval: Duration,
     start_type: TimerStartType,
@@ -126,6 +127,7 @@ struct TimerLoop<T: Tickable> {
     clock: Arc<SteadyClock>,
 }
 
+#[allow(dead_code)]
 impl<T: Tickable> TimerLoop<T> {
     fn run(&mut self) {
         if self.start_type == TimerStartType::Start {

@@ -1,0 +1,10 @@
+--- ledger/src/block_insertion/validation/common_rules.rs
++++ ledger/src/block_insertion/validation/common_rules.rs
+@@ -49,6 +49,7 @@
+         }
+ 
+         if !self.store.block.exists(&self.block.previous()) {
++            tracing::error!("Validation: GapPrevious - account exists but previous block NOT found in store! Block: {}, previous: {}", self.block.hash(), self.block.previous());
+             tracing::debug!("Validation: GapPrevious - account exists but previous block NOT found in store");
+             return Err(BlockError::GapPrevious);
+         }

@@ -24,6 +24,7 @@ pub struct Network {
     attempts: HashMap<SocketAddrV6, Timestamp>,
     next_channel_id: usize,
     stopped: core::sync::atomic::AtomicBool,
+    #[allow(dead_code)]
     clock: Arc<SteadyClock>,
     limiter: Arc<BandwidthLimiter>,
     stats: Arc<ChannelStats>,
@@ -215,12 +216,15 @@ impl Network {
     pub fn add_outbound_attempt(&mut self, peer: SocketAddrV6, now: Timestamp) -> Result<(), NetworkError> {
         if !self.is_outbound_slot_available() {
             debug!("Rejecting outbound attempt to {}: max connections/attempts reached ({})", peer, self.config.max_outbound_connections);
+            kernel_common::uart::print(b"[peer] Rejecting outbound attempt: slots full\n");
             return Err(NetworkError::MaxConnections);
         }
         if self.attempts.contains_key(&peer) {
+            kernel_common::uart::print(b"[peer] Rejecting outbound attempt: already attempting\n");
             return Err(NetworkError::DuplicateConnection);
         }
         if self.find_channel_by_ip(&peer.ip()).is_some() {
+            kernel_common::uart::print(b"[peer] Rejecting outbound attempt: already connected\n");
             return Err(NetworkError::DuplicateConnection);
         }
         self.attempts.insert(peer, now);

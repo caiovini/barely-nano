@@ -710,7 +710,7 @@ impl BTree {
         self.write_node(right_id, &right);
     }
 
-    pub fn iter(&mut self, start_key: [u8; KEY_SIZE]) -> RangeIterator {
+    pub fn iter(&mut self, start_key: [u8; KEY_SIZE]) -> RangeIterator<'_> {
         let mut stack = Vec::new();
         let mut current_id = self.meta.root_page_id;
         

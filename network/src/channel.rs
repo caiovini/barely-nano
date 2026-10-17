@@ -273,6 +273,27 @@ impl Channel {
         inserted
     }
 
+    /// Like `send()` but bypasses the bandwidth limiter.
+    ///
+    /// Used exclusively for NodeIdHandshake messages, which must be delivered
+    /// regardless of the token bucket state. The limiter bucket starts empty on
+    /// a new channel, so the first handshake reply would otherwise be silently
+    /// dropped, causing an `X` abort. Queue-capacity and `is_closed` checks are
+    /// still enforced.
+    pub fn send_handshake(&self, buffer: &[u8]) -> bool {
+        if self.is_closed() {
+            return false;
+        }
+
+        // Queue-full protection is still respected; only the limiter is bypassed.
+        if self.should_drop(TrafficType::Generic) {
+            return false;
+        }
+
+        self.write_queue
+            .try_insert(Arc::new(buffer.to_vec()), TrafficType::Generic)
+    }
+
     pub fn free_capacity(&self, traffic_type: TrafficType) -> usize {
         self.write_queue.free_capacity(traffic_type)
     }

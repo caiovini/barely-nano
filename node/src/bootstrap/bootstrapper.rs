@@ -221,6 +221,7 @@ impl Bootstrapper {
         self.state_changed.notify_all();
     }
 
+    #[allow(dead_code)]
     fn run_timeouts(&self) {
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
         let mut state = self.state.lock();

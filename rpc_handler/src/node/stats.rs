@@ -21,6 +21,7 @@ impl RpcCommandHandler {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn stats_clear(&self) -> SuccessResponse {
         self.node.stats.clear();
         SuccessResponse::new()

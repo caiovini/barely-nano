@@ -6,7 +6,7 @@ use tracing::warn;
 
 use rsnano_core::{NodeId, ProtocolInfo};
 use rsnano_messages::*;
-use rsnano_network::{Channel, ChannelMode, DataReceiver, Network, ReceiveResult, TrafficType};
+use rsnano_network::{Channel, ChannelMode, DataReceiver, Network, ReceiveResult};
 use rsnano_stats::{DetailType, Direction, StatType, Stats};
 
 use crate::{HandshakeProcess, HandshakeStats, HandshakeStatus, LatestKeepalives};
@@ -209,13 +209,19 @@ impl NanoDataReceiver {
                     .serializer
                     .serialize(&Message::NodeIdHandshake(response));
 
-                let enqueued = self.channel.send(buffer, TrafficType::Generic);
+                // Use send_handshake() to bypass the bandwidth limiter.
+                // A fresh channel's token bucket starts empty, so a normal
+                // send() would silently drop the first handshake reply and
+                // return false, which previously triggered an X abort.
+                let enqueued = self.channel.send_handshake(buffer);
                 if enqueued {
                     self.handshake_stats
                         .handshakes_sent
                         .fetch_add(1, Ordering::Relaxed);
                 } else {
-                    kernel_common::uart::putchar(b'X');
+                    // Only abort if the channel is closed (queue full is
+                    // extremely unlikely with only 1 in-flight message).
+                    kernel_common::uart::putchar(b'W'); // W = warn (queue full / closed)
                     status = HandshakeStatus::Abort;
                 }
             }
@@ -306,6 +312,14 @@ impl DataReceiver for NanoDataReceiver {
         let mode = self.channel.mode();
         match mode {
             ChannelMode::Undefined => {
+                // If the channel was closed by a write error while we were
+                // paused, upgrade_to_realtime_connection() would find nothing
+                // in the channels map and silently abort. Detect this early.
+                if self.channel.is_closed() {
+                    kernel_common::uart::putchar(b'Z'); // Z = dead channel, skip upgrade
+                    return ReceiveResult::Abort;
+                }
+
                 kernel_common::uart::putchar(b'P');
                 let q_len = self.channel.queue_len();
                 if q_len > 0 {
