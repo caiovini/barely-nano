@@ -6,6 +6,8 @@
 # =============================================================================
 
 [bare_metal]
+# Nano network variant: "live" (NanoLiveNetwork), "beta" (NanoBetaNetwork), "dev" (NanoDevNetwork), or "test" (NanoTestNetwork)
+network = "live"
 # Ethernet MAC address used by the U-Boot / smoltcp interface
 mac_address = "c0:74:2b:f9:15:ec"
 # Static IPv4 address and subnet prefix length
@@ -29,9 +31,7 @@ representative_vote_weight_minimum = "0"
 # Preconfigured peers ("address:port" or hostname)
 preconfigured_peers = [
     "peering.nano.org:7075",
-    "37.120.187.138:7075",
-    "94.130.135.50:7075",
-    "192.168.0.244:7075",
+    "192.168.1.151:7075", # local peer for testing
 ]
 
 [node.network]

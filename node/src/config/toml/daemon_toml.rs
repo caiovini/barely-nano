@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 
 #[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct BareMetalToml {
+    pub network: Option<String>,
     pub mac_address: Option<String>,
     pub ipv4_address: Option<String>,
     pub ipv4_prefix_len: Option<u8>,
@@ -16,6 +17,7 @@ pub struct BareMetalToml {
 
 #[derive(Deserialize, Serialize)]
 pub struct DaemonToml {
+    pub network: Option<String>,
     pub node: Option<NodeToml>,
     pub opencl: Option<OpenclToml>,
     pub rpc: Option<NodeRpcToml>,
@@ -28,6 +30,23 @@ impl DaemonToml {
     pub fn from_toml_str(toml_str: &str) -> Result<Self, String> {
         let root_val = toml_to_json_value(toml_str)?;
         serde_json::from_value(root_val).map_err(|e| alloc::format!("TOML deserialize error: {}", e))
+    }
+
+    /// Returns the configured Nano network from `[bare_metal].network` or top-level `network`,
+    /// falling back to `default_network` if not specified or invalid.
+    pub fn network_or(&self, default_network: rsnano_core::Networks) -> rsnano_core::Networks {
+        let net_str = self
+            .bare_metal
+            .as_ref()
+            .and_then(|bm| bm.network.as_deref())
+            .or(self.network.as_deref());
+
+        if let Some(s) = net_str {
+            if let Ok(net) = core::str::FromStr::from_str(s) {
+                return net;
+            }
+        }
+        default_network
     }
 }
 
@@ -277,6 +296,7 @@ impl DaemonConfig {
 impl From<&DaemonConfig> for DaemonToml {
     fn from(config: &DaemonConfig) -> Self {
         Self {
+            network: None,
             node: Some((&config.node).into()),
             rpc: Some(config.into()),
             opencl: Some(config.into()),

@@ -524,11 +524,6 @@ fn boot_hart_main(hart_id: usize) {
     if !LEADER_ELECTED.swap(true, Ordering::SeqCst) {
         kernel_common::oled::init();
 
-        #[cfg(feature = "spammer")]
-        let network = rsnano_core::Networks::NanoDevNetwork;
-        #[cfg(not(feature = "spammer"))]
-        let network = rsnano_core::Networks::NanoLiveNetwork;
-
         let config_str = load_config_toml_str();
         let daemon_toml = match rsnano_node::config::DaemonToml::from_toml_str(config_str) {
             Ok(toml) => toml,
@@ -540,6 +535,14 @@ fn boot_hart_main(hart_id: usize) {
                     .expect("Failed to parse embedded config.toml")
             }
         };
+
+        #[cfg(feature = "block-test")]
+        let network = rsnano_core::Networks::NanoDevNetwork;
+        #[cfg(not(feature = "block-test"))]
+        let network = daemon_toml.network_or(rsnano_core::Networks::NanoLiveNetwork);
+        uart::print(b"[boot] Using network: ");
+        uart::print(network.as_str().as_bytes());
+        uart::print(b"\n");
 
         let mut daemon_config = rsnano_node::config::DaemonConfig::new2(network, 8);
         daemon_config.rpc_enable = true;
@@ -590,8 +593,19 @@ fn boot_hart_main(hart_id: usize) {
 
         kernel_common::storage::init_uboot_blk();
 
+        #[cfg(feature = "block-test")]
+        {
+            uart::print(b"[block-test] Wiping B-Tree shards for deterministic dev genesis state...\n");
+            for i in 0..kernel_common::storage::SHARD_COUNT {
+                if let Some(db) = kernel_common::storage::SHARDS[i].lock().as_mut() {
+                    db.wipe();
+                }
+            }
+            uart::print(b"[block-test] B-Tree shards wiped.\n");
+        }
+
         let exec = kernel_common::async_rt::Executor::new();
-        kernel_common::async_rt::set_global_executor(exec);
+        kernel_common::async_rt::set_global_executor(exec.clone());
 
         let config = daemon_config.node;
         let preconfigured_peers = config.preconfigured_peers.clone();
@@ -624,6 +638,7 @@ fn boot_hart_main(hart_id: usize) {
         kernel_common::uart::print(b"[boot] node.start() completed!\n");
 
         // Connect immediately and persist any IPv4 preconfigured_peers from config.toml
+        #[cfg(not(feature = "block-test"))]
         for peer in &preconfigured_peers {
             if let Ok(ip) = core::net::Ipv4Addr::from_str(&peer.address) {
                 kernel_common::uart::print(b"[boot] adding peer ");
@@ -641,6 +656,8 @@ fn boot_hart_main(hart_id: usize) {
                 kernel_common::uart::print(b"[boot] adding peer done\n");
             }
         }
+        #[cfg(feature = "block-test")]
+        let _ = &preconfigured_peers;
 
         let node_arc = alloc::sync::Arc::new(node);
         {
@@ -648,6 +665,9 @@ fn boot_hart_main(hart_id: usize) {
         }
 
         kernel_common::storage::flush_all_shards();
+
+        #[cfg(feature = "block-test")]
+        run_deterministic_block_test(&node_arc, &exec);
 
         // Signal secondary harts that the node is ready BEFORE starting them,
         // so harts that boot quickly don't spin past the flag before it's set.
@@ -1312,21 +1332,352 @@ fn run_heavy_io_loop(
             }
         }
 
-        #[cfg(feature = "spammer")]
-        {
-            if DB_PAGES_FREE.load(Ordering::Relaxed) > 256 {
-                node_arc.spammer.generate_batch(64);
-            } else {
-                // Throttle significantly when low on space
-                for _ in 0..10000 {
-                    core::hint::spin_loop();
-                }
-            }
-        }
-
         iterations += 1;
         core::hint::spin_loop();
     }
+}
+
+#[cfg(feature = "block-test")]
+fn drain_async_events(exec: &kernel_common::async_rt::Executor) {
+    for h in 1..8 {
+        let len = exec.local_queues[h].lock().len();
+        for _ in 0..len {
+            exec.run_once(h);
+        }
+    }
+}
+
+#[cfg(feature = "block-test")]
+fn generate_deterministic_pow(
+    root: &rsnano_core::Root,
+    threshold: u64,
+    nonce_state: &mut u64,
+) -> (rsnano_core::WorkNonce, u64, u64) {
+    use rsnano_core::{Difficulty, DifficultyV1, WorkNonce};
+    let diff = DifficultyV1::default();
+    let mut iters = 0u64;
+    let start = kernel_common::clint::mtime_raw();
+    loop {
+        *nonce_state = nonce_state.wrapping_add(1);
+        let work = WorkNonce::from(*nonce_state);
+        iters += 1;
+        if iters % 4096 == 0 {
+            kernel_common::watchdog::kick();
+        }
+        if diff.get_difficulty(root, work) >= threshold {
+            let elapsed = kernel_common::clint::mtime_raw().wrapping_sub(start);
+            return (work, elapsed, iters);
+        }
+    }
+}
+
+#[cfg(feature = "block-test")]
+fn print_ticks_and_us(ticks: u64) {
+    let ticks_per_us = (CLINT_FREQ / 1_000_000) as u128;
+    let us_x100 = (ticks as u128 * 100) / ticks_per_us;
+    let us_whole = (us_x100 / 100) as usize;
+    let us_frac = (us_x100 % 100) as usize;
+    uart::print_usize(us_whole);
+    uart::print(b".");
+    if us_frac < 10 {
+        uart::print(b"0");
+    }
+    uart::print_usize(us_frac);
+    uart::print(b" us (");
+    uart::print_usize(ticks as usize);
+    uart::print(b" ticks)");
+}
+
+#[cfg(feature = "block-test")]
+fn print_bps(blocks: u64, ticks: u64) {
+    if ticks == 0 {
+        uart::print(b"inf");
+        return;
+    }
+    let bps_x100 = (blocks as u128 * CLINT_FREQ as u128 * 100) / (ticks as u128);
+    let whole = (bps_x100 / 100) as usize;
+    let frac = (bps_x100 % 100) as usize;
+    uart::print_usize(whole);
+    uart::print(b".");
+    if frac < 10 {
+        uart::print(b"0");
+    }
+    uart::print_usize(frac);
+    uart::print(b" blocks/sec");
+}
+
+#[cfg(feature = "block-test")]
+fn run_deterministic_block_test(
+    node: &Arc<Node>,
+    exec: &kernel_common::async_rt::Executor,
+) {
+    kernel_common::watchdog::kick();
+    uart::print(b"\n========================================================================\n");
+    uart::print(b"[block-test] DETERMINISTIC BARE-METAL BLOCK GENERATION & PIPELINE TEST\n");
+    uart::print(b"[block-test] Timer frequency: 24 MHz (24 ticks = 1 us)\n");
+    uart::print(b"========================================================================\n");
+
+    let key = rsnano_core::DEV_GENESIS_KEY.clone();
+    let account = key.public_key().as_account();
+    let rep = key.public_key();
+    let link: rsnano_core::Link = rsnano_core::Account::from(1).into();
+    let details = rsnano_core::BlockDetails::new(rsnano_core::Epoch::Epoch2, true, false, false);
+    let threshold = node.network_params.work.threshold(&details);
+
+    let mut prev_hash = node.latest(&account);
+    let mut balance = node.balance(&account);
+    let mut nonce_state: u64 = 0;
+
+    // -------------------------------------------------------------------------
+    // Phase 1: Single Block End-to-End Deterministic Breakdown
+    // -------------------------------------------------------------------------
+    let (work, pow_ticks, pow_iters) =
+        generate_deterministic_pow(&rsnano_core::Root::from(prev_hash), threshold, &mut nonce_state);
+    balance = balance - rsnano_core::Amount::raw(1);
+
+    // Stage 1: Block Creation (Blake2b state block hashing + Ed25519 signing)
+    let t0 = kernel_common::clint::mtime_raw();
+    let block: rsnano_core::Block = rsnano_core::StateBlockArgs {
+        key: &key,
+        previous: prev_hash,
+        representative: rep,
+        balance,
+        link,
+        work,
+    }
+    .into();
+    let hash = block.hash();
+    let t1 = kernel_common::clint::mtime_raw();
+
+    // Stage 2: Entry PoW Validation (Blake2b difficulty threshold verification)
+    let pow_valid = node.network_params.work.validate_entry_block(&block);
+    assert!(pow_valid, "[block-test] Entry PoW validation failed");
+    let t2 = kernel_common::clint::mtime_raw();
+
+    // Stage 3: BlockProcessor + SignatureChecker (Ed25519 verify) + BlockValidator + BlockInserter (B-Tree)
+    let ctx = Arc::new(rsnano_node::block_processing::BlockContext::new(
+        block,
+        rsnano_node::block_processing::BlockSource::Local,
+        rsnano_network::ChannelId::LOOPBACK,
+    ));
+    let pushed = node.block_processor.push(ctx);
+    assert!(pushed, "[block-test] BlockProcessor push failed");
+    node.block_processor.run_once();
+    assert!(
+        node.block_exists(&hash),
+        "[block-test] Block not in ledger after BlockProcessor"
+    );
+    let t3 = kernel_common::clint::mtime_raw();
+
+    // Stage 4: LedgerEventProcessor + ElectionSchedulers + ActiveElections Activation
+    drain_async_events(exec);
+    node.election_schedulers.run_once();
+    drain_async_events(exec);
+    assert!(
+        node.is_active_hash(&hash),
+        "[block-test] Block election did not activate in AEC"
+    );
+    let t4 = kernel_common::clint::mtime_raw();
+
+    // Stage 5: Consensus Final Vote (Blake2b + Ed25519 sign) + VoteProcessor + ConfirmingSet Cementation
+    let vote = Arc::new(rsnano_core::Vote::new_final(&key, alloc::vec![hash]));
+    let vote_queued = node.vote_processor_queue.enqueue(
+        vote,
+        None,
+        rsnano_core::VoteSource::Live,
+        None,
+    );
+    assert!(vote_queued, "[block-test] VoteProcessorQueue enqueue failed");
+    node.vote_processor.run_once();
+    drain_async_events(exec);
+    node.confirming_set.run_once();
+    drain_async_events(exec);
+    assert!(
+        node.block_confirmed(&hash),
+        "[block-test] Block not cemented after ConfirmingSet"
+    );
+    let t5 = kernel_common::clint::mtime_raw();
+
+    // Stage 6: Persistent Storage Flush (B-Tree shards -> storage device)
+    kernel_common::storage::flush_all_shards();
+    let t6 = kernel_common::clint::mtime_raw();
+
+    prev_hash = hash;
+
+    let s1 = t1.wrapping_sub(t0);
+    let s2 = t2.wrapping_sub(t1);
+    let s3 = t3.wrapping_sub(t2);
+    let s4 = t4.wrapping_sub(t3);
+    let s5 = t5.wrapping_sub(t4);
+    let s6 = t6.wrapping_sub(t5);
+    let total_in_mem = t5.wrapping_sub(t0);
+    let total_flushed = t6.wrapping_sub(t0);
+
+    uart::print(b"\n--- Phase 1: Single Block Full Lifecycle Breakdown ---\n");
+    uart::print(b"  PoW Generation (");
+    uart::print_usize(pow_iters as usize);
+    uart::print(b" nonces):        ");
+    print_ticks_and_us(pow_ticks);
+    uart::print(b"\n  Stage 1 (Create + Blake2b + Ed25519 Sign): ");
+    print_ticks_and_us(s1);
+    uart::print(b"\n  Stage 2 (Entry PoW Validation):            ");
+    print_ticks_and_us(s2);
+    uart::print(b"\n  Stage 3 (BlockProc + SigVerify + B-Tree):  ");
+    print_ticks_and_us(s3);
+    uart::print(b"\n  Stage 4 (EventProc + Election Activate):   ");
+    print_ticks_and_us(s4);
+    uart::print(b"\n  Stage 5 (Vote Sign/Verify + Cementation):  ");
+    print_ticks_and_us(s5);
+    uart::print(b"\n  Stage 6 (B-Tree Shards Storage Flush):     ");
+    print_ticks_and_us(s6);
+    uart::print(b"\n  ----------------------------------------------------\n");
+    uart::print(b"  Total Pipeline (Stages 1-5, In-Memory):    ");
+    print_ticks_and_us(total_in_mem);
+    uart::print(b" -> ");
+    print_bps(1, total_in_mem);
+    uart::print(b"\n  Total Pipeline (Stages 1-6, With Flush):   ");
+    print_ticks_and_us(total_flushed);
+    uart::print(b" -> ");
+    print_bps(1, total_flushed);
+    uart::print(b"\n");
+
+    // -------------------------------------------------------------------------
+    // Phase 2: Multi-Block (64 Blocks) Deterministic Chain Benchmark
+    // -------------------------------------------------------------------------
+    const BATCH_COUNT: u64 = 64;
+    let mut batch_pow_ticks = 0u64;
+    let mut batch_pow_iters = 0u64;
+    let mut batch_s1 = 0u64;
+    let mut batch_s2 = 0u64;
+    let mut batch_s3 = 0u64;
+    let mut batch_s4 = 0u64;
+    let mut batch_s5 = 0u64;
+
+    for _ in 0..BATCH_COUNT {
+        kernel_common::watchdog::kick();
+        let (b_work, b_pow_t, b_pow_i) = generate_deterministic_pow(
+            &rsnano_core::Root::from(prev_hash),
+            threshold,
+            &mut nonce_state,
+        );
+        batch_pow_ticks += b_pow_t;
+        batch_pow_iters += b_pow_i;
+        balance = balance - rsnano_core::Amount::raw(1);
+
+        let b0 = kernel_common::clint::mtime_raw();
+        let b_block: rsnano_core::Block = rsnano_core::StateBlockArgs {
+            key: &key,
+            previous: prev_hash,
+            representative: rep,
+            balance,
+            link,
+            work: b_work,
+        }
+        .into();
+        let b_hash = b_block.hash();
+        let b1 = kernel_common::clint::mtime_raw();
+
+        let b_pow_ok = node.network_params.work.validate_entry_block(&b_block);
+        assert!(b_pow_ok, "[block-test] Batch entry PoW validation failed");
+        let b2 = kernel_common::clint::mtime_raw();
+
+        let b_ctx = Arc::new(rsnano_node::block_processing::BlockContext::new(
+            b_block,
+            rsnano_node::block_processing::BlockSource::Local,
+            rsnano_network::ChannelId::LOOPBACK,
+        ));
+        assert!(node.block_processor.push(b_ctx));
+        node.block_processor.run_once();
+        assert!(node.block_exists(&b_hash));
+        let b3 = kernel_common::clint::mtime_raw();
+
+        drain_async_events(exec);
+        node.election_schedulers.run_once();
+        drain_async_events(exec);
+        assert!(node.is_active_hash(&b_hash));
+        let b4 = kernel_common::clint::mtime_raw();
+
+        let b_vote = Arc::new(rsnano_core::Vote::new_final(&key, alloc::vec![b_hash]));
+        assert!(node.vote_processor_queue.enqueue(
+            b_vote,
+            None,
+            rsnano_core::VoteSource::Live,
+            None,
+        ));
+        node.vote_processor.run_once();
+        drain_async_events(exec);
+        node.confirming_set.run_once();
+        drain_async_events(exec);
+        assert!(node.block_confirmed(&b_hash));
+        let b5 = kernel_common::clint::mtime_raw();
+
+        prev_hash = b_hash;
+        batch_s1 += b1.wrapping_sub(b0);
+        batch_s2 += b2.wrapping_sub(b1);
+        batch_s3 += b3.wrapping_sub(b2);
+        batch_s4 += b4.wrapping_sub(b3);
+        batch_s5 += b5.wrapping_sub(b4);
+    }
+
+    let f0 = kernel_common::clint::mtime_raw();
+    kernel_common::storage::flush_all_shards();
+    let f1 = kernel_common::clint::mtime_raw();
+    let batch_s6 = f1.wrapping_sub(f0);
+
+    let batch_in_mem = batch_s1 + batch_s2 + batch_s3 + batch_s4 + batch_s5;
+    let batch_with_flush = batch_in_mem + batch_s6;
+    let batch_with_pow = batch_with_flush + batch_pow_ticks;
+
+    assert_eq!(node.ledger.block_count(), (2 + BATCH_COUNT) as usize);
+    assert_eq!(node.ledger.confirmed_count(), (2 + BATCH_COUNT) as usize);
+
+    uart::print(b"\n--- Phase 2: 64-Block Deterministic Chain Summary (Per-Block Avg) ---\n");
+    uart::print(b"  Avg PoW Generation (");
+    uart::print_usize((batch_pow_iters / BATCH_COUNT) as usize);
+    uart::print(b" nonces/blk):     ");
+    print_ticks_and_us(batch_pow_ticks / BATCH_COUNT);
+    uart::print(b"\n  Avg Stage 1 (Create + Hash + Sign):        ");
+    print_ticks_and_us(batch_s1 / BATCH_COUNT);
+    uart::print(b"\n  Avg Stage 2 (Entry PoW Validation):        ");
+    print_ticks_and_us(batch_s2 / BATCH_COUNT);
+    uart::print(b"\n  Avg Stage 3 (BlockProc + Sig + B-Tree):    ");
+    print_ticks_and_us(batch_s3 / BATCH_COUNT);
+    uart::print(b"\n  Avg Stage 4 (EventProc + Election Sched):  ");
+    print_ticks_and_us(batch_s4 / BATCH_COUNT);
+    uart::print(b"\n  Avg Stage 5 (Vote + Quorum + Cement):      ");
+    print_ticks_and_us(batch_s5 / BATCH_COUNT);
+    uart::print(b"\n  Avg Stage 6 (Amortized Storage Flush):     ");
+    print_ticks_and_us(batch_s6 / BATCH_COUNT);
+    uart::print(b"\n  ----------------------------------------------------\n");
+    uart::print(b"  Avg Per-Block Time (Stages 1-5 In-Memory): ");
+    print_ticks_and_us(batch_in_mem / BATCH_COUNT);
+    uart::print(b"\n  Avg Per-Block Time (Stages 1-6 Batched):   ");
+    print_ticks_and_us(batch_with_flush / BATCH_COUNT);
+    uart::print(b"\n  Deterministic Throughput (Stages 1-5):     ");
+    print_bps(BATCH_COUNT, batch_in_mem);
+    uart::print(b"\n  Deterministic Throughput (Stages 1-6):     ");
+    print_bps(BATCH_COUNT, batch_with_flush);
+    uart::print(b"\n  Deterministic Throughput (With CPU PoW):   ");
+    print_bps(BATCH_COUNT, batch_with_pow);
+    uart::print(b"\n  Ledger Verified: stored=");
+    uart::print_usize(node.ledger.block_count() as usize);
+    uart::print(b", confirmed=");
+    uart::print_usize(node.ledger.confirmed_count() as usize);
+    uart::print(b"\n========================================================================\n\n");
+
+    let bps_whole = if batch_with_flush > 0 {
+        ((BATCH_COUNT as u128 * CLINT_FREQ as u128) / (batch_with_flush as u128)) as usize
+    } else {
+        0
+    };
+    kernel_common::oled::set_test_bps(bps_whole);
+    kernel_common::oled::update_status(
+        0,
+        node.ledger.block_count() as usize,
+        node.ledger.confirmed_count() as usize,
+        bps_whole,
+        0,
+    );
 }
 
 fn run_maintenance_and_network_loop(

@@ -91,7 +91,7 @@ Traditional filesystems (like FAT32 or EXT4) introduce substantial overhead and 
 | Target | Feature flag | Purpose |
 |---|---|---|
 | `make build` / `make build-smode` | `simd` | **Live network mode** — builds `barely-nano.bin` and `boot.scr` for the Orange Pi RV2 |
-| `make build-spammer` | `spammer,simd` | **Test mode** — builds `barely-nano.bin` and `boot.scr` with local block spammer enabled |
+| `make build-block-test` / `make build-spammer` | `block-test,simd` | **Deterministic block benchmark** — measures full Nano block generation, verification, B-Tree insertion, consensus & cementation time and BPS |
 | `make run-crypto-tests` | `simd` | Runs host-side cryptographic unit tests |
 | `make run-picocom` | — | Captures serial console output from `/dev/ttyUSB0` to `orpi.log` |
 | `make clean` | — | Cleans Cargo build artifacts |

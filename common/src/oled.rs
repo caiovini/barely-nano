@@ -563,11 +563,20 @@ fn fmt_usize(mut val: usize, out: &mut [u8]) -> usize {
     write_len
 }
 
+#[cfg(feature = "block-test")]
+static TEST_BPS: AtomicUsize = AtomicUsize::new(0);
+
+/// Record the deterministic block test throughput (blocks per second) for OLED display.
+#[cfg(feature = "block-test")]
+pub fn set_test_bps(bps: usize) {
+    TEST_BPS.store(bps, Ordering::Relaxed);
+}
+
 /// Update the OLED with concise node status metrics:
 /// - Line 0: `NANO P:<peers>   *`
 /// - Line 1: `BLK: <blocks>`
 /// - Line 2: `CNF: <confirmed>`
-/// - Line 3: `<bps>/S DB:<size>`
+/// - Line 3: `<bps>/S DB:<size>` (shows deterministic block test BPS when `block-test` is enabled, otherwise current network BPS)
 pub fn update_status(peers: usize, blocks: usize, confirmed: usize, bps: usize, db_kb: usize) {
     if OLED_MODE.load(Ordering::Relaxed) == 0 {
         return;
@@ -588,8 +597,16 @@ pub fn update_status(peers: usize, blocks: usize, confirmed: usize, bps: usize, 
     l2[0..5].copy_from_slice(b"CNF: ");
     let _ = fmt_usize(confirmed, &mut l2[5..LINE_CHARS]);
 
+    #[cfg(feature = "block-test")]
+    let display_bps = {
+        let _ = bps;
+        TEST_BPS.load(Ordering::Relaxed)
+    };
+    #[cfg(not(feature = "block-test"))]
+    let display_bps = bps;
+
     let mut l3 = [b' '; LINE_CHARS];
-    let n_bps = fmt_usize(bps, &mut l3[0..5]);
+    let n_bps = fmt_usize(display_bps, &mut l3[0..5]);
     if n_bps + 2 <= 7 {
         l3[n_bps] = b'/';
         l3[n_bps + 1] = b'S';

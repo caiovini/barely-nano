@@ -73,7 +73,7 @@ impl<'a> BlockValidator<'a> {
     }
 
     pub(crate) fn ensure_sufficient_work(&self) -> Result<(), BlockError> {
-        if self.is_genesis || self.work.epoch_1 == 0xfe00000000000000 {
+        if self.is_genesis {
             return Ok(());
         }
         if !self.work.is_valid_pow(self.block, &self.block_details()) {

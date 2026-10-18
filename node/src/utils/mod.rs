@@ -7,7 +7,6 @@ mod thread_pool;
 mod timer;
 mod timer_thread;
 mod bounded_vec_deque;
-mod spammer;
 
 
 use rsnano_sha::blake2b::Blake2bHasher;
@@ -23,7 +22,6 @@ pub use rate_calculator::RateCalculator;
 pub use thread_pool::*;
 pub use timer_thread::*;
 pub use bounded_vec_deque::BoundedVecDeque;
-pub use spammer::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ErrorCode {

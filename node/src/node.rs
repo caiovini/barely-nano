@@ -79,7 +79,7 @@ use crate::{
         MessageSender, NetworkThreads, PeerCacheConnector, PeerCacheConnectorExt, PeerCacheUpdater,
         RealtimeMessageHandler,
     },
-    utils::{spawn_backpressure_processor, ThreadPool, ThreadPoolImpl, Spammer},
+    utils::{spawn_backpressure_processor, ThreadPool, ThreadPoolImpl},
     wallets::{ReceivableSearch, WalletBackup, Wallets, WalletsExt},
     work::{WorkFactory, WorkRequest},
     NodeCallbacks, OnlineWeightSampler,
@@ -156,7 +156,6 @@ pub struct Node {
     pub aec_voter: Mutex<AecVoter>,
     pub dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
     pub syn_cookies: Arc<SynCookies>,
-    pub spammer: Arc<Spammer>,
     pub signature_checker: Arc<crate::signatures::SignatureChecker>,
 }
 
@@ -833,20 +832,6 @@ impl Node {
     let genesis_account = ledger.constants.genesis_block.account();
     let genesis_info = ledger.any().get_account(&genesis_account);
     tracing::info!("Genesis account: {}, info: {:?}", genesis_account.encode_account(), genesis_info);
-    
-    let genesis_info = genesis_info.unwrap_or_else(|| {
-        rsnano_core::AccountInfo {
-            head: ledger.constants.genesis_block.hash(),
-            balance: ledger.constants.genesis_block.balance(),
-            ..Default::default()
-        }
-    });
-
-    let spammer = Arc::new(Spammer::new(
-        block_processor.clone(),
-        genesis_info.head,
-        genesis_info.balance,
-    ));
 
         let mut dead_channel_cleanup = DeadChannelCleanup::new(
             steady_clock.clone(),
@@ -1302,7 +1287,6 @@ impl Node {
             aec_voter: Mutex::new(aec_voter),
             dead_channel_cleanup,
             syn_cookies,
-            spammer,
             signature_checker,
         };
         kernel_common::uart::print(b"[node] Node construction completed successfully!\n");

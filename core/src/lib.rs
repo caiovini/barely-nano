@@ -344,12 +344,23 @@ impl FromStr for Networks {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Networks, Self::Err> {
-        match s {
-            "dev" => Ok(Networks::NanoDevNetwork),
-            "beta" => Ok(Networks::NanoBetaNetwork),
-            "live" => Ok(Networks::NanoLiveNetwork),
-            "test" => Ok(Networks::NanoTestNetwork),
-            _ => Err("Invalid network"),
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("live") || trimmed.eq_ignore_ascii_case("NanoLiveNetwork") {
+            Ok(Networks::NanoLiveNetwork)
+        } else if trimmed.eq_ignore_ascii_case("beta")
+            || trimmed.eq_ignore_ascii_case("NanoBetaNetwork")
+        {
+            Ok(Networks::NanoBetaNetwork)
+        } else if trimmed.eq_ignore_ascii_case("dev")
+            || trimmed.eq_ignore_ascii_case("NanoDevNetwork")
+        {
+            Ok(Networks::NanoDevNetwork)
+        } else if trimmed.eq_ignore_ascii_case("test")
+            || trimmed.eq_ignore_ascii_case("NanoTestNetwork")
+        {
+            Ok(Networks::NanoTestNetwork)
+        } else {
+            Err("Invalid network")
         }
     }
 }
