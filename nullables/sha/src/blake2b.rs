@@ -137,7 +137,6 @@ pub fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool)
         let undiag_v10 = [3u64, 0, 1, 2];
         let undiag_v12 = [2u64, 3, 0, 1];
         let undiag_v14 = [1u64, 2, 3, 0];
-        let mut temp_buf = [0u64; 4]; // Temporary buffer to avoid vluxei64.v
 
 
         asm!(

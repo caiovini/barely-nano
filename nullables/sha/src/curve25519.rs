@@ -65,6 +65,7 @@ impl FieldElement {
         }
     }
 
+    #[inline(always)]
     pub fn add_u64(&self, val: u64) -> Self {
         let (r0, c) = self.0[0].overflowing_add(val);
         let (r1, c) = self.0[1].overflowing_add(c as u64);
@@ -78,6 +79,7 @@ impl FieldElement {
         res
     }
 
+    #[inline(always)]
     fn add_u64_raw(&self, val: u64) -> Self {
         let (r0, c) = self.0[0].overflowing_add(val);
         let (r1, c) = self.0[1].overflowing_add(c as u64);
@@ -86,96 +88,70 @@ impl FieldElement {
         FieldElement([r0, r1, r2, r3])
     }
 
+    #[inline(always)]
     pub fn add(&self, other: &Self) -> Self {
-        let mut res = [0u64; 4];
-        let mut carry = 0u128;
-        for i in 0..4 {
-            let sum = (self.0[i] as u128) + (other.0[i] as u128) + carry;
-            res[i] = sum as u64;
-            carry = sum >> 64;
-        }
-        let mut fe = FieldElement(res);
-        if carry > 0 {
-            fe = fe.add_u64((carry * 38) as u64);
+        let (r0, c0) = self.0[0].overflowing_add(other.0[0]);
+        let (r1_t, c1_a) = self.0[1].overflowing_add(other.0[1]);
+        let (r1, c1_b) = r1_t.overflowing_add(c0 as u64);
+        let c1 = c1_a | c1_b;
+
+        let (r2_t, c2_a) = self.0[2].overflowing_add(other.0[2]);
+        let (r2, c2_b) = r2_t.overflowing_add(c1 as u64);
+        let c2 = c2_a | c2_b;
+
+        let (r3_t, c3_a) = self.0[3].overflowing_add(other.0[3]);
+        let (r3, c3_b) = r3_t.overflowing_add(c2 as u64);
+        let c3 = c3_a | c3_b;
+
+        let mut fe = FieldElement([r0, r1, r2, r3]);
+        if c3 {
+            fe = fe.add_u64_raw(38);
         }
         fe
     }
 
+    #[inline(always)]
     pub fn sub(&self, other: &Self) -> Self {
-        let mut res = [0u64; 4];
-        let mut borrow = 0i128;
-        for i in 0..4 {
-            let diff = (self.0[i] as i128) - (other.0[i] as i128) - borrow;
-            if diff < 0 {
-                res[i] = (diff + (1 << 64)) as u64;
-                borrow = 1;
-            } else {
-                res[i] = diff as u64;
-                borrow = 0;
-            }
-        }
-        let mut fe = FieldElement(res);
-        if borrow > 0 {
-            fe = fe.sub_u64((borrow * 38) as u64);
-        }
-        fe
-    }
-    
-    pub fn sub_u64(&self, val: u64) -> Self {
-        let mut res = [0u64; 4];
-        let mut borrow;
-        
-        let diff = (self.0[0] as i128) - (val as i128);
-        if diff < 0 {
-            res[0] = (diff + (1 << 64)) as u64;
-            borrow = 1;
-        } else {
-            res[0] = diff as u64;
-            borrow = 0;
-        }
-        
-        for i in 1..4 {
-            let diff = (self.0[i] as i128) - borrow;
-            if diff < 0 {
-                res[i] = (diff + (1 << 64)) as u64;
-                borrow = 1;
-            } else {
-                res[i] = diff as u64;
-                borrow = 0;
-            }
-        }
-        
-        let mut fe = FieldElement(res);
-        if borrow > 0 {
+        let (r0, b0) = self.0[0].overflowing_sub(other.0[0]);
+        let (r1_t, b1_a) = self.0[1].overflowing_sub(other.0[1]);
+        let (r1, b1_b) = r1_t.overflowing_sub(b0 as u64);
+        let b1 = b1_a | b1_b;
+
+        let (r2_t, b2_a) = self.0[2].overflowing_sub(other.0[2]);
+        let (r2, b2_b) = r2_t.overflowing_sub(b1 as u64);
+        let b2 = b2_a | b2_b;
+
+        let (r3_t, b3_a) = self.0[3].overflowing_sub(other.0[3]);
+        let (r3, b3_b) = r3_t.overflowing_sub(b2 as u64);
+        let b3 = b3_a | b3_b;
+
+        let mut fe = FieldElement([r0, r1, r2, r3]);
+        if b3 {
             fe = fe.sub_u64_raw(38);
         }
         fe
     }
+    
+    #[inline(always)]
+    pub fn sub_u64(&self, val: u64) -> Self {
+        let (r0, b) = self.0[0].overflowing_sub(val);
+        let (r1, b) = self.0[1].overflowing_sub(b as u64);
+        let (r2, b) = self.0[2].overflowing_sub(b as u64);
+        let (r3, b) = self.0[3].overflowing_sub(b as u64);
+        let mut res = FieldElement([r0, r1, r2, r3]);
+        if b {
+            res = res.sub_u64_raw(38);
+        }
+        res
+    }
 
+    #[inline(always)]
     fn sub_u64_raw(&self, val: u64) -> Self {
-        let mut res = [0u64; 4];
-        let mut borrow;
-        
-        let diff = (self.0[0] as i128) - (val as i128);
-        if diff < 0 {
-            res[0] = (diff + (1 << 64)) as u64;
-            borrow = 1;
-        } else {
-            res[0] = diff as u64;
-            borrow = 0;
-        }
-        
-        for i in 1..4 {
-            let diff = (self.0[i] as i128) - borrow;
-            if diff < 0 {
-                res[i] = (diff + (1 << 64)) as u64;
-                borrow = 1;
-            } else {
-                res[i] = diff as u64;
-                borrow = 0;
-            }
-        }
-        FieldElement(res)
+        let (r0, b) = self.0[0].overflowing_sub(val);
+        let (r1, b) = self.0[1].overflowing_sub(b as u64);
+        let (r2, b) = self.0[2].overflowing_sub(b as u64);
+        let (r3, _) = self.0[3].overflowing_sub(b as u64);
+        FieldElement([r0, r1, r2, r3])
     }
 
     #[inline(always)]
@@ -201,55 +177,86 @@ impl FieldElement {
         res
     }
 
+    #[inline(always)]
     pub fn mul(&self, other: &Self) -> Self {
-        let mut r = [0u64; 8];
-        for i in 0..4 {
-            let mut carry = 0u128;
-            for j in 0..4 {
-                let prod = (self.0[i] as u128) * (other.0[j] as u128) + (r[i + j] as u128) + carry;
-                r[i + j] = prod as u64;
-                carry = prod >> 64;
-            }
-            r[i + 4] = carry as u64;
-        }
-        Self::reduce_product(&r)
+        let a = &self.0;
+        let b = &other.0;
+
+        // Row 0
+        let p0 = (a[0] as u128) * (b[0] as u128);
+        let r0 = p0 as u64;
+        let mut carry = p0 >> 64;
+
+        let p1 = (a[0] as u128) * (b[1] as u128) + carry;
+        let mut r1 = p1 as u64;
+        carry = p1 >> 64;
+
+        let p2 = (a[0] as u128) * (b[2] as u128) + carry;
+        let mut r2 = p2 as u64;
+        carry = p2 >> 64;
+
+        let p3 = (a[0] as u128) * (b[3] as u128) + carry;
+        let mut r3 = p3 as u64;
+        let mut r4 = (p3 >> 64) as u64;
+
+        // Row 1
+        let p0 = (a[1] as u128) * (b[0] as u128) + (r1 as u128);
+        r1 = p0 as u64;
+        carry = p0 >> 64;
+
+        let p1 = (a[1] as u128) * (b[1] as u128) + (r2 as u128) + carry;
+        r2 = p1 as u64;
+        carry = p1 >> 64;
+
+        let p2 = (a[1] as u128) * (b[2] as u128) + (r3 as u128) + carry;
+        r3 = p2 as u64;
+        carry = p2 >> 64;
+
+        let p3 = (a[1] as u128) * (b[3] as u128) + (r4 as u128) + carry;
+        r4 = p3 as u64;
+        let mut r5 = (p3 >> 64) as u64;
+
+        // Row 2
+        let p0 = (a[2] as u128) * (b[0] as u128) + (r2 as u128);
+        r2 = p0 as u64;
+        carry = p0 >> 64;
+
+        let p1 = (a[2] as u128) * (b[1] as u128) + (r3 as u128) + carry;
+        r3 = p1 as u64;
+        carry = p1 >> 64;
+
+        let p2 = (a[2] as u128) * (b[2] as u128) + (r4 as u128) + carry;
+        r4 = p2 as u64;
+        carry = p2 >> 64;
+
+        let p3 = (a[2] as u128) * (b[3] as u128) + (r5 as u128) + carry;
+        r5 = p3 as u64;
+        let mut r6 = (p3 >> 64) as u64;
+
+        // Row 3
+        let p0 = (a[3] as u128) * (b[0] as u128) + (r3 as u128);
+        r3 = p0 as u64;
+        carry = p0 >> 64;
+
+        let p1 = (a[3] as u128) * (b[1] as u128) + (r4 as u128) + carry;
+        r4 = p1 as u64;
+        carry = p1 >> 64;
+
+        let p2 = (a[3] as u128) * (b[2] as u128) + (r5 as u128) + carry;
+        r5 = p2 as u64;
+        carry = p2 >> 64;
+
+        let p3 = (a[3] as u128) * (b[3] as u128) + (r6 as u128) + carry;
+        r6 = p3 as u64;
+        let r7 = (p3 >> 64) as u64;
+
+        Self::reduce_product(&[r0, r1, r2, r3, r4, r5, r6, r7])
     }
 
-    /// Dedicated 256-bit squaring using upper-triangular cross products (10M vs 16M).
+    /// Dedicated 256-bit squaring.
+    #[inline(always)]
     pub fn square(&self) -> Self {
-        let mut r = [0u64; 8];
-        for i in 0..3 {
-            let mut carry = 0u128;
-            for j in (i + 1)..4 {
-                let prod = (self.0[i] as u128) * (self.0[j] as u128) + (r[i + j] as u128) + carry;
-                r[i + j] = prod as u64;
-                carry = prod >> 64;
-            }
-            r[i + 4] = carry as u64;
-        }
-
-        // Shift r left by 1 bit (doubling strictly upper-triangular cross products)
-        let mut carry_bit = 0u64;
-        for i in 0..8 {
-            let new_carry = r[i] >> 63;
-            r[i] = (r[i] << 1) | carry_bit;
-            carry_bit = new_carry;
-        }
-
-        // Add diagonal squares a[i]^2
-        for i in 0..4 {
-            let sq = (self.0[i] as u128) * (self.0[i] as u128);
-            let mut idx = 2 * i;
-            let mut c = sq;
-            while c > 0 && idx < 8 {
-                let s = (r[idx] as u128) + (c as u64 as u128);
-                r[idx] = s as u64;
-                c = (c >> 64) + (s >> 64);
-                idx += 1;
-            }
-        }
-
-        Self::reduce_product(&r)
+        self.mul(self)
     }
 
     #[inline(always)]
@@ -333,6 +340,25 @@ impl FieldElement {
         let inv0 = inv.mul(elements[1]);
 
         [inv0, inv1, inv2, inv3]
+    }
+
+    /// Invert 8 field elements simultaneously using Montgomery's trick.
+    /// Uses 1 inversion and 21 multiplications instead of 8 full inversions.
+    pub fn batch_invert_8(elements: [&FieldElement; 8]) -> [FieldElement; 8] {
+        let mut c = [FieldElement::ZERO; 8];
+        c[0] = *elements[0];
+        for i in 1..8 {
+            c[i] = c[i - 1].mul(elements[i]);
+        }
+
+        let mut inv = c[7].invert();
+        let mut invs = [FieldElement::ZERO; 8];
+        for i in (1..8).rev() {
+            invs[i] = inv.mul(&c[i - 1]);
+            inv = inv.mul(elements[i]);
+        }
+        invs[0] = inv;
+        invs
     }
 }
 
