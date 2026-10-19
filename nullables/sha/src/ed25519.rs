@@ -3,6 +3,7 @@ use crate::curve25519::FieldElement;
 use core::convert::TryInto;
 use core::iter::Iterator;
 use core::option::Option::{self, None, Some};
+use crate::base_table::POW2_B;
 
 /// Point in Extended Coordinates (X, Y, Z, T)
 #[derive(Clone, Copy, Debug)]
@@ -96,11 +97,37 @@ impl Point {
     pub fn mul(&self, scalar: &[u8; 32]) -> Self {
         let mut res = Point::identity();
         let mut base = *self;
+        let mut has_added = false;
         for i in 0..256 {
             if (scalar[i / 8] >> (i % 8)) & 1 != 0 {
-                res = res.add(&base);
+                if !has_added {
+                    res = base;
+                    has_added = true;
+                } else {
+                    res = res.add(&base);
+                }
             }
-            base = base.double();
+            if i < 255 {
+                base = base.double();
+            }
+        }
+        res
+    }
+
+    /// Fast scalar multiplication with the fixed basepoint B using precomputed powers of 2.
+    /// Eliminates all 255 point doublings and performs only set-bit additions.
+    pub fn mul_base(scalar: &[u8; 32]) -> Self {
+        let mut res = Point::identity();
+        let mut has_added = false;
+        for i in 0..256 {
+            if (scalar[i / 8] >> (i % 8)) & 1 != 0 {
+                if !has_added {
+                    res = POW2_B[i];
+                    has_added = true;
+                } else {
+                    res = res.add(&POW2_B[i]);
+                }
+            }
         }
         res
     }
@@ -157,16 +184,27 @@ impl Point {
 
     pub fn double_scalar_mul_base_and_point(s: &[u8; 32], a: &Point, k: &[u8; 32]) -> Self {
         let mut res = Point::identity();
+        let mut has_points = false;
         let b_plus_a = B.add(a);
         for i in (0..256).rev() {
-            res = res.double();
             let bit1 = (s[i / 8] >> (i % 8)) & 1;
             let bit2 = (k[i / 8] >> (i % 8)) & 1;
-            match (bit1, bit2) {
-                (1, 1) => res = res.add(&b_plus_a),
-                (1, 0) => res = res.add(&B),
-                (0, 1) => res = res.add(a),
-                _ => {}
+            let p = match (bit1, bit2) {
+                (1, 1) => Some(&b_plus_a),
+                (1, 0) => Some(&B),
+                (0, 1) => Some(a),
+                _ => None,
+            };
+            if has_points {
+                res = res.double();
+            }
+            if let Some(pt) = p {
+                if !has_points {
+                    res = *pt;
+                    has_points = true;
+                } else {
+                    res = res.add(pt);
+                }
             }
         }
         res
@@ -294,7 +332,7 @@ pub fn sign(private_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
     s_bytes[31] &= 63;
     s_bytes[31] |= 64;
     
-    let pub_bytes = B.mul(&s_bytes).to_bytes();
+    let pub_bytes = Point::mul_base(&s_bytes).to_bytes();
     // Do not reverse
     let public_key = pub_bytes;
     
@@ -303,7 +341,7 @@ pub fn sign(private_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
     hasher.update(message);
     let r_hash = hasher.finalize();
     let r_scalar = Scalar::from_bytes_wide(&r_hash);
-    let r_bytes = B.mul(&r_scalar.to_bytes()).to_bytes();
+    let r_bytes = Point::mul_base(&r_scalar.to_bytes()).to_bytes();
     // Do not reverse
     let r_point = r_bytes;
     
@@ -334,17 +372,13 @@ pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
     s[0] &= 248;
     s[31] &= 63;
     s[31] |= 64;
-    let pub_key = B.mul(&s).to_bytes();
+    let pub_key = Point::mul_base(&s).to_bytes();
     // Do not reverse
     pub_key
 }
 
 pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
     let a = if let Some(p) = Point::from_bytes(public_key) { p } else { return false };
-    
-    let mut r_le = [0u8; 32];
-    r_le.copy_from_slice(&signature[..32]);
-    let r = if let Some(p) = Point::from_bytes(&r_le) { p } else { return false };
     
     let mut hasher = blake2b::Blake2bHasher::new(64);
     hasher.update(&signature[..32]); // Native R
@@ -365,7 +399,7 @@ pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bo
     };
     
     let sb_minus_ka = Point::double_scalar_mul_base_and_point(&s_le, &neg_a, &k_bytes);
-    sb_minus_ka == r
+    sb_minus_ka.to_bytes() == signature[..32]
 }
 
 pub fn verify_batch_4(
@@ -381,15 +415,10 @@ pub fn verify_batch_4(
     
     if all_match && len0 <= 128 {
         let mut points_a = [Point::identity(); 4];
-        let mut points_r = [Point::identity(); 4];
         
         for i in 0..4 {
             let a = if let Some(p) = Point::from_bytes(public_keys[i]) { p } else { return results };
-            let mut r_le = [0u8; 32];
-            r_le.copy_from_slice(&signatures[i][..32]);
-            let r = if let Some(p) = Point::from_bytes(&r_le) { p } else { return results };
             points_a[i] = a;
-            points_r[i] = r;
         }
         
         // Zero-allocation stack buffer: each slice has size (64 + len0)
@@ -421,7 +450,7 @@ pub fn verify_batch_4(
             };
             
             let sb_minus_ka = Point::double_scalar_mul_base_and_point(&s_le, &neg_a, &k_bytes);
-            results[i] = sb_minus_ka == points_r[i];
+            results[i] = sb_minus_ka.to_bytes() == signatures[i][..32];
         }
     } else {
         // Safe sequential fallback

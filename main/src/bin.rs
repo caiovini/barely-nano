@@ -1358,15 +1358,27 @@ fn generate_deterministic_pow(
     let mut iters = 0u64;
     let start = kernel_common::clint::mtime_raw();
     loop {
-        *nonce_state = nonce_state.wrapping_add(1);
-        let work = WorkNonce::from(*nonce_state);
-        iters += 1;
-        if iters % 4096 == 0 {
-            kernel_common::watchdog::kick();
+        let nonces = [
+            WorkNonce::from(nonce_state.wrapping_add(1)),
+            WorkNonce::from(nonce_state.wrapping_add(2)),
+            WorkNonce::from(nonce_state.wrapping_add(3)),
+            WorkNonce::from(nonce_state.wrapping_add(4)),
+        ];
+
+        let difficulties = diff.get_difficulties_batch_4(root, nonces);
+        iters += 4;
+
+        for i in 0..4 {
+            if difficulties[i] >= threshold {
+                *nonce_state += 4;
+                let elapsed = kernel_common::clint::mtime_raw().wrapping_sub(start);
+                return (nonces[i], elapsed, iters);
+            }
         }
-        if diff.get_difficulty(root, work) >= threshold {
-            let elapsed = kernel_common::clint::mtime_raw().wrapping_sub(start);
-            return (work, elapsed, iters);
+        *nonce_state += 4;
+
+        if iters % 16384 == 0 {
+            kernel_common::watchdog::kick();
         }
     }
 }
@@ -1416,6 +1428,24 @@ fn run_deterministic_block_test(
     uart::print(b"[block-test] DETERMINISTIC BARE-METAL BLOCK GENERATION & PIPELINE TEST\n");
     uart::print(b"[block-test] Timer frequency: 24 MHz (24 ticks = 1 us)\n");
     uart::print(b"========================================================================\n");
+
+    let st = rsnano_sha::blake2b::self_test();
+    uart::print(b"[block-test] blake2b self-test mask (0 = OK): ");
+    uart::print_usize(st as usize);
+    uart::print(b"\n");
+    let (lm, exp0, got0) = rsnano_sha::blake2b::four_way_debug();
+    uart::print(b"[block-test] 4-way lane mismatch mask: ");
+    uart::print_usize(lm as usize);
+    uart::print(b"\n");
+    for i in 0..8 {
+        uart::print(b"[block-test]  w");
+        uart::print_usize(i);
+        uart::print(b" exp=");
+        uart::print_hex(exp0[i] as usize);
+        uart::print(b" got=");
+        uart::print_hex(got0[i] as usize);
+        uart::print(b"\n");
+    }
 
     let key = rsnano_core::DEV_GENESIS_KEY.clone();
     let account = key.public_key().as_account();
@@ -1514,7 +1544,7 @@ fn run_deterministic_block_test(
     let total_flushed = t6.wrapping_sub(t0);
 
     uart::print(b"\n--- Phase 1: Single Block Full Lifecycle Breakdown ---\n");
-    uart::print(b"  PoW Generation (");
+    uart::print(b"  [setup, excluded from totals] PoW Generation (");
     uart::print_usize(pow_iters as usize);
     uart::print(b" nonces):        ");
     print_ticks_and_us(pow_ticks);
@@ -1626,13 +1656,12 @@ fn run_deterministic_block_test(
 
     let batch_in_mem = batch_s1 + batch_s2 + batch_s3 + batch_s4 + batch_s5;
     let batch_with_flush = batch_in_mem + batch_s6;
-    let batch_with_pow = batch_with_flush + batch_pow_ticks;
 
     assert_eq!(node.ledger.block_count(), (2 + BATCH_COUNT) as usize);
     assert_eq!(node.ledger.confirmed_count(), (2 + BATCH_COUNT) as usize);
 
     uart::print(b"\n--- Phase 2: 64-Block Deterministic Chain Summary (Per-Block Avg) ---\n");
-    uart::print(b"  Avg PoW Generation (");
+    uart::print(b"  [setup, excluded from throughput] Avg PoW Generation (");
     uart::print_usize((batch_pow_iters / BATCH_COUNT) as usize);
     uart::print(b" nonces/blk):     ");
     print_ticks_and_us(batch_pow_ticks / BATCH_COUNT);
@@ -1657,8 +1686,6 @@ fn run_deterministic_block_test(
     print_bps(BATCH_COUNT, batch_in_mem);
     uart::print(b"\n  Deterministic Throughput (Stages 1-6):     ");
     print_bps(BATCH_COUNT, batch_with_flush);
-    uart::print(b"\n  Deterministic Throughput (With CPU PoW):   ");
-    print_bps(BATCH_COUNT, batch_with_pow);
     uart::print(b"\n  Ledger Verified: stored=");
     uart::print_usize(node.ledger.block_count() as usize);
     uart::print(b", confirmed=");

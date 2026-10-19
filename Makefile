@@ -10,7 +10,8 @@ boot.scr: boot.cmd
 # ── S-mode (default: Orange Pi RV2) ──────────────────────────────────────────
 # OpenSBI runs in M-mode; our bare-metal node runs in S-mode via U-Boot.
 build-smode: boot.scr
-	RUSTFLAGS="-C target-feature=+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom" $(CARGO) build -p barely-nano --release --target riscv64gc-unknown-none-elf --features simd
+	RUSTFLAGS="-C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zihintpause" \
+	$(CARGO) build -p barely-nano --release --target riscv64gc-unknown-none-elf --features simd
 	$(OBJCOPY) -O binary target/riscv64gc-unknown-none-elf/release/barely-nano barely-nano.bin
 	@for dir in "/media/cvini/NANO_NODE" "/run/media/cvini/NANO_NODE"; do \
 		if [ -d "$$dir" ]; then \
@@ -23,7 +24,8 @@ build-smode: boot.scr
 # ── S-mode + deterministic block generation & pipeline test ──────────────────
 # Measures deterministic per-stage block time and blocks/sec on bare-metal hardware.
 build-block-test: boot.scr
-	RUSTFLAGS="-C target-feature=+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom" $(CARGO) build -p barely-nano --release --target riscv64gc-unknown-none-elf --features block-test,simd
+	RUSTFLAGS="-C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zihintpause" \
+	$(CARGO) build -p barely-nano --release --target riscv64gc-unknown-none-elf --features simd,block-test
 	$(OBJCOPY) -O binary target/riscv64gc-unknown-none-elf/release/barely-nano barely-nano.bin
 	@for dir in "/media/cvini/NANO_NODE" "/run/media/cvini/NANO_NODE"; do \
 		if [ -d "$$dir" ]; then \

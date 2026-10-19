@@ -86,21 +86,29 @@ where
         (work, difficulty)
     }
 
-    /// Tries to create PoW in a batch of 256 iterations
+    /// Tries to create PoW in a batch of iterations
     fn try_create_batch(&mut self, item: &Root, min_difficulty: u64) -> Option<WorkNonce> {
         let mut iteration = self.iteration_size;
-        let mut work = WorkNonce::from(0);
-        let mut difficulty = 0;
-        while difficulty < min_difficulty && iteration > 0 {
-            (work, difficulty) = self.next(item);
-            iteration -= 1;
-        }
 
-        if difficulty >= min_difficulty {
-            Some(work)
-        } else {
-            None
+        while iteration > 0 {
+            let nonces = [
+                WorkNonce::from(self.rng.next_work()),
+                WorkNonce::from(self.rng.next_work()),
+                WorkNonce::from(self.rng.next_work()),
+                WorkNonce::from(self.rng.next_work()),
+            ];
+
+            let difficulties = self.difficulty.get_difficulties_batch_4(item, nonces);
+
+            for i in 0..4 {
+                if difficulties[i] >= min_difficulty {
+                    return Some(nonces[i]);
+                }
+            }
+
+            iteration -= 4;
         }
+        None
     }
 }
 

@@ -214,49 +214,52 @@ impl FieldElement {
         self.mul(self)
     }
 
-    pub fn invert(&self) -> Self {
-        // a^(p-2) where p-2 = 2^255 - 21
-        let mut res = FieldElement::ONE;
-        let mut base = *self;
-        
-        // 2^255 - 21 in little-endian binary:
-        // 21 = 16 + 4 + 1 = 10101 binary.
-        // 2^255 - 21 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEB
-        let p_minus_2: [u64; 4] = [
-            0xFFFFFFFFFFFFFFEB,
-            0xFFFFFFFFFFFFFFFF,
-            0xFFFFFFFFFFFFFFFF,
-            0x7FFFFFFFFFFFFFFF,
-        ];
-        
-        for i in 0..255 {
-            if (p_minus_2[i / 64] >> (i % 64)) & 1 != 0 {
-                res = res.mul(&base);
-            }
-            base = base.square();
+    #[inline(always)]
+    fn sqn(&self, n: usize) -> Self {
+        let mut x = *self;
+        for _ in 0..n {
+            x = x.square();
         }
-        res
+        x
     }
 
+    /// Computes self^(p-2) mod p = self^(2^255 - 21) using an optimal addition chain
+    /// (254 squarings and 11 multiplications) instead of 253 full multiplications.
+    pub fn invert(&self) -> Self {
+        let z3 = self.sqn(1).mul(self);
+        let z_11 = self.sqn(3).mul(&z3);
+        let z7 = z3.sqn(1).mul(self);
+        let z15 = z7.sqn(1).mul(self);
+        let z31 = z15.sqn(1).mul(self);
+
+        let t0 = z31.sqn(5).mul(&z31);     // 2^10 - 1
+        let t1 = t0.sqn(10).mul(&t0);       // 2^20 - 1
+        let t2 = t1.sqn(20).mul(&t1);       // 2^40 - 1
+        let t3 = t2.sqn(10).mul(&t0);       // 2^50 - 1
+        let t4 = t3.sqn(50).mul(&t3);       // 2^100 - 1
+        let t5 = t4.sqn(100).mul(&t4);      // 2^200 - 1
+        let t6 = t5.sqn(50).mul(&t3);       // 2^250 - 1
+
+        t6.sqn(5).mul(&z_11)
+    }
+
+    /// Computes self^((p+3)/8) = self^(2^252 - 2) using an optimal addition chain
+    /// (252 squarings and 10 multiplications) instead of 250 full multiplications.
     pub fn pow_p38(&self) -> Self {
-        // a^((p+3)/8) where (p+3)/8 = 2^252 - 2
-        let mut res = FieldElement::ONE;
-        let mut base = *self;
-        
-        let exp: [u64; 4] = [
-            0xFFFFFFFFFFFFFFFE,
-            0xFFFFFFFFFFFFFFFF,
-            0xFFFFFFFFFFFFFFFF,
-            0x0FFFFFFFFFFFFFFF,
-        ];
-        
-        for i in 0..252 {
-            if (exp[i / 64] >> (i % 64)) & 1 != 0 {
-                res = res.mul(&base);
-            }
-            base = base.square();
-        }
-        res
+        let z3 = self.sqn(1).mul(self);
+        let z7 = z3.sqn(1).mul(self);
+        let z15 = z7.sqn(1).mul(self);
+        let z31 = z15.sqn(1).mul(self);
+
+        let t0 = z31.sqn(5).mul(&z31);     // 2^10 - 1
+        let t1 = t0.sqn(10).mul(&t0);       // 2^20 - 1
+        let t2 = t1.sqn(20).mul(&t1);       // 2^40 - 1
+        let t3 = t2.sqn(10).mul(&t0);       // 2^50 - 1
+        let t4 = t3.sqn(50).mul(&t3);       // 2^100 - 1
+        let t5 = t4.sqn(100).mul(&t4);      // 2^200 - 1
+        let t6 = t5.sqn(50).mul(&t3);       // 2^250 - 1
+
+        t6.sqn(1).mul(self).sqn(1)
     }
 }
 

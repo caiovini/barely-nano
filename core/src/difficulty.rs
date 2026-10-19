@@ -33,6 +33,7 @@ impl TryFrom<u8> for WorkVersion {
 
 pub trait Difficulty: Send + Sync {
     fn get_difficulty(&self, root: &Root, work: WorkNonce) -> u64;
+    fn get_difficulties_batch_4(&self, root: &Root, work: [WorkNonce; 4]) -> [u64; 4];
     fn clone(&self) -> Box<dyn Difficulty>;
 }
 
@@ -69,6 +70,27 @@ impl Difficulty for DifficultyV1 {
         u64::from_le_bytes(buffer)
     }
 
+    fn get_difficulties_batch_4(&self, root: &Root, work: [WorkNonce; 4]) -> [u64; 4] {
+
+        let root_bytes = root.as_bytes();
+        let mut inputs = [[0u8; 40]; 4]; // 8 bytes nonce + 32 bytes root
+
+        for i in 0..4 {
+            inputs[i][..8].copy_from_slice(&work[i].0.to_le_bytes());
+            inputs[i][8..].copy_from_slice(root_bytes);
+        }
+
+        let inputs_refs = [
+            &inputs[0][..],
+            &inputs[1][..],
+            &inputs[2][..],
+            &inputs[3][..],
+        ];
+
+        // Nano work uses an 8-byte Blake2b digest (same as get_difficulty above).
+        tools::blake2b::hash8_batch_4(inputs_refs)
+    }
+
     fn clone(&self) -> Box<dyn Difficulty> {
         Box::<DifficultyV1>::default()
     }
@@ -98,6 +120,14 @@ impl Difficulty for StubDifficulty {
             .get(&(*root, work.0))
             .cloned()
             .unwrap_or(work.0)
+    }
+
+    fn get_difficulties_batch_4(&self, _root: &Root, work: [WorkNonce; 4]) -> [u64; 4] {
+        let mut results = [0u64; 4];
+        for i in 0..4 {
+            results[i] = self.get_difficulty(_root, work[i]);
+        }
+        results
     }
 
     fn clone(&self) -> Box<dyn Difficulty> {

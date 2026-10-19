@@ -8,7 +8,6 @@
 //! - **Zvkb**: The vectorized compression function uses `vror.vi`, `vadd.vv`,
 //!   and `vxor.vv` to execute 4 G-function columns in parallel per instruction.
 
-#[cfg(target_arch = "riscv64")]
 use core::arch::asm;
 use core::convert::TryInto;
 
@@ -81,9 +80,13 @@ fn compress(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
 }
 
 #[allow(dead_code)]
-#[cfg(all(target_arch = "riscv64", any(feature = "simd", target_feature = "v")))]
-fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
-    let mut v = [0u64; 16];
+#[cfg(all(target_arch = "riscv64", feature = "simd"))]
+pub fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
+    #[repr(align(64))]
+    struct AlignedBuffer<const N: usize>([u64; N]);
+
+    let mut v_buf = AlignedBuffer([0u64; 16]);
+    let v = &mut v_buf.0;
     v[0..8].copy_from_slice(h);
     v[8..12].copy_from_slice(&IV[0..4]);
     v[12] = IV[4] ^ (t as u64);
@@ -91,37 +94,40 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
     v[14] = if last { !IV[6] } else { IV[6] };
     v[15] = IV[7];
 
-    let mut m = [0u64; 16];
+    let mut m_buf = AlignedBuffer([0u64; 16]);
+    let m = &mut m_buf.0;
     for i in 0..16 {
         m[i] = u64::from_le_bytes(block[i * 8..i * 8 + 8].try_into().unwrap());
     }
 
     // Pre-calculate indices for message words in each round for vector loading.
     // Each round has 4 steps of 4 words each (col_x, col_y, diag_x, diag_y).
+    // vluxei64.v indices are BYTE offsets (not scaled by element size), and `m` is a plain
+    // [u64; 16], so each index is word_index * 8. (Using * 4 produced misaligned loads.)
     let mut msg_indices = [0u64; 12 * 4 * 4];
     for round in 0..12 {
         let s = &SIGMA[round];
         let base = round * 16;
-        // Column X
-        msg_indices[base + 0] = s[0] as u64;
-        msg_indices[base + 1] = s[2] as u64;
-        msg_indices[base + 2] = s[4] as u64;
-        msg_indices[base + 3] = s[6] as u64;
+        // Column X: indices 0, 2, 4, 6 -> multiply by 4 to get 0, 8, 16, 24 (index units)
+        msg_indices[base + 0] = (s[0] * 8) as u64;
+        msg_indices[base + 1] = (s[2] * 8) as u64;
+        msg_indices[base + 2] = (s[4] * 8) as u64;
+        msg_indices[base + 3] = (s[6] * 8) as u64;
         // Column Y
-        msg_indices[base + 4] = s[1] as u64;
-        msg_indices[base + 5] = s[3] as u64;
-        msg_indices[base + 6] = s[5] as u64;
-        msg_indices[base + 7] = s[7] as u64;
+        msg_indices[base + 4] = (s[1] * 8) as u64;
+        msg_indices[base + 5] = (s[3] * 8) as u64;
+        msg_indices[base + 6] = (s[5] * 8) as u64;
+        msg_indices[base + 7] = (s[7] * 8) as u64;
         // Diagonal X
-        msg_indices[base + 8] = s[8] as u64;
-        msg_indices[base + 9] = s[10] as u64;
-        msg_indices[base + 10] = s[12] as u64;
-        msg_indices[base + 11] = s[14] as u64;
+        msg_indices[base + 8] = (s[8] * 8) as u64;
+        msg_indices[base + 9] = (s[10] * 8) as u64;
+        msg_indices[base + 10] = (s[12] * 8) as u64;
+        msg_indices[base + 11] = (s[14] * 8) as u64;
         // Diagonal Y
-        msg_indices[base + 12] = s[9] as u64;
-        msg_indices[base + 13] = s[11] as u64;
-        msg_indices[base + 14] = s[13] as u64;
-        msg_indices[base + 15] = s[15] as u64;
+        msg_indices[base + 12] = (s[9] * 8) as u64;
+        msg_indices[base + 13] = (s[11] * 8) as u64;
+        msg_indices[base + 14] = (s[13] * 8) as u64;
+        msg_indices[base + 15] = (s[15] * 8) as u64;
     }
 
     unsafe {
@@ -131,9 +137,11 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
         let undiag_v10 = [3u64, 0, 1, 2];
         let undiag_v12 = [2u64, 3, 0, 1];
         let undiag_v14 = [1u64, 2, 3, 0];
+        let mut temp_buf = [0u64; 4]; // Temporary buffer to avoid vluxei64.v
+
 
         asm!(
-            "vsetivli zero, 4, e64, m2, ta, ma",
+            "vsetivli zero, 4, e64, m2",
             "vle64.v v8, ({v_ptr})",
             "addi {tmp}, {v_ptr}, 32",
             "vle64.v v10, ({tmp})",
@@ -152,7 +160,6 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
             "li {round_idx}, 0",
             "4:",
             "vle64.v v20, ({idx_ptr})",
-            "vsll.vi v20, v20, 3",
             "vluxei64.v v16, ({m_ptr}), v20",
             
             "vadd.vv v8, v8, v10",
@@ -169,7 +176,6 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
             
             "addi {idx_ptr}, {idx_ptr}, 32",
             "vle64.v v20, ({idx_ptr})",
-            "vsll.vi v20, v20, 3",
             "vluxei64.v v18, ({m_ptr}), v20",
             
             "vadd.vv v8, v8, v10",
@@ -193,7 +199,6 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
             
             "addi {idx_ptr}, {idx_ptr}, 32",
             "vle64.v v20, ({idx_ptr})",
-            "vsll.vi v20, v20, 3",
             "vluxei64.v v16, ({m_ptr}), v20",
             
             "vadd.vv v8, v8, v10",
@@ -210,7 +215,6 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
             
             "addi {idx_ptr}, {idx_ptr}, 32",
             "vle64.v v20, ({idx_ptr})",
-            "vsll.vi v20, v20, 3",
             "vluxei64.v v18, ({m_ptr}), v20",
             
             "vadd.vv v8, v8, v10",
@@ -279,11 +283,11 @@ fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
 
 #[inline(always)]
 fn compress_block(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
-    #[cfg(feature = "never_enable_this")]
+    #[cfg(all(target_arch = "riscv64", feature = "simd"))]
     {
         compress_vector(h, block, t, last);
     }
-    #[cfg(not(feature = "never_enable_this"))]
+    #[cfg(not(all(target_arch = "riscv64", feature = "simd")))]
     {
         compress(h, block, t, last);
     }
@@ -305,17 +309,27 @@ fn compress_block(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool) {
 ///    four state registers (`v_a`, `v_b`, `v_c`, `v_d`) inside each vectorized G-step.
 /// 3. **Offset Tables:** We pre-compute message word byte offsets (`msg_offsets`) for the 12 rounds
 ///    and pass them dynamically to load transposed message words from L1 cache with minimal latency.
-#[cfg(feature = "never_enable_this")]
+#[cfg(all(target_arch = "riscv64", feature = "simd"))]
 pub fn compress_four_blocks(
     h: &mut [&mut [u64; 8]; 4],
     blocks: &[&[u8; 128]; 4],
     t: &[u128; 4],
     last: &[bool; 4],
 ) {
-    let mut v = [0u64; 16 * 4];
-    
-    // Initialize transposed state matrix.
-    // v[i * 4 + j] maps state word `i` across block index `j`.
+    static mut CALLED: bool = false;
+    unsafe {
+        if !CALLED {
+            // We can't easily use uart here without imports, but we can use a volatile write
+            // or just rely on the difficulty.rs print we added earlier.
+            // For now, let's just ensure the function is actually reachable.
+            CALLED = true;
+        }
+    }
+    #[repr(align(64))]
+    struct AlignedBuffer<const N: usize>([u64; N]);
+
+    let mut v_buf = AlignedBuffer([0u64; 16 * 4]);
+    let v = &mut v_buf.0;
     for j in 0..4 {
         for i in 0..8 {
             v[i * 4 + j] = h[j][i];
@@ -330,9 +344,8 @@ pub fn compress_four_blocks(
         v[15 * 4 + j] = IV[7];
     }
 
-    // Transpose and load 128-byte message blocks into a transposed buffer.
-    // Each transposed message word `i` is stored contiguously in memory as 4 elements of 64-bit.
-    let mut m = [0u64; 16 * 4];
+    let mut m_buf = AlignedBuffer([0u64; 16 * 4]);
+    let m = &mut m_buf.0;
     for j in 0..4 {
         for i in 0..16 {
             let off = i * 8;
@@ -359,7 +372,7 @@ pub fn compress_four_blocks(
         let v_ptr = v.as_mut_ptr();
 
         asm!(
-            "vsetivli zero, 4, e64, m2, ta, ma",
+            "vsetivli zero, 4, e64, m1",
             
             // 1. Initial Load of v0..v26 (14 state variables)
             // Explicit LMUL=2 group bases are even: v0, v2, ..., v26
@@ -390,7 +403,7 @@ pub fn compress_four_blocks(
             "vle64.v v24, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v26, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, -416", // Restore v_ptr to base (13 * 32 = 416)
+            "addi {v_ptr}, {v_ptr}, -416", // Restore v_ptr to base (13 increments of 32 = 416)
 
             // Initial lookahead setup for Step 1 of Round 0:
             "ld {x_ptr}, 0({offsets_ptr})",
@@ -412,21 +425,29 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 24({offsets_ptr})", // Pre-load Step 2 y_ptr
             
             "vxor.vv v24, v24, v0",
-            "vror.vi v24, v24, 32",
+            "vsrl.vx v21, v24, {sh32}",
+            "vsll.vx v24, v24, {sh32}",
+            "vor.vv v24, v24, v21",
             "vadd.vv v16, v16, v24",
             "vxor.vv v8, v8, v16",
-            "vror.vi v8, v8, 24",
-            
+            "vsrl.vx v21, v8, {sh24}",
+            "vsll.vx v8, v8, {sh40}",
+            "vor.vv v8, v8, v21",
+
             "vadd.vv v0, v0, v8",
             "vadd.vv v0, v0, v30",
-            
+
             "vle64.v v30, ({x_ptr})", // Trigger load of Step 2 x in background!
-            
+
             "vxor.vv v24, v24, v0",
-            "vror.vi v24, v24, 16",
+            "vsrl.vx v21, v24, {sh16}",
+            "vsll.vx v24, v24, {sh48}",
+            "vor.vv v24, v24, v21",
             "vadd.vv v16, v16, v24",
             "vxor.vv v8, v8, v16",
-            "vror.vi v8, v8, 63",
+            "vsrl.vx v21, v8, {sh63}",
+            "vsll.vx v8, v8, {sh1}",
+            "vor.vv v8, v8, v21",
 
             // --- Step 2: g(1, 5, 9, 13) -> Registers: v2, v10, v18, v26 ---
             "ld {x_ptr}, 32({offsets_ptr})", // Pre-load Step 3 x_ptr
@@ -439,10 +460,14 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 40({offsets_ptr})", // Pre-load Step 3 y_ptr
             
             "vxor.vv v26, v26, v2",
-            "vror.vi v26, v26, 32",
+            "vsrl.vx v21, v26, {sh32}",
+            "vsll.vx v26, v26, {sh32}",
+            "vor.vv v26, v26, v21",
             "vadd.vv v18, v18, v26",
             "vxor.vv v10, v10, v18",
-            "vror.vi v10, v10, 24",
+            "vsrl.vx v21, v10, {sh24}",
+            "vsll.vx v10, v10, {sh40}",
+            "vor.vv v10, v10, v21",
             
             "vadd.vv v2, v2, v10",
             "vadd.vv v2, v2, v30",
@@ -453,10 +478,14 @@ pub fn compress_four_blocks(
             "vle64.v v28, ({x_ptr})", // Trigger load of Step 3 v14 in background!
             
             "vxor.vv v26, v26, v2",
-            "vror.vi v26, v26, 16",
+            "vsrl.vx v21, v26, {sh16}",
+            "vsll.vx v26, v26, {sh48}",
+            "vor.vv v26, v26, v21",
             "vadd.vv v18, v18, v26",
             "vxor.vv v10, v10, v18",
-            "vror.vi v10, v10, 63",
+            "vsrl.vx v21, v10, {sh63}",
+            "vsll.vx v10, v10, {sh1}",
+            "vor.vv v10, v10, v21",
 
             // --- Step 3: g(2, 6, 10, 14) -> Registers: v4, v12, v20, v28 (uses v14) ---
             "ld {x_ptr}, 48({offsets_ptr})", // Pre-load Step 4 x_ptr
@@ -469,10 +498,14 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 56({offsets_ptr})", // Pre-load Step 4 y_ptr
             
             "vxor.vv v28, v28, v4",
-            "vror.vi v28, v28, 32",
+            "vsrl.vx v21, v28, {sh32}",
+            "vsll.vx v28, v28, {sh32}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v20, v20, v28",
             "vxor.vv v12, v12, v20",
-            "vror.vi v12, v12, 24",
+            "vsrl.vx v21, v12, {sh24}",
+            "vsll.vx v12, v12, {sh40}",
+            "vor.vv v12, v12, v21",
             
             "vadd.vv v4, v4, v12",
             "vadd.vv v4, v4, v30",
@@ -480,7 +513,9 @@ pub fn compress_four_blocks(
             "vle64.v v30, ({x_ptr})", // Trigger load of Step 4 x in background!
             
             "vxor.vv v28, v28, v4",
-            "vror.vi v28, v28, 16",
+            "vsrl.vx v21, v28, {sh16}",
+            "vsll.vx v28, v28, {sh48}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v20, v20, v28",
             
             "addi {x_ptr}, {v_ptr}, 448",
@@ -490,7 +525,9 @@ pub fn compress_four_blocks(
             "vle64.v v28, ({x_ptr})", // Trigger load of Step 4 v15 in background!
             
             "vxor.vv v12, v12, v20",
-            "vror.vi v12, v12, 63",
+            "vsrl.vx v21, v12, {sh63}",
+            "vsll.vx v12, v12, {sh1}",
+            "vor.vv v12, v12, v21",
 
             // --- Step 4: g(3, 7, 11, 15) -> Registers: v6, v14, v22, v28 (uses v15) ---
             "ld {x_ptr}, 64({offsets_ptr})", // Pre-load Step 5 x_ptr
@@ -503,21 +540,29 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 72({offsets_ptr})", // Pre-load Step 5 y_ptr
             
             "vxor.vv v28, v28, v6",
-            "vror.vi v28, v28, 32",
+            "vsrl.vx v21, v28, {sh32}",
+            "vsll.vx v28, v28, {sh32}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v22, v22, v28",
             "vxor.vv v14, v14, v22",
-            "vror.vi v14, v14, 24",
-            
+            "vsrl.vx v21, v14, {sh24}",
+            "vsll.vx v14, v14, {sh40}",
+            "vor.vv v14, v14, v21",
+
             "vadd.vv v6, v6, v14",
             "vadd.vv v6, v6, v30",
-            
+
             "vle64.v v30, ({x_ptr})", // Trigger load of Step 5 x in background!
-            
+
             "vxor.vv v28, v28, v6",
-            "vror.vi v28, v28, 16",
+            "vsrl.vx v21, v28, {sh16}",
+            "vsll.vx v28, v28, {sh48}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v22, v22, v28",
             "vxor.vv v14, v14, v22",
-            "vror.vi v14, v14, 63",
+            "vsrl.vx v21, v14, {sh63}",
+            "vsll.vx v14, v14, {sh1}",
+            "vor.vv v14, v14, v21",
 
             // --- Step 5: g(0, 5, 10, 15) -> Registers: v0, v10, v20, v28 (uses v15) ---
             "ld {x_ptr}, 80({offsets_ptr})", // Pre-load Step 6 x_ptr
@@ -530,10 +575,14 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 88({offsets_ptr})", // Pre-load Step 6 y_ptr
             
             "vxor.vv v28, v28, v0",
-            "vror.vi v28, v28, 32",
+            "vsrl.vx v21, v28, {sh32}",
+            "vsll.vx v28, v28, {sh32}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v20, v20, v28",
             "vxor.vv v10, v10, v20",
-            "vror.vi v10, v10, 24",
+            "vsrl.vx v21, v10, {sh24}",
+            "vsll.vx v10, v10, {sh40}",
+            "vor.vv v10, v10, v21",
             
             "vadd.vv v0, v0, v10",
             "vadd.vv v0, v0, v30",
@@ -541,14 +590,18 @@ pub fn compress_four_blocks(
             "vle64.v v30, ({x_ptr})", // Trigger load of Step 6 x in background!
             
             "vxor.vv v28, v28, v0",
-            "vror.vi v28, v28, 16",
+            "vsrl.vx v21, v28, {sh16}",
+            "vsll.vx v28, v28, {sh48}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v20, v20, v28",
             
             "addi {x_ptr}, {v_ptr}, 480",
             "vse64.v v28, ({x_ptr})", // Save modified v15 to memory
             
             "vxor.vv v10, v10, v20",
-            "vror.vi v10, v10, 63",
+            "vsrl.vx v21, v10, {sh63}",
+            "vsll.vx v10, v10, {sh1}",
+            "vor.vv v10, v10, v21",
 
             // --- Step 6: g(1, 6, 11, 12) -> Registers: v2, v12, v22, v24 ---
             "ld {x_ptr}, 96({offsets_ptr})", // Pre-load Step 7 x_ptr
@@ -561,10 +614,14 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 104({offsets_ptr})", // Pre-load Step 7 y_ptr
             
             "vxor.vv v24, v24, v2",
-            "vror.vi v24, v24, 32",
+            "vsrl.vx v21, v24, {sh32}",
+            "vsll.vx v24, v24, {sh32}",
+            "vor.vv v24, v24, v21",
             "vadd.vv v22, v22, v24",
             "vxor.vv v12, v12, v22",
-            "vror.vi v12, v12, 24",
+            "vsrl.vx v21, v12, {sh24}",
+            "vsll.vx v12, v12, {sh40}",
+            "vor.vv v12, v12, v21",
             
             "vadd.vv v2, v2, v12",
             "vadd.vv v2, v2, v30",
@@ -572,10 +629,14 @@ pub fn compress_four_blocks(
             "vle64.v v30, ({x_ptr})", // Trigger load of Step 7 x in background!
             
             "vxor.vv v24, v24, v2",
-            "vror.vi v24, v24, 16",
+            "vsrl.vx v21, v24, {sh16}",
+            "vsll.vx v24, v24, {sh48}",
+            "vor.vv v24, v24, v21",
             "vadd.vv v22, v22, v24",
             "vxor.vv v12, v12, v22",
-            "vror.vi v12, v12, 63",
+            "vsrl.vx v21, v12, {sh63}",
+            "vsll.vx v12, v12, {sh1}",
+            "vor.vv v12, v12, v21",
 
             // --- Step 7: g(2, 7, 8, 13) -> Registers: v4, v14, v16, v26 ---
             "ld {x_ptr}, 112({offsets_ptr})", // Pre-load Step 8 x_ptr
@@ -588,10 +649,14 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 120({offsets_ptr})", // Pre-load Step 8 y_ptr
             
             "vxor.vv v26, v26, v4",
-            "vror.vi v26, v26, 32",
+            "vsrl.vx v21, v26, {sh32}",
+            "vsll.vx v26, v26, {sh32}",
+            "vor.vv v26, v26, v21",
             "vadd.vv v16, v16, v26",
             "vxor.vv v14, v14, v16",
-            "vror.vi v14, v14, 24",
+            "vsrl.vx v21, v14, {sh24}",
+            "vsll.vx v14, v14, {sh40}",
+            "vor.vv v14, v14, v21",
             
             "vadd.vv v4, v4, v14",
             "vadd.vv v4, v4, v30",
@@ -602,10 +667,14 @@ pub fn compress_four_blocks(
             "vle64.v v28, ({x_ptr})", // Trigger load of Step 8 v14 in background!
             
             "vxor.vv v26, v26, v4",
-            "vror.vi v26, v26, 16",
+            "vsrl.vx v21, v26, {sh16}",
+            "vsll.vx v26, v26, {sh48}",
+            "vor.vv v26, v26, v21",
             "vadd.vv v16, v16, v26",
             "vxor.vv v14, v14, v16",
-            "vror.vi v14, v14, 63",
+            "vsrl.vx v21, v14, {sh63}",
+            "vsll.vx v14, v14, {sh1}",
+            "vor.vv v14, v14, v21",
 
             // --- Step 8: g(3, 4, 9, 14) -> Registers: v6, v8, v18, v28 (uses v14) ---
             "addi {offsets_ptr}, {offsets_ptr}, 128", // Move to next round offsets
@@ -619,10 +688,14 @@ pub fn compress_four_blocks(
             "ld {y_ptr}, 8({offsets_ptr})", // Pre-load Round N+1 Step 1 y_ptr
             
             "vxor.vv v28, v28, v6",
-            "vror.vi v28, v28, 32",
+            "vsrl.vx v21, v28, {sh32}",
+            "vsll.vx v28, v28, {sh32}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v18, v18, v28",
             "vxor.vv v8, v8, v18",
-            "vror.vi v8, v8, 24",
+            "vsrl.vx v21, v8, {sh24}",
+            "vsll.vx v8, v8, {sh40}",
+            "vor.vv v8, v8, v21",
             
             "vadd.vv v6, v6, v8",
             "vadd.vv v6, v6, v30",
@@ -630,14 +703,18 @@ pub fn compress_four_blocks(
             "vle64.v v30, ({x_ptr})", // Trigger load of Round N+1 Step 1 x in background!
             
             "vxor.vv v28, v28, v6",
-            "vror.vi v28, v28, 16",
+            "vsrl.vx v21, v28, {sh16}",
+            "vsll.vx v28, v28, {sh48}",
+            "vor.vv v28, v28, v21",
             "vadd.vv v18, v18, v28",
             
             "addi {x_ptr}, {v_ptr}, 448",
             "vse64.v v28, ({x_ptr})", // Save modified v14 to memory
             
             "vxor.vv v8, v8, v18",
-            "vror.vi v8, v8, 63",
+            "vsrl.vx v21, v8, {sh63}",
+            "vsll.vx v8, v8, {sh1}",
+            "vor.vv v8, v8, v21",
             
             // --- Loop Control ---
             "addi {round_idx}, {round_idx}, 1",
@@ -672,7 +749,7 @@ pub fn compress_four_blocks(
             "vse64.v v24, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v26, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, -416", // Restore v_ptr to base (13 * 32 = 416)
+            "addi {v_ptr}, {v_ptr}, -416", // Restore v_ptr to base (13 increments of 32 = 416)
 
             v_ptr = inout(reg) v_ptr => _,
             offsets_ptr = inout(reg) offsets_ptr => _,
@@ -680,6 +757,13 @@ pub fn compress_four_blocks(
             max_rounds = out(reg) _,
             x_ptr = out(reg) _,
             y_ptr = out(reg) _,
+            sh32 = in(reg) 32usize,
+            sh24 = in(reg) 24usize,
+            sh40 = in(reg) 40usize,
+            sh16 = in(reg) 16usize,
+            sh48 = in(reg) 48usize,
+            sh63 = in(reg) 63usize,
+            sh1 = in(reg) 1usize,
             out("v0") _, out("v1") _, out("v2") _, out("v3") _,
             out("v4") _, out("v5") _, out("v6") _, out("v7") _,
             out("v8") _, out("v9") _, out("v10") _, out("v11") _,
@@ -700,7 +784,7 @@ pub fn compress_four_blocks(
 }
 
 /// Scalar fallback for non-vector architectures, executing standard sequential compression.
-#[cfg(not(feature = "never_enable_this"))]
+#[cfg(not(all(target_arch = "riscv64", feature = "simd")))]
 pub fn compress_four_blocks(
     h: &mut [&mut [u64; 8]; 4],
     blocks: &[&[u8; 128]; 4],
@@ -811,6 +895,95 @@ pub fn hash64_batch_4(inputs: [&[u8]; 4]) -> [[u8; 64]; 4] {
     out
 }
 
+/// Diagnostic for the 4-way kernel: returns (lane mismatch mask, lane-0 scalar result,
+/// lane-0 vector result) for four distinct blocks compressed via `compress_four_blocks`.
+#[cfg(all(target_arch = "riscv64", feature = "simd"))]
+pub fn four_way_debug() -> (u8, [u64; 8], [u64; 8]) {
+    let mut blocks = [[0u8; 128]; 4];
+    for j in 0..4 {
+        for i in 0..128 {
+            blocks[j][i] = (i as u8).wrapping_mul(17).wrapping_add(j as u8 * 41 + 3);
+        }
+    }
+    let mut exp = [IV; 4];
+    for j in 0..4 {
+        exp[j][0] ^= 0x01010020;
+    }
+    let mut got = exp;
+    let t = [40u128; 4];
+    let last = [true; 4];
+    for j in 0..4 {
+        compress(&mut exp[j], &blocks[j], t[j], last[j]);
+    }
+    let [g0, g1, g2, g3] = &mut got;
+    let mut h_refs = [g0, g1, g2, g3];
+    let blocks_refs = [&blocks[0], &blocks[1], &blocks[2], &blocks[3]];
+    compress_four_blocks(&mut h_refs, &blocks_refs, &t, &last);
+    let mut mask = 0u8;
+    for j in 0..4 {
+        if exp[j] != got[j] {
+            mask |= 1 << j;
+        }
+    }
+    (mask, exp[0], got[0])
+}
+
+/// Batched Blake2b with an 8-byte digest (Nano work/PoW). Returns the digest as a
+/// little-endian u64 per input, identical to `Blake2bHasher::new(8)` + first 8 bytes.
+pub fn hash8_batch_4(inputs: [&[u8]; 4]) -> [u64; 4] {
+    let mut h = [IV; 4];
+    for i in 0..4 {
+        h[i][0] ^= 0x01010008;
+    }
+
+    hash_batch_impl(&mut h, inputs);
+
+    [h[0][0], h[1][0], h[2][0], h[3][0]]
+}
+
+/// On-device consistency check of the vector kernels against the scalar reference.
+/// Returns a bitmask: bit0 = single-block vector mismatch, bit1 = 4-way batch mismatch,
+/// bit2 = 8-byte batch mismatch. 0 means all kernels match the scalar `compress`.
+#[cfg(all(target_arch = "riscv64", feature = "simd"))]
+pub fn self_test() -> u8 {
+    let mut fail = 0u8;
+
+    let mut block = [0u8; 128];
+    for (i, b) in block.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+    }
+    let mut h_ref = IV;
+    h_ref[0] ^= 0x01010020;
+    let mut h_vec = h_ref;
+    compress(&mut h_ref, &block, 128, true);
+    compress_vector(&mut h_vec, &block, 128, true);
+    if h_ref != h_vec {
+        fail |= 1;
+    }
+
+    let mut data = [[0u8; 40]; 4];
+    for j in 0..4 {
+        for i in 0..40 {
+            data[j][i] = (i as u8).wrapping_mul(13).wrapping_add(j as u8 * 59 + 1);
+        }
+    }
+    let refs = [&data[0][..], &data[1][..], &data[2][..], &data[3][..]];
+    let batch = hash_batch_4(refs);
+    let batch8 = hash8_batch_4(refs);
+    for j in 0..4 {
+        if batch[j] != hash(refs[j]) {
+            fail |= 2;
+        }
+        let mut hasher = Blake2bHasher::new(8);
+        hasher.update(refs[j]);
+        let full = hasher.finalize();
+        if batch8[j] != u64::from_le_bytes(full[..8].try_into().unwrap()) {
+            fail |= 4;
+        }
+    }
+    fail
+}
+
 /// Helper execution engine for batched Blake2b hashing of four independent payloads.
 ///
 /// **Correctness & Safety Mechanisms:**
@@ -874,7 +1047,9 @@ fn hash_batch_impl(h: &mut [[u64; 8]; 4], inputs: [&[u8]; 4]) {
         compress_four_blocks(&mut h_refs, &blocks_refs, &t, &last);
     } else {
         for j in 0..4 {
-            let mut hasher = Blake2bHasher::new(if h[j][0] & 0x40 != 0 { 64 } else { 32 });
+            // Digest length is encoded in the low byte of the parameter-block XOR on h[0].
+            let outlen = ((h[j][0] ^ IV[0]) & 0xff) as usize;
+            let mut hasher = Blake2bHasher::new(outlen);
             hasher.update(inputs[j]);
             let full = hasher.finalize();
             if h[j][0] & 0x40 != 0 {

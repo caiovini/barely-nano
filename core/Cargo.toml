@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+kernel-common = { path = "../common" }
 rsnano_nullable_random = { path = "../nullables/random" }
 rsnano_output_tracker = { path = "../nullables/output_tracker" }
 rsnano_nullable_clock = { path = "../nullables/clock" }

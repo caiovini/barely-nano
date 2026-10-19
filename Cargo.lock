@@ -1573,6 +1573,7 @@ dependencies = [
  "chrono",
  "hashbrown 0.14.5",
  "hex",
+ "kernel-common",
  "num",
  "num-derive",
  "num-format",

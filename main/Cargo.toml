@@ -9,7 +9,7 @@ name = "barely-nano"
 path = "src/bin.rs"
 
 [features]
-default = ["smode"]
+default = ["smode", "simd"]
 smode = ["kernel-common/smode"] # OpenSBI, SBI ecalls
 block-test = ["kernel-common/block-test"] # Deterministic bare-metal block generation & pipeline benchmark
 spammer = ["block-test"]        # Backwards-compatible alias for block-test
