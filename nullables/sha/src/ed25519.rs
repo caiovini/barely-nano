@@ -3,7 +3,51 @@ use crate::curve25519::FieldElement;
 use core::convert::TryInto;
 use core::iter::Iterator;
 use core::option::Option::{self, None, Some};
-use crate::base_table::RADIX16_B;
+use crate::base_table::{RADIX16_B, ODD_MULTIPLES_B};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+struct TinyLock<T> {
+    locked: AtomicBool,
+    data: core::cell::UnsafeCell<T>,
+}
+
+unsafe impl<T: Send> Sync for TinyLock<T> {}
+
+impl<T> TinyLock<T> {
+    const fn new(data: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            data: core::cell::UnsafeCell::new(data),
+        }
+    }
+
+    fn try_with<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            let res = f(unsafe { &mut *self.data.get() });
+            self.locked.store(false, Ordering::Release);
+            Some(res)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SigningKeyCache {
+    priv_key: [u8; 32],
+    pub_key: [u8; 32],
+    s_bytes: [u8; 32],
+    h_prefix: [u8; 32],
+    valid: bool,
+}
+
+static SIGN_KEY_CACHE: TinyLock<[SigningKeyCache; 2]> = TinyLock::new([
+    SigningKeyCache { priv_key: [0; 32], pub_key: [0; 32], s_bytes: [0; 32], h_prefix: [0; 32], valid: false },
+    SigningKeyCache { priv_key: [0; 32], pub_key: [0; 32], s_bytes: [0; 32], h_prefix: [0; 32], valid: false },
+]);
 
 /// Point in Extended Coordinates (X, Y, Z, T)
 #[derive(Clone, Copy, Debug)]
@@ -13,6 +57,20 @@ pub struct Point {
     pub z: FieldElement,
     pub t: FieldElement,
 }
+
+#[derive(Clone, Copy)]
+struct PubkeyPointCache {
+    key: [u8; 32],
+    point: Point,
+    valid: bool,
+}
+
+static PUBKEY_POINT_CACHE: TinyLock<[PubkeyPointCache; 4]> = TinyLock::new([
+    PubkeyPointCache { key: [0; 32], point: Point { x: FieldElement::ZERO, y: FieldElement::ZERO, z: FieldElement::ZERO, t: FieldElement::ZERO }, valid: false },
+    PubkeyPointCache { key: [0; 32], point: Point { x: FieldElement::ZERO, y: FieldElement::ZERO, z: FieldElement::ZERO, t: FieldElement::ZERO }, valid: false },
+    PubkeyPointCache { key: [0; 32], point: Point { x: FieldElement::ZERO, y: FieldElement::ZERO, z: FieldElement::ZERO, t: FieldElement::ZERO }, valid: false },
+    PubkeyPointCache { key: [0; 32], point: Point { x: FieldElement::ZERO, y: FieldElement::ZERO, z: FieldElement::ZERO, t: FieldElement::ZERO }, valid: false },
+]);
 
 impl PartialEq for Point {
     fn eq(&self, other: &Self) -> bool {
@@ -34,6 +92,13 @@ const D: FieldElement = FieldElement([
     0x8cc740797779e898,
     0x52036cee2b6ffe73,
 ]); // d = -121665/121666
+
+const D_TIMES_TWO: FieldElement = FieldElement([
+    0xebd69b9426b2f159,
+    0x00e0149a8283b156,
+    0x198e80f2eef3d130,
+    0x2406d9dc56dffce7,
+]); // 2 * d mod p
 
 pub const B: Point = Point {
     x: FieldElement([
@@ -68,19 +133,22 @@ impl Point {
     }
 
     pub fn add(&self, other: &Self) -> Self {
-        // Standard addition formula for Extended Coordinates
-        let x1y2 = self.x.mul(&other.y);
-        let x2y1 = self.y.mul(&other.x);
-        let y1y2 = self.y.mul(&other.y);
-        let x1x2 = self.x.mul(&other.x);
-        let z1z2 = self.z.mul(&other.z);
-        let t1t2 = self.t.mul(&other.t);
-        let dt1t2 = D.mul(&t1t2);
+        // Hisil et al. 2008: Extended Coordinates addition in 9M (vs 11M)
+        let y1_minus_x1 = self.y.sub(&self.x);
+        let y1_plus_x1 = self.y.add(&self.x);
+        let y2_minus_x2 = other.y.sub(&other.x);
+        let y2_plus_x2 = other.y.add(&other.x);
 
-        let e = x1y2.add(&x2y1);
-        let f = z1z2.sub(&dt1t2);
-        let g = z1z2.add(&dt1t2);
-        let h = y1y2.add(&x1x2);
+        let a = y1_minus_x1.mul(&y2_minus_x2);
+        let b = y1_plus_x1.mul(&y2_plus_x2);
+        let c = self.t.mul(&other.t).mul(&D_TIMES_TWO);
+        let z1z2 = self.z.mul(&other.z);
+        let d = z1z2.add(&z1z2);
+
+        let e = b.sub(&a);
+        let f = d.sub(&c);
+        let g = d.add(&c);
+        let h = b.add(&a);
 
         Point {
             x: e.mul(&f),
@@ -90,19 +158,22 @@ impl Point {
         }
     }
 
-    /// Mixed addition for when other.z == 1 (such as precomputed affine table points).
+    /// Mixed addition for when other.z == 1 (8M vs 10M).
     pub fn add_affine(&self, other: &Self) -> Self {
-        let x1y2 = self.x.mul(&other.y);
-        let x2y1 = self.y.mul(&other.x);
-        let y1y2 = self.y.mul(&other.y);
-        let x1x2 = self.x.mul(&other.x);
-        let t1t2 = self.t.mul(&other.t);
-        let dt1t2 = D.mul(&t1t2);
+        let y1_minus_x1 = self.y.sub(&self.x);
+        let y1_plus_x1 = self.y.add(&self.x);
+        let y2_minus_x2 = other.y.sub(&other.x);
+        let y2_plus_x2 = other.y.add(&other.x);
 
-        let e = x1y2.add(&x2y1);
-        let f = self.z.sub(&dt1t2);
-        let g = self.z.add(&dt1t2);
-        let h = y1y2.add(&x1x2);
+        let a = y1_minus_x1.mul(&y2_minus_x2);
+        let b = y1_plus_x1.mul(&y2_plus_x2);
+        let c = self.t.mul(&other.t).mul(&D_TIMES_TWO);
+        let d = self.z.add(&self.z);
+
+        let e = b.sub(&a);
+        let f = d.sub(&c);
+        let g = d.add(&c);
+        let h = b.add(&a);
 
         Point {
             x: e.mul(&f),
@@ -110,6 +181,26 @@ impl Point {
             z: f.mul(&g),
             t: e.mul(&h),
         }
+    }
+
+    #[inline(always)]
+    pub fn neg(&self) -> Self {
+        Point {
+            x: FieldElement::ZERO.sub(&self.x),
+            y: self.y,
+            z: self.z,
+            t: FieldElement::ZERO.sub(&self.t),
+        }
+    }
+
+    #[inline(always)]
+    pub fn sub(&self, other: &Self) -> Self {
+        self.add(&other.neg())
+    }
+
+    #[inline(always)]
+    pub fn sub_affine(&self, other: &Self) -> Self {
+        self.add_affine(&other.neg())
     }
 
     pub fn double(&self) -> Self {
@@ -189,6 +280,34 @@ impl Point {
     }
 
     pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        let cached = PUBKEY_POINT_CACHE.try_with(|cache| {
+            for entry in cache.iter() {
+                if entry.valid && &entry.key == bytes {
+                    return Some(entry.point);
+                }
+            }
+            None
+        }).flatten();
+
+        if let Some(pt) = cached {
+            return Some(pt);
+        }
+
+        let pt = Self::from_bytes_uncached(bytes)?;
+
+        let _ = PUBKEY_POINT_CACHE.try_with(|cache| {
+            let idx = (bytes[0] as usize) % 4;
+            cache[idx] = PubkeyPointCache {
+                key: *bytes,
+                point: pt,
+                valid: true,
+            };
+        });
+
+        Some(pt)
+    }
+
+    fn from_bytes_uncached(bytes: &[u8; 32]) -> Option<Self> {
         let mut y_bytes = *bytes;
         let x_bit = (y_bytes[31] >> 7) & 1;
         y_bytes[31] &= 0x7f;
@@ -260,13 +379,101 @@ impl Point {
         res
     }
 
-    /// Fast double scalar multiplication computing s*B + k*A.
-    /// Uses precomputed RADIX16_B for s*B (zero doublings) and mul_window4 for k*A.
+    /// Interleaved double scalar multiplication computing s*B + k*A in a single shared doubling loop.
+    /// Evaluates both scalars within at most 255 shared curve doublings,
+    /// combining dynamic table of A (width 5, 8 odd multiples) with static affine table of B
+    /// (width 7, 32 odd multiples in ODD_MULTIPLES_B).
     pub fn double_scalar_mul_base_and_point(s: &[u8; 32], a: &Point, k: &[u8; 32]) -> Self {
-        let sb = Point::mul_base(s);
-        let ka = a.mul_window4(k);
-        sb.add(&ka)
+        let slide_a = sliding_window(k, 5);
+        let slide_b = sliding_window(s, 7);
+
+        let mut table_a = [*a; 8];
+        let double_a = a.double();
+        for i in 0..7 {
+            table_a[i + 1] = table_a[i].add(&double_a);
+        }
+
+        let mut i = 255;
+        while i > 0 && slide_a[i] == 0 && slide_b[i] == 0 {
+            i -= 1;
+        }
+
+        let mut res = Point::identity();
+        let mut has_points = false;
+
+        loop {
+            if has_points {
+                res = res.double();
+            }
+
+            let sa = slide_a[i];
+            if sa != 0 {
+                let idx = (sa.abs() as usize) / 2;
+                let pt = &table_a[idx];
+                if !has_points {
+                    res = if sa > 0 { *pt } else { pt.neg() };
+                    has_points = true;
+                } else {
+                    res = if sa > 0 { res.add(pt) } else { res.sub(pt) };
+                }
+            }
+
+            let sb = slide_b[i];
+            if sb != 0 {
+                let idx = (sb.abs() as usize) / 2;
+                let pt = &ODD_MULTIPLES_B[idx];
+                if !has_points {
+                    res = if sb > 0 { *pt } else { pt.neg() };
+                    has_points = true;
+                } else {
+                    res = if sb > 0 { res.add_affine(pt) } else { res.sub_affine(pt) };
+                }
+            }
+
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+
+        res
     }
+}
+
+/// Converts a 256-bit scalar into signed sliding-window representation (wNAF)
+/// with odd non-zero digits in range [-(2^(w-1)-1), 2^(w-1)-1].
+fn sliding_window(scalar: &[u8; 32], windowsize: usize) -> [i8; 256] {
+    let mut r = [0i8; 256];
+    for i in 0..256 {
+        r[i] = ((scalar[i / 8] >> (i % 8)) & 1) as i8;
+    }
+    let m = ((1 << (windowsize - 1)) - 1) as i8;
+    let max_b = (windowsize - 1).min(6);
+    for j in 0..256 {
+        if r[j] == 0 {
+            continue;
+        }
+        let limit = (256 - 1 - j).min(max_b);
+        for b in 1..=limit {
+            let term = r[j + b] << b;
+            if r[j] + term <= m {
+                r[j] += term;
+                r[j + b] = 0;
+            } else if r[j] - term >= -m {
+                r[j] -= term;
+                for k in (j + b)..256 {
+                    if r[k] == 0 {
+                        r[k] = 1;
+                        break;
+                    }
+                    r[k] = 0;
+                }
+            } else if r[j + b] != 0 {
+                break;
+            }
+        }
+    }
+    r
 }
 
 /// Scalar arithmetic modulo L
@@ -382,41 +589,59 @@ impl Scalar {
 }
 
 pub fn sign(private_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
-    let h = blake2b::hash64(private_key);
-    
-    let mut s_bytes = [0u8; 32];
-    s_bytes.copy_from_slice(&h[..32]);
-    s_bytes[0] &= 248;
-    s_bytes[31] &= 63;
-    s_bytes[31] |= 64;
-    
-    let pub_bytes = Point::mul_base(&s_bytes).to_bytes();
-    // Do not reverse
-    let public_key = pub_bytes;
-    
+    let cached = SIGN_KEY_CACHE.try_with(|cache| {
+        for entry in cache.iter() {
+            if entry.valid && &entry.priv_key == private_key {
+                return Some((entry.pub_key, entry.s_bytes, entry.h_prefix));
+            }
+        }
+        None
+    }).flatten();
+
+    let (public_key, s_bytes, h_prefix) = if let Some(c) = cached {
+        c
+    } else {
+        let h = blake2b::hash64(private_key);
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&h[..32]);
+        s[0] &= 248;
+        s[31] &= 63;
+        s[31] |= 64;
+        let pk = Point::mul_base(&s).to_bytes();
+        let mut prefix = [0u8; 32];
+        prefix.copy_from_slice(&h[32..64]);
+
+        let _ = SIGN_KEY_CACHE.try_with(|cache| {
+            let idx = (private_key[0] as usize) % 2;
+            cache[idx] = SigningKeyCache {
+                priv_key: *private_key,
+                pub_key: pk,
+                s_bytes: s,
+                h_prefix: prefix,
+                valid: true,
+            };
+        });
+        (pk, s, prefix)
+    };
+
     let mut hasher = blake2b::Blake2bHasher::new(64);
-    hasher.update(&h[32..64]);
+    hasher.update(&h_prefix);
     hasher.update(message);
     let r_hash = hasher.finalize();
     let r_scalar = Scalar::from_bytes_wide(&r_hash);
-    let r_bytes = Point::mul_base(&r_scalar.to_bytes()).to_bytes();
-    // Do not reverse
-    let r_point = r_bytes;
-    
+    let r_point = Point::mul_base(&r_scalar.to_bytes()).to_bytes();
+
     let mut hasher = blake2b::Blake2bHasher::new(64);
-    hasher.update(&r_point); // Native R
-    hasher.update(&public_key); // Native A
+    hasher.update(&r_point);
+    hasher.update(&public_key);
     hasher.update(message);
     let k_hash = hasher.finalize();
     let k_scalar = Scalar::from_bytes_wide(&k_hash);
-    
-    // S = r + k*s (mod L)
+
     let s_val = Scalar::from_bytes_wide_32(&s_bytes);
     let s_scalar = r_scalar.add(&k_scalar.mul(&s_val));
-    
     let s_bytes_out = s_scalar.to_bytes();
-    // Do not reverse
-    
+
     let mut sig = [0u8; 64];
     sig[..32].copy_from_slice(&r_point);
     sig[32..].copy_from_slice(&s_bytes_out);
@@ -424,6 +649,19 @@ pub fn sign(private_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
 }
 
 pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
+    let cached = SIGN_KEY_CACHE.try_with(|cache| {
+        for entry in cache.iter() {
+            if entry.valid && &entry.priv_key == private_key {
+                return Some(entry.pub_key);
+            }
+        }
+        None
+    }).flatten();
+
+    if let Some(pk) = cached {
+        return pk;
+    }
+
     let h = blake2b::hash64(private_key);
     let mut s = [0u8; 32];
     s.copy_from_slice(&h[..32]);
@@ -431,7 +669,21 @@ pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
     s[31] &= 63;
     s[31] |= 64;
     let pub_key = Point::mul_base(&s).to_bytes();
-    // Do not reverse
+
+    let mut prefix = [0u8; 32];
+    prefix.copy_from_slice(&h[32..64]);
+
+    let _ = SIGN_KEY_CACHE.try_with(|cache| {
+        let idx = (private_key[0] as usize) % 2;
+        cache[idx] = SigningKeyCache {
+            priv_key: *private_key,
+            pub_key,
+            s_bytes: s,
+            h_prefix: prefix,
+            valid: true,
+        };
+    });
+
     pub_key
 }
 

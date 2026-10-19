@@ -178,6 +178,29 @@ impl FieldElement {
         FieldElement(res)
     }
 
+    #[inline(always)]
+    fn reduce_product(r: &[u64; 8]) -> Self {
+        let mut carry = 0u128;
+        let mut res_limbs = [0u64; 4];
+        for i in 0..4 {
+            let term = (r[i + 4] as u128) * 38 + (r[i] as u128) + carry;
+            res_limbs[i] = term as u64;
+            carry = term >> 64;
+        }
+
+        let mut res = FieldElement(res_limbs);
+        if carry > 0 {
+            res = res.add_u64_raw((carry * 38) as u64);
+        }
+
+        let h = res.0[3] >> 63;
+        res.0[3] &= 0x7FFFFFFFFFFFFFFF;
+        if h > 0 {
+            res = res.add_u64_raw(h * 19);
+        }
+        res
+    }
+
     pub fn mul(&self, other: &Self) -> Self {
         let mut r = [0u64; 8];
         for i in 0..4 {
@@ -189,29 +212,44 @@ impl FieldElement {
             }
             r[i + 4] = carry as u64;
         }
-        
-        // Reduction: r = r_lo + r_hi * 2^256
-        // 2^256 = 2 * 2^255 = 2 * (p + 19) = 2p + 38 \equiv 38 \pmod p
-        
-        let mut carry = 0u128;
-        let mut res_limbs = [0u64; 4];
-        for i in 0..4 {
-            let term = (r[i + 4] as u128) * 38 + (r[i] as u128) + carry;
-            res_limbs[i] = term as u64;
-            carry = term >> 64;
-        }
-        
-        let mut res = FieldElement(res_limbs);
-        // The carry here is from 2^256 again
-        if carry > 0 {
-            res = res.add_u64((carry * 38) as u64);
-        }
-        
-        res.reduce()
+        Self::reduce_product(&r)
     }
 
+    /// Dedicated 256-bit squaring using upper-triangular cross products (10M vs 16M).
     pub fn square(&self) -> Self {
-        self.mul(self)
+        let mut r = [0u64; 8];
+        for i in 0..3 {
+            let mut carry = 0u128;
+            for j in (i + 1)..4 {
+                let prod = (self.0[i] as u128) * (self.0[j] as u128) + (r[i + j] as u128) + carry;
+                r[i + j] = prod as u64;
+                carry = prod >> 64;
+            }
+            r[i + 4] = carry as u64;
+        }
+
+        // Shift r left by 1 bit (doubling strictly upper-triangular cross products)
+        let mut carry_bit = 0u64;
+        for i in 0..8 {
+            let new_carry = r[i] >> 63;
+            r[i] = (r[i] << 1) | carry_bit;
+            carry_bit = new_carry;
+        }
+
+        // Add diagonal squares a[i]^2
+        for i in 0..4 {
+            let sq = (self.0[i] as u128) * (self.0[i] as u128);
+            let mut idx = 2 * i;
+            let mut c = sq;
+            while c > 0 && idx < 8 {
+                let s = (r[idx] as u128) + (c as u64 as u128);
+                r[idx] = s as u64;
+                c = (c >> 64) + (s >> 64);
+                idx += 1;
+            }
+        }
+
+        Self::reduce_product(&r)
     }
 
     #[inline(always)]
