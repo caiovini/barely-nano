@@ -91,6 +91,70 @@ impl SignatureChecker {
     }
 
     fn verify_tasks_batched(&self, tasks: alloc::vec::Vec<SignatureTask>) {
+        if tasks.len() == 4 {
+            let mut all_have_account = true;
+            let mut accounts = [rsnano_core::Account::zero(); 4];
+            for i in 0..4 {
+                if let Some(acc) = tasks[i].account {
+                    accounts[i] = acc;
+                } else if let Some(acc) = tasks[i].block.account_field() {
+                    accounts[i] = acc;
+                } else {
+                    all_have_account = false;
+                    break;
+                }
+            }
+
+            if all_have_account {
+                let keys_val = [
+                    accounts[0].as_key(),
+                    accounts[1].as_key(),
+                    accounts[2].as_key(),
+                    accounts[3].as_key(),
+                ];
+                let keys = [
+                    keys_val[0].as_bytes(),
+                    keys_val[1].as_bytes(),
+                    keys_val[2].as_bytes(),
+                    keys_val[3].as_bytes(),
+                ];
+                let hashes = [
+                    tasks[0].block.hash(),
+                    tasks[1].block.hash(),
+                    tasks[2].block.hash(),
+                    tasks[3].block.hash(),
+                ];
+                let msgs = [
+                    hashes[0].as_bytes() as &[u8],
+                    hashes[1].as_bytes() as &[u8],
+                    hashes[2].as_bytes() as &[u8],
+                    hashes[3].as_bytes() as &[u8],
+                ];
+                let sigs_val = [
+                    tasks[0].block.signature(),
+                    tasks[1].block.signature(),
+                    tasks[2].block.signature(),
+                    tasks[3].block.signature(),
+                ];
+                let sigs = [
+                    sigs_val[0].as_bytes(),
+                    sigs_val[1].as_bytes(),
+                    sigs_val[2].as_bytes(),
+                    sigs_val[3].as_bytes(),
+                ];
+
+                let results = rsnano_sha::ed25519::verify_batch_4(keys, msgs, sigs);
+                for i in 0..4 {
+                    tasks[i].result.store(
+                        if results[i] { SignatureResult::Valid as u8 } else { SignatureResult::Invalid as u8 },
+                        Ordering::Release
+                    );
+                    tasks[i].finished.store(true, Ordering::Release);
+                }
+                return;
+            }
+        }
+
         // Graceful sequential fallback for less than 4 tasks or invalid accounts
         for task in tasks {
             let account = if let Some(acc) = task.account {

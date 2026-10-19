@@ -1430,22 +1430,7 @@ fn run_deterministic_block_test(
     uart::print(b"========================================================================\n");
 
     let st = rsnano_sha::blake2b::self_test();
-    uart::print(b"[block-test] blake2b self-test mask (0 = OK): ");
-    uart::print_usize(st as usize);
-    uart::print(b"\n");
-    let (lm, exp0, got0) = rsnano_sha::blake2b::four_way_debug();
-    uart::print(b"[block-test] 4-way lane mismatch mask: ");
-    uart::print_usize(lm as usize);
-    uart::print(b"\n");
-    for i in 0..8 {
-        uart::print(b"[block-test]  w");
-        uart::print_usize(i);
-        uart::print(b" exp=");
-        uart::print_hex(exp0[i] as usize);
-        uart::print(b" got=");
-        uart::print_hex(got0[i] as usize);
-        uart::print(b"\n");
-    }
+    assert_eq!(st, 0, "[block-test] blake2b SIMD self-test failed");
 
     let key = rsnano_core::DEV_GENESIS_KEY.clone();
     let account = key.public_key().as_account();

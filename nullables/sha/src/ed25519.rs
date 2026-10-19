@@ -3,7 +3,7 @@ use crate::curve25519::FieldElement;
 use core::convert::TryInto;
 use core::iter::Iterator;
 use core::option::Option::{self, None, Some};
-use crate::base_table::POW2_B;
+use crate::base_table::RADIX16_B;
 
 /// Point in Extended Coordinates (X, Y, Z, T)
 #[derive(Clone, Copy, Debug)]
@@ -90,8 +90,47 @@ impl Point {
         }
     }
 
+    /// Mixed addition for when other.z == 1 (such as precomputed affine table points).
+    pub fn add_affine(&self, other: &Self) -> Self {
+        let x1y2 = self.x.mul(&other.y);
+        let x2y1 = self.y.mul(&other.x);
+        let y1y2 = self.y.mul(&other.y);
+        let x1x2 = self.x.mul(&other.x);
+        let t1t2 = self.t.mul(&other.t);
+        let dt1t2 = D.mul(&t1t2);
+
+        let e = x1y2.add(&x2y1);
+        let f = self.z.sub(&dt1t2);
+        let g = self.z.add(&dt1t2);
+        let h = y1y2.add(&x1x2);
+
+        Point {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
+    }
+
     pub fn double(&self) -> Self {
-        self.add(self)
+        // Dedicated point doubling for a = -1 (Ed25519) in Extended Coordinates (Hisil et al. 2008)
+        let a = self.x.square();
+        let b = self.y.square();
+        let z2 = self.z.square();
+        let c = z2.add(&z2); // 2 * Z1^2
+        let xy = self.x.mul(&self.y);
+        let e = xy.add(&xy); // 2 * X1 * Y1 (clean, avoids subtractions)
+        let g = b.sub(&a);
+        let f = g.sub(&c);
+        let a_plus_b = a.add(&b);
+        let h = FieldElement::ZERO.sub(&a_plus_b); // -(A + B)
+
+        Point {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
     }
 
     pub fn mul(&self, scalar: &[u8; 32]) -> Self {
@@ -114,33 +153,39 @@ impl Point {
         res
     }
 
-    /// Fast scalar multiplication with the fixed basepoint B using precomputed powers of 2.
-    /// Eliminates all 255 point doublings and performs only set-bit additions.
+    /// Fast scalar multiplication with the fixed basepoint B using precomputed 4-bit window table.
+    /// Eliminates all point doublings and uses mixed affine additions (~60 additions average).
     pub fn mul_base(scalar: &[u8; 32]) -> Self {
         let mut res = Point::identity();
         let mut has_added = false;
-        for i in 0..256 {
-            if (scalar[i / 8] >> (i % 8)) & 1 != 0 {
+        for j in 0..64 {
+            let nibble = ((scalar[j / 2] >> ((j % 2) * 4)) & 0x0F) as usize;
+            if nibble != 0 {
+                let pt = &RADIX16_B[j][nibble - 1];
                 if !has_added {
-                    res = POW2_B[i];
+                    res = *pt;
                     has_added = true;
                 } else {
-                    res = res.add(&POW2_B[i]);
+                    res = res.add_affine(pt);
                 }
             }
         }
         res
     }
 
-    pub fn to_bytes(&self) -> [u8; 32] {
-        let z_inv = self.z.invert();
-        let x = self.x.mul(&z_inv).reduce();
-        let y = self.y.mul(&z_inv).reduce();
+    pub fn to_bytes_with_z_inv(&self, z_inv: &FieldElement) -> [u8; 32] {
+        let x = self.x.mul(z_inv).reduce();
+        let y = self.y.mul(z_inv).reduce();
         let mut bytes = y.to_bytes();
         if (x.0[0] & 1) != 0 {
             bytes[31] |= 0x80;
         }
         bytes
+    }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let z_inv = self.z.invert();
+        self.to_bytes_with_z_inv(&z_inv)
     }
 
     pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
@@ -182,32 +227,45 @@ impl Point {
         })
     }
 
-    pub fn double_scalar_mul_base_and_point(s: &[u8; 32], a: &Point, k: &[u8; 32]) -> Self {
-        let mut res = Point::identity();
-        let mut has_points = false;
-        let b_plus_a = B.add(a);
-        for i in (0..256).rev() {
-            let bit1 = (s[i / 8] >> (i % 8)) & 1;
-            let bit2 = (k[i / 8] >> (i % 8)) & 1;
-            let p = match (bit1, bit2) {
-                (1, 1) => Some(&b_plus_a),
-                (1, 0) => Some(&B),
-                (0, 1) => Some(a),
-                _ => None,
-            };
-            if has_points {
-                res = res.double();
+    /// Scalar multiplication of an arbitrary point using a 4-bit window (Radix-16).
+    pub fn mul_window4(&self, scalar: &[u8; 32]) -> Self {
+        let mut table = [*self; 16];
+        table[0] = Point::identity();
+        if self.z == FieldElement::ONE {
+            for i in 1..15 {
+                table[i + 1] = table[i].add_affine(self);
             }
-            if let Some(pt) = p {
-                if !has_points {
-                    res = *pt;
-                    has_points = true;
+        } else {
+            for i in 1..15 {
+                table[i + 1] = table[i].add(self);
+            }
+        }
+
+        let mut res = Point::identity();
+        let mut has_added = false;
+        for j in (0..64).rev() {
+            let nibble = ((scalar[j / 2] >> ((j % 2) * 4)) & 0x0F) as usize;
+            if has_added {
+                res = res.double().double().double().double();
+            }
+            if nibble != 0 {
+                if !has_added {
+                    res = table[nibble];
+                    has_added = true;
                 } else {
-                    res = res.add(pt);
+                    res = res.add(&table[nibble]);
                 }
             }
         }
         res
+    }
+
+    /// Fast double scalar multiplication computing s*B + k*A.
+    /// Uses precomputed RADIX16_B for s*B (zero doublings) and mul_window4 for k*A.
+    pub fn double_scalar_mul_base_and_point(s: &[u8; 32], a: &Point, k: &[u8; 32]) -> Self {
+        let sb = Point::mul_base(s);
+        let ka = a.mul_window4(k);
+        sb.add(&ka)
     }
 }
 
@@ -436,6 +494,7 @@ pub fn verify_batch_4(
         
         let k_hashes = blake2b::hash64_batch_4(payload_refs);
         
+        let mut sb_minus_ka = [Point::identity(); 4];
         for i in 0..4 {
             let k_bytes = Scalar::from_bytes_wide(&k_hashes[i]).to_bytes();
             
@@ -449,8 +508,18 @@ pub fn verify_batch_4(
                 t: FieldElement::ZERO.sub(&points_a[i].t),
             };
             
-            let sb_minus_ka = Point::double_scalar_mul_base_and_point(&s_le, &neg_a, &k_bytes);
-            results[i] = sb_minus_ka.to_bytes() == signatures[i][..32];
+            sb_minus_ka[i] = Point::double_scalar_mul_base_and_point(&s_le, &neg_a, &k_bytes);
+        }
+
+        let z_invs = FieldElement::batch_invert_4([
+            &sb_minus_ka[0].z,
+            &sb_minus_ka[1].z,
+            &sb_minus_ka[2].z,
+            &sb_minus_ka[3].z,
+        ]);
+
+        for i in 0..4 {
+            results[i] = sb_minus_ka[i].to_bytes_with_z_inv(&z_invs[i]) == signatures[i][..32];
         }
     } else {
         // Safe sequential fallback

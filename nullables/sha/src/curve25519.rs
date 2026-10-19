@@ -261,6 +261,41 @@ impl FieldElement {
 
         t6.sqn(1).mul(self).sqn(1)
     }
+
+    /// Invert 4 field elements simultaneously using Montgomery's trick.
+    /// Uses 1 inversion and 9 multiplications instead of 4 full inversions.
+    pub fn batch_invert_4(elements: [&FieldElement; 4]) -> [FieldElement; 4] {
+        if elements[0] == &FieldElement::ZERO
+            || elements[1] == &FieldElement::ZERO
+            || elements[2] == &FieldElement::ZERO
+            || elements[3] == &FieldElement::ZERO
+        {
+            return [
+                elements[0].invert(),
+                elements[1].invert(),
+                elements[2].invert(),
+                elements[3].invert(),
+            ];
+        }
+
+        let c0 = *elements[0];
+        let c1 = c0.mul(elements[1]);
+        let c2 = c1.mul(elements[2]);
+        let c3 = c2.mul(elements[3]);
+
+        let mut inv = c3.invert();
+
+        let inv3 = inv.mul(&c2);
+        inv = inv.mul(elements[3]);
+
+        let inv2 = inv.mul(&c1);
+        inv = inv.mul(elements[2]);
+
+        let inv1 = inv.mul(&c0);
+        let inv0 = inv.mul(elements[1]);
+
+        [inv0, inv1, inv2, inv3]
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +318,20 @@ mod tests {
         assert_eq!(res.0[1], 0xFFFFFFFFFFFFFFFF);
         assert_eq!(res.0[2], 0xFFFFFFFFFFFFFFFF);
         assert_eq!(res.0[3], 0x7FFFFFFFFFFFFFFF);
+    }
+
+    #[test]
+    fn test_batch_invert_4() {
+        let a = FieldElement([3, 0, 0, 0]);
+        let b = FieldElement([7, 0, 0, 0]);
+        let c = FieldElement([11, 0, 0, 0]);
+        let d = FieldElement([13, 0, 0, 0]);
+
+        let invs = FieldElement::batch_invert_4([&a, &b, &c, &d]);
+
+        assert_eq!(a.mul(&invs[0]).reduce(), FieldElement::ONE);
+        assert_eq!(b.mul(&invs[1]).reduce(), FieldElement::ONE);
+        assert_eq!(c.mul(&invs[2]).reduce(), FieldElement::ONE);
+        assert_eq!(d.mul(&invs[3]).reduce(), FieldElement::ONE);
     }
 }
