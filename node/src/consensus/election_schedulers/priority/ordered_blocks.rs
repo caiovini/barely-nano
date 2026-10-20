@@ -61,6 +61,10 @@ impl OrderedBlocks {
         self.hashes.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+    }
+
     pub fn contains(&self, hash: &BlockHash) -> bool {
         self.hashes.contains(hash)
     }

@@ -95,6 +95,11 @@ impl Executor {
         }
     }
 
+    #[inline(always)]
+    pub fn has_pending_tasks(&self) -> bool {
+        self.spawned_count.load(Ordering::Relaxed) != self.completed_count.load(Ordering::Relaxed)
+    }
+
     pub fn spawn<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,

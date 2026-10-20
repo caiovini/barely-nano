@@ -74,6 +74,28 @@ impl PrecomputedPoint {
     };
 }
 
+static mut RADIX16_PRECOMP: [[PrecomputedPoint; 15]; 64] = [[PrecomputedPoint::IDENTITY; 15]; 64];
+static RADIX16_PRECOMP_INIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn init_radix16_precomp() {
+    if RADIX16_PRECOMP_INIT.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    unsafe {
+        for j in 0..64 {
+            for i in 0..15 {
+                let pt = &RADIX16_B[j][i];
+                RADIX16_PRECOMP[j][i] = PrecomputedPoint {
+                    yplusx: pt.y.add(&pt.x),
+                    yminusx: pt.y.sub(&pt.x),
+                    xy2d: pt.t.mul(&D_TIMES_TWO),
+                };
+            }
+        }
+    }
+    RADIX16_PRECOMP_INIT.store(true, core::sync::atomic::Ordering::Release);
+}
+
 /// Point in standard Projective Coordinates (X : Y : Z)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProjectivePoint {
@@ -306,6 +328,54 @@ impl Point {
         }
     }
 
+    /// Fast mixed addition with a PrecomputedPoint (7M, 0 additions on table point).
+    #[inline(always)]
+    pub fn add_precomputed(&self, precomp: &PrecomputedPoint) -> Self {
+        let y1_minus_x1 = self.y.sub(&self.x);
+        let y1_plus_x1 = self.y.add(&self.x);
+
+        let a = y1_minus_x1.mul(&precomp.yminusx);
+        let b = y1_plus_x1.mul(&precomp.yplusx);
+        let c = self.t.mul(&precomp.xy2d);
+        let d = self.z.add(&self.z);
+
+        let e = b.sub(&a);
+        let f = d.sub(&c);
+        let g = d.add(&c);
+        let h = b.add(&a);
+
+        Point {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: e.mul(&h),
+        }
+    }
+
+    /// Final step addition skipping t coordinate computation when only (X, Y, Z) are needed (6M).
+    #[inline(always)]
+    pub fn add_precomputed_last(&self, precomp: &PrecomputedPoint) -> Self {
+        let y1_minus_x1 = self.y.sub(&self.x);
+        let y1_plus_x1 = self.y.add(&self.x);
+
+        let a = y1_minus_x1.mul(&precomp.yminusx);
+        let b = y1_plus_x1.mul(&precomp.yplusx);
+        let c = self.t.mul(&precomp.xy2d);
+        let d = self.z.add(&self.z);
+
+        let e = b.sub(&a);
+        let f = d.sub(&c);
+        let g = d.add(&c);
+        let h = b.add(&a);
+
+        Point {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+            t: FieldElement::ZERO,
+        }
+    }
+
     #[inline(always)]
     pub fn neg(&self) -> Self {
         Point {
@@ -404,19 +474,35 @@ impl Point {
     }
 
     /// Fast scalar multiplication with the fixed basepoint B using precomputed 4-bit window table.
-    /// Eliminates all point doublings and uses mixed affine additions (~60 additions average).
+    /// Eliminates all point doublings and uses precomputed mixed additions (~60 additions average).
     pub fn mul_base(scalar: &[u8; 32]) -> Self {
+        if !RADIX16_PRECOMP_INIT.load(core::sync::atomic::Ordering::Acquire) {
+            init_radix16_precomp();
+        }
+        let mut last_j = 0;
+        for j in (0..64).rev() {
+            if ((scalar[j / 2] >> ((j % 2) * 4)) & 0x0F) != 0 {
+                last_j = j;
+                break;
+            }
+        }
+
         let mut res = Point::identity();
         let mut has_added = false;
         for j in 0..64 {
             let nibble = ((scalar[j / 2] >> ((j % 2) * 4)) & 0x0F) as usize;
             if nibble != 0 {
-                let pt = &RADIX16_B[j][nibble - 1];
+                let idx = nibble - 1;
                 if !has_added {
-                    res = *pt;
+                    res = RADIX16_B[j][idx];
                     has_added = true;
                 } else {
-                    res = res.add_affine(pt);
+                    let precomp = unsafe { &RADIX16_PRECOMP[j][idx] };
+                    if j == last_j {
+                        res = res.add_precomputed_last(precomp);
+                    } else {
+                        res = res.add_precomputed(precomp);
+                    }
                 }
             }
         }

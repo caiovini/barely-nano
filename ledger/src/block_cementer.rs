@@ -67,7 +67,7 @@ impl<'a> BlockCementer<'a> {
             if !pushed {
                 stack.pop_back();
                 visited.insert(hash);
-                if !self.is_confirmed(&hash) {
+                if !self.is_block_confirmed(&block) {
                     let conf_height = ConfirmationHeightInfo::new(block.height(), block.hash());
 
                     self.store
@@ -96,6 +96,15 @@ impl<'a> BlockCementer<'a> {
         result
     }
 
+    #[inline(always)]
+    fn is_block_confirmed(&self, block: &SavedBlock) -> bool {
+        if let Some(info) = self.store.confirmation_height.get(&block.account()) {
+            block.height() <= info.height
+        } else {
+            false
+        }
+    }
+
     fn is_confirmed(&self, hash: &BlockHash) -> bool {
         if self.store.pruned.exists(hash) {
             return true;
@@ -103,10 +112,6 @@ impl<'a> BlockCementer<'a> {
         let Some(block) = self.store.block.get(hash) else {
             return false;
         };
-        let Some(info) = self.store.confirmation_height.get(&block.account()) else {
-            return false;
-        };
-
-        block.height() <= info.height
+        self.is_block_confirmed(&block)
     }
 }

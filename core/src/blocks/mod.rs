@@ -265,7 +265,27 @@ impl Block {
     }
 
     pub fn verify_with_key(&self, pub_key: &PublicKey) -> anyhow::Result<()> {
-        self.as_block().verify_signature(pub_key)
+        match self {
+            Block::State(b) => {
+                if b.is_signature_verified() {
+                    return Ok(());
+                }
+                let res = pub_key.verify(b.hash().as_bytes(), b.signature());
+                if res.is_ok() {
+                    b.set_signature_verified(true);
+                }
+                res
+            }
+            _ => self.as_block().verify_signature(pub_key),
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_signature_verified(&self) -> bool {
+        match self {
+            Block::State(b) => b.is_signature_verified(),
+            _ => false,
+        }
     }
 
     pub fn deserialize(stream: &mut dyn Stream) -> anyhow::Result<Block> {

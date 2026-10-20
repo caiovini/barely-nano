@@ -44,60 +44,69 @@ impl SignatureChecker {
     }
 
     pub fn help_verify(&self) -> bool {
-        let tasks = {
+        let mut tasks: [Option<SignatureTask>; 4] = [None, None, None, None];
+        let mut count = 0;
+        {
             let mut lock = self.tasks.lock();
-            let mut vec = alloc::vec::Vec::with_capacity(4);
-            while vec.len() < 4 {
+            if lock.is_empty() {
+                return false;
+            }
+            while count < 4 {
                 if let Some(t) = lock.pop_front() {
-                    vec.push(t);
+                    tasks[count] = Some(t);
+                    count += 1;
                 } else {
                     break;
                 }
             }
-            vec
-        };
+        }
         
-        if tasks.is_empty() {
+        if count == 0 {
             return false;
         }
         
-        self.verify_tasks_batched(tasks);
+        self.verify_tasks_slice(&mut tasks[..count]);
         true
     }
 
     pub fn try_help_verify(&self) -> bool {
-        let tasks = {
+        let mut tasks: [Option<SignatureTask>; 4] = [None, None, None, None];
+        let mut count = 0;
+        {
             if let Some(mut lock) = self.tasks.try_lock() {
-                let mut vec = alloc::vec::Vec::with_capacity(4);
-                while vec.len() < 4 {
+                if lock.is_empty() {
+                    return false;
+                }
+                while count < 4 {
                     if let Some(t) = lock.pop_front() {
-                        vec.push(t);
+                        tasks[count] = Some(t);
+                        count += 1;
                     } else {
                         break;
                     }
                 }
-                vec
             } else {
-                alloc::vec::Vec::new()
+                return false;
             }
-        };
+        }
         
-        if tasks.is_empty() {
+        if count == 0 {
             return false;
         }
         
-        self.verify_tasks_batched(tasks);
+        self.verify_tasks_slice(&mut tasks[..count]);
         true
     }
 
-    fn verify_tasks_batched(&self, tasks: alloc::vec::Vec<SignatureTask>) {
+    fn verify_tasks_slice(&self, tasks: &mut [Option<SignatureTask>]) {
         if tasks.len() == 4 {
             let mut all_have_account = true;
             let mut accounts = [rsnano_core::Account::zero(); 4];
             for i in 0..4 {
-                if let Some(acc) = tasks[i].account {
+                let t = tasks[i].as_ref().unwrap();
+                if let Some(acc) = t.account {
                     accounts[i] = acc;
-                } else if let Some(acc) = tasks[i].block.account_field() {
+                } else if let Some(acc) = t.block.account_field() {
                     accounts[i] = acc;
                 } else {
                     all_have_account = false;
@@ -106,6 +115,11 @@ impl SignatureChecker {
             }
 
             if all_have_account {
+                let t0 = tasks[0].as_ref().unwrap();
+                let t1 = tasks[1].as_ref().unwrap();
+                let t2 = tasks[2].as_ref().unwrap();
+                let t3 = tasks[3].as_ref().unwrap();
+
                 let keys_val = [
                     accounts[0].as_key(),
                     accounts[1].as_key(),
@@ -119,10 +133,10 @@ impl SignatureChecker {
                     keys_val[3].as_bytes(),
                 ];
                 let hashes = [
-                    tasks[0].block.hash(),
-                    tasks[1].block.hash(),
-                    tasks[2].block.hash(),
-                    tasks[3].block.hash(),
+                    t0.block.hash(),
+                    t1.block.hash(),
+                    t2.block.hash(),
+                    t3.block.hash(),
                 ];
                 let msgs = [
                     hashes[0].as_bytes() as &[u8],
@@ -131,10 +145,10 @@ impl SignatureChecker {
                     hashes[3].as_bytes() as &[u8],
                 ];
                 let sigs_val = [
-                    tasks[0].block.signature(),
-                    tasks[1].block.signature(),
-                    tasks[2].block.signature(),
-                    tasks[3].block.signature(),
+                    t0.block.signature(),
+                    t1.block.signature(),
+                    t2.block.signature(),
+                    t3.block.signature(),
                 ];
                 let sigs = [
                     sigs_val[0].as_bytes(),
@@ -145,33 +159,36 @@ impl SignatureChecker {
 
                 let results = rsnano_sha::ed25519::verify_batch_4(keys, msgs, sigs);
                 for i in 0..4 {
-                    tasks[i].result.store(
+                    let t = tasks[i].as_ref().unwrap();
+                    t.result.store(
                         if results[i] { SignatureResult::Valid as u8 } else { SignatureResult::Invalid as u8 },
                         Ordering::Release
                     );
-                    tasks[i].finished.store(true, Ordering::Release);
+                    t.finished.store(true, Ordering::Release);
                 }
                 return;
             }
         }
 
         // Graceful sequential fallback for less than 4 tasks or invalid accounts
-        for task in tasks {
-            let account = if let Some(acc) = task.account {
-                acc
-            } else if let Some(acc) = task.block.account_field() {
-                acc
-            } else {
-                task.finished.store(true, Ordering::Release);
-                continue;
-            };
+        for opt in tasks.iter_mut() {
+            if let Some(task) = opt.take() {
+                let account = if let Some(acc) = task.account {
+                    acc
+                } else if let Some(acc) = task.block.account_field() {
+                    acc
+                } else {
+                    task.finished.store(true, Ordering::Release);
+                    continue;
+                };
 
-            let valid = task.block.verify_with_key(&account.as_key()).is_ok();
-            task.result.store(
-                if valid { SignatureResult::Valid as u8 } else { SignatureResult::Invalid as u8 },
-                Ordering::Release
-            );
-            task.finished.store(true, Ordering::Release);
+                let valid = task.block.verify_with_key(&account.as_key()).is_ok();
+                task.result.store(
+                    if valid { SignatureResult::Valid as u8 } else { SignatureResult::Invalid as u8 },
+                    Ordering::Release
+                );
+                task.finished.store(true, Ordering::Release);
+            }
         }
     }
 

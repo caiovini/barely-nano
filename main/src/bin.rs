@@ -859,9 +859,10 @@ fn run_rpc_worker_loop(
         let mtime = kernel_common::clint::mtime();
         {
             let _intr = kernel_common::uart::InterruptGuard::new();
-            let mut ctx = kernel_common::net::NET.lock();
-            if let Some(ref mut ctx_val) = *ctx {
-                handle_rpc_server(ctx_val, node_arc.clone());
+            if let Some(mut ctx) = kernel_common::net::NET.try_lock() {
+                if let Some(ref mut ctx_val) = *ctx {
+                    handle_rpc_server(ctx_val, node_arc.clone());
+                }
             }
         }
 
@@ -880,16 +881,25 @@ fn run_rpc_worker_loop(
             }
         }
 
-        node_arc.signature_checker.try_help_verify();
-        if !exec.run_once(hart_id) {
-            core::hint::spin_loop();
+        let mut worked_sig = false;
+        for _ in 0..8 {
+            if node_arc.signature_checker.try_help_verify() {
+                worked_sig = true;
+            } else {
+                break;
+            }
+        }
+
+        if !worked_sig {
+            if !exec.run_once(hart_id) {
+                for _ in 0..1000 {
+                    core::hint::spin_loop();
+                }
+            }
+        } else {
+            let _ = exec.run_once(hart_id);
         }
         iterations += 1;
-
-        // Pacing: Throttle Hart 4 RPC loop to resolve lock starvation of NET.lock
-        for _ in 0..5000 {
-            core::hint::spin_loop();
-        }
     }
 }
 
@@ -961,7 +971,8 @@ fn run_block_processor_loop(
         if node_arc.block_processor.total_queue_len() > 0 {
             node_arc.block_processor.run_once();
 
-            if mtime - last_flush > seconds(5) {
+            // Fallback flush (Hart 6 performs asynchronous background shard flushing)
+            if mtime - last_flush > seconds(30) {
                 for i in 0..kernel_common::storage::SHARD_COUNT {
                     if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
                         if let Some(btree) = btree_guard.as_mut() {
@@ -977,7 +988,11 @@ fn run_block_processor_loop(
         }
         node_arc.confirming_set.run_once();
 
-        node_arc.signature_checker.try_help_verify();
+        for _ in 0..4 {
+            if !node_arc.signature_checker.try_help_verify() {
+                break;
+            }
+        }
         if !exec.run_once(hart_id) {
             core::hint::spin_loop();
         }
@@ -1249,17 +1264,30 @@ fn run_monitor_loop(
             last_tick = mtime;
         }
 
-        if !exec.run_once(hart_id) {
-            // Aggressive throttle for the monitor hart to free up system bus
-            for _ in 0..5000 {
-                core::hint::spin_loop();
+        let mut worked_sig = false;
+        for _ in 0..8 {
+            if node_mon.signature_checker.try_help_verify() {
+                worked_sig = true;
+            } else {
+                break;
             }
         }
-        node_mon.signature_checker.try_help_verify();
-        iterations += 1;
-        for _ in 0..1000 {
-            core::hint::spin_loop();
+
+        if !worked_sig {
+            if !exec.run_once(hart_id) {
+                // Aggressive throttle when completely idle to free up system bus
+                for _ in 0..2000 {
+                    core::hint::spin_loop();
+                }
+            } else {
+                for _ in 0..500 {
+                    core::hint::spin_loop();
+                }
+            }
+        } else {
+            let _ = exec.run_once(hart_id);
         }
+        iterations += 1;
     }
 }
 
@@ -1303,8 +1331,15 @@ fn run_heavy_io_loop(
             last_bootstrap_tick = mtime;
         }
 
-        if mtime - last_flush > seconds(60) {
-            kernel_common::storage::flush_all_shards();
+        // Asynchronous background flush for all B-Tree storage shards
+        if mtime - last_flush > seconds(3) {
+            for i in 0..kernel_common::storage::SHARD_COUNT {
+                if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
+                    if let Some(btree) = btree_guard.as_mut() {
+                        let _ = btree.flush();
+                    }
+                }
+            }
             last_flush = mtime;
         }
 
@@ -1325,24 +1360,36 @@ fn run_heavy_io_loop(
             }
         }
 
+        let mut worked_sig = false;
+        for _ in 0..8 {
+            if node_arc.signature_checker.try_help_verify() {
+                worked_sig = true;
+            } else {
+                break;
+            }
+        }
+
         for _ in 0..16 {
             if !exec.run_once(hart_id) {
-                core::hint::spin_loop();
                 break;
             }
         }
 
         iterations += 1;
-        core::hint::spin_loop();
+        if !worked_sig {
+            core::hint::spin_loop();
+        }
     }
 }
 
 #[cfg(feature = "block-test")]
 fn drain_async_events(exec: &kernel_common::async_rt::Executor) {
-    for h in 1..8 {
-        let len = exec.local_queues[h].lock().len();
-        for _ in 0..len {
-            exec.run_once(h);
+    for _ in 0..4 {
+        for h in 1..8 {
+            let len = exec.local_queues[h].lock().len();
+            for _ in 0..len {
+                exec.run_once(h);
+            }
         }
     }
 }
@@ -1431,6 +1478,7 @@ fn run_deterministic_block_test(
 
     let st = rsnano_sha::blake2b::self_test();
     assert_eq!(st, 0, "[block-test] blake2b SIMD self-test failed");
+    rsnano_sha::ed25519::init_radix16_precomp();
 
     let key = rsnano_core::DEV_GENESIS_KEY.clone();
     let account = key.public_key().as_account();
@@ -1557,64 +1605,112 @@ fn run_deterministic_block_test(
     uart::print(b"\n");
 
     // -------------------------------------------------------------------------
-    // Phase 2: Multi-Block (64 Blocks) Deterministic Chain Benchmark
+    // Phase 2: Multi-Block (64 Blocks) Deterministic Batch Pipeline Benchmark
     // -------------------------------------------------------------------------
     const BATCH_COUNT: u64 = 64;
     let mut batch_pow_ticks = 0u64;
     let mut batch_pow_iters = 0u64;
-    let mut batch_s1 = 0u64;
-    let mut batch_s2 = 0u64;
-    let mut batch_s3 = 0u64;
-    let mut batch_s4 = 0u64;
-    let mut batch_s5 = 0u64;
 
+    // Setup: Precompute deterministic PoW nonces for all blocks in the chain
+    let mut works = alloc::vec::Vec::with_capacity(BATCH_COUNT as usize);
+    let mut setup_prev = prev_hash;
+    let mut setup_bal = balance;
     for _ in 0..BATCH_COUNT {
         kernel_common::watchdog::kick();
         let (b_work, b_pow_t, b_pow_i) = generate_deterministic_pow(
-            &rsnano_core::Root::from(prev_hash),
+            &rsnano_core::Root::from(setup_prev),
             threshold,
             &mut nonce_state,
         );
         batch_pow_ticks += b_pow_t;
         batch_pow_iters += b_pow_i;
-        balance = balance - rsnano_core::Amount::raw(1);
+        works.push(b_work);
 
-        let b0 = kernel_common::clint::mtime_raw();
+        setup_bal = setup_bal - rsnano_core::Amount::raw(1);
+        let blk: rsnano_core::Block = rsnano_core::StateBlockArgs {
+            key: &key,
+            previous: setup_prev,
+            representative: rep,
+            balance: setup_bal,
+            link,
+            work: b_work,
+        }
+        .into();
+        setup_prev = blk.hash();
+    }
+
+    // Stage 1: Batch Block Creation (Construct + Blake2b Hash + Ed25519 Sign for all blocks)
+    let mut blocks = alloc::vec::Vec::with_capacity(BATCH_COUNT as usize);
+    let mut hashes = alloc::vec::Vec::with_capacity(BATCH_COUNT as usize);
+    let s1_start = kernel_common::clint::mtime_raw();
+    for i in 0..BATCH_COUNT as usize {
+        balance = balance - rsnano_core::Amount::raw(1);
         let b_block: rsnano_core::Block = rsnano_core::StateBlockArgs {
             key: &key,
             previous: prev_hash,
             representative: rep,
             balance,
             link,
-            work: b_work,
+            work: works[i],
         }
         .into();
         let b_hash = b_block.hash();
-        let b1 = kernel_common::clint::mtime_raw();
+        prev_hash = b_hash;
+        hashes.push(b_hash);
+        blocks.push(b_block);
+    }
+    let s1_end = kernel_common::clint::mtime_raw();
+    let batch_s1 = s1_end.wrapping_sub(s1_start);
 
-        let b_pow_ok = node.network_params.work.validate_entry_block(&b_block);
+    // Stage 2: Batch Entry PoW Validation (Difficulty threshold verification for all blocks)
+    let s2_start = kernel_common::clint::mtime_raw();
+    for b in &blocks {
+        let b_pow_ok = node.network_params.work.validate_entry_block(b);
         assert!(b_pow_ok, "[block-test] Batch entry PoW validation failed");
-        let b2 = kernel_common::clint::mtime_raw();
+    }
+    let s2_end = kernel_common::clint::mtime_raw();
+    let batch_s2 = s2_end.wrapping_sub(s2_start);
 
+    // Stage 3: BlockProcessor Ingestion (True Batch Processing & Ledger Insertion)
+    let s3_start = kernel_common::clint::mtime_raw();
+    for b in &blocks {
         let b_ctx = Arc::new(rsnano_node::block_processing::BlockContext::new(
-            b_block,
+            b.clone(),
             rsnano_node::block_processing::BlockSource::Local,
             rsnano_network::ChannelId::LOOPBACK,
         ));
         assert!(node.block_processor.push(b_ctx));
-        node.block_processor.run_once();
-        assert!(node.block_exists(&b_hash));
-        let b3 = kernel_common::clint::mtime_raw();
+    }
+    node.block_processor.run_once();
+    let s3_end = kernel_common::clint::mtime_raw();
+    let batch_s3 = s3_end.wrapping_sub(s3_start);
 
+    for h in &hashes {
+        assert!(node.block_exists(h), "[block-test] Batch block missing from ledger");
+    }
+
+    // Stage 4 & 5: Consensus (Election Schedulers, Bundled Final Vote, Quorum & Cementation)
+    // Create a single bundled final vote containing all hashes in the batch (Nano protocol max: 255 hashes)
+    let vote_t0 = kernel_common::clint::mtime_raw();
+    let bundled_vote = Arc::new(rsnano_core::Vote::new_final(&key, hashes.clone()));
+    let vote_t1 = kernel_common::clint::mtime_raw();
+    let mut batch_s4 = 0u64;
+    let mut batch_s5 = vote_t1.wrapping_sub(vote_t0);
+
+    for i in 0..BATCH_COUNT as usize {
+        kernel_common::watchdog::kick();
+
+        let t4_0 = kernel_common::clint::mtime_raw();
         drain_async_events(exec);
         node.election_schedulers.run_once();
         drain_async_events(exec);
-        assert!(node.is_active_hash(&b_hash));
-        let b4 = kernel_common::clint::mtime_raw();
+        assert!(node.is_active_hash(&hashes[i]));
+        let t4_1 = kernel_common::clint::mtime_raw();
+        batch_s4 += t4_1.wrapping_sub(t4_0);
 
-        let b_vote = Arc::new(rsnano_core::Vote::new_final(&key, alloc::vec![b_hash]));
+        let t5_0 = kernel_common::clint::mtime_raw();
         assert!(node.vote_processor_queue.enqueue(
-            b_vote,
+            bundled_vote.clone(),
             None,
             rsnano_core::VoteSource::Live,
             None,
@@ -1623,15 +1719,9 @@ fn run_deterministic_block_test(
         drain_async_events(exec);
         node.confirming_set.run_once();
         drain_async_events(exec);
-        assert!(node.block_confirmed(&b_hash));
-        let b5 = kernel_common::clint::mtime_raw();
-
-        prev_hash = b_hash;
-        batch_s1 += b1.wrapping_sub(b0);
-        batch_s2 += b2.wrapping_sub(b1);
-        batch_s3 += b3.wrapping_sub(b2);
-        batch_s4 += b4.wrapping_sub(b3);
-        batch_s5 += b5.wrapping_sub(b4);
+        assert!(node.block_confirmed(&hashes[i]));
+        let t5_1 = kernel_common::clint::mtime_raw();
+        batch_s5 += t5_1.wrapping_sub(t5_0);
     }
 
     let f0 = kernel_common::clint::mtime_raw();

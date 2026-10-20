@@ -67,114 +67,117 @@ impl FieldElement {
 
     #[inline(always)]
     pub fn add_u64(&self, val: u64) -> Self {
-        let (r0, c) = self.0[0].overflowing_add(val);
-        let (r1, c) = self.0[1].overflowing_add(c as u64);
-        let (r2, c) = self.0[2].overflowing_add(c as u64);
-        let (r3, c) = self.0[3].overflowing_add(c as u64);
-        
-        let mut res = FieldElement([r0, r1, r2, r3]);
-        if c {
-            res = res.add_u64_raw(38);
-        }
-        res
+        let c0 = (self.0[0] as u128) + (val as u128);
+        let c1 = (self.0[1] as u128) + (c0 >> 64);
+        let c2 = (self.0[2] as u128) + (c1 >> 64);
+        let c3 = (self.0[3] as u128) + (c2 >> 64);
+
+        let carry = (c3 >> 64) as u64;
+        let r0 = c0 as u64;
+        let r1 = c1 as u64;
+        let r2 = c2 as u64;
+        let r3 = c3 as u64;
+
+        let c0_red = (r0 as u128) + ((carry * 38) as u128);
+        let c1_red = (r1 as u128) + (c0_red >> 64);
+        let c2_red = (r2 as u128) + (c1_red >> 64);
+        let c3_red = (r3 as u128) + (c2_red >> 64);
+
+        FieldElement([c0_red as u64, c1_red as u64, c2_red as u64, c3_red as u64])
     }
 
-    #[inline(always)]
-    fn add_u64_raw(&self, val: u64) -> Self {
-        let (r0, c) = self.0[0].overflowing_add(val);
-        let (r1, c) = self.0[1].overflowing_add(c as u64);
-        let (r2, c) = self.0[2].overflowing_add(c as u64);
-        let (r3, _) = self.0[3].overflowing_add(c as u64);
-        FieldElement([r0, r1, r2, r3])
-    }
 
     #[inline(always)]
     pub fn add(&self, other: &Self) -> Self {
-        let (r0, c0) = self.0[0].overflowing_add(other.0[0]);
-        let (r1_t, c1_a) = self.0[1].overflowing_add(other.0[1]);
-        let (r1, c1_b) = r1_t.overflowing_add(c0 as u64);
-        let c1 = c1_a | c1_b;
+        let c0 = (self.0[0] as u128) + (other.0[0] as u128);
+        let c1 = (self.0[1] as u128) + (other.0[1] as u128) + (c0 >> 64);
+        let c2 = (self.0[2] as u128) + (other.0[2] as u128) + (c1 >> 64);
+        let c3 = (self.0[3] as u128) + (other.0[3] as u128) + (c2 >> 64);
 
-        let (r2_t, c2_a) = self.0[2].overflowing_add(other.0[2]);
-        let (r2, c2_b) = r2_t.overflowing_add(c1 as u64);
-        let c2 = c2_a | c2_b;
+        let carry = (c3 >> 64) as u64;
+        let r0 = c0 as u64;
+        let r1 = c1 as u64;
+        let r2 = c2 as u64;
+        let r3 = c3 as u64;
 
-        let (r3_t, c3_a) = self.0[3].overflowing_add(other.0[3]);
-        let (r3, c3_b) = r3_t.overflowing_add(c2 as u64);
-        let c3 = c3_a | c3_b;
+        let c0_red = (r0 as u128) + ((carry * 38) as u128);
+        let c1_red = (r1 as u128) + (c0_red >> 64);
+        let c2_red = (r2 as u128) + (c1_red >> 64);
+        let c3_red = (r3 as u128) + (c2_red >> 64);
 
-        let mut fe = FieldElement([r0, r1, r2, r3]);
-        if c3 {
-            fe = fe.add_u64_raw(38);
-        }
-        fe
+        FieldElement([c0_red as u64, c1_red as u64, c2_red as u64, c3_red as u64])
     }
 
     #[inline(always)]
     pub fn sub(&self, other: &Self) -> Self {
-        let (r0, b0) = self.0[0].overflowing_sub(other.0[0]);
-        let (r1_t, b1_a) = self.0[1].overflowing_sub(other.0[1]);
-        let (r1, b1_b) = r1_t.overflowing_sub(b0 as u64);
-        let b1 = b1_a | b1_b;
+        let b0 = ((self.0[0] as u128) | (1 << 64)) - (other.0[0] as u128);
+        let b1 = ((self.0[1] as u128) | (1 << 64)) - (other.0[1] as u128) + (b0 >> 64) - 1;
+        let b2 = ((self.0[2] as u128) | (1 << 64)) - (other.0[2] as u128) + (b1 >> 64) - 1;
+        let b3 = ((self.0[3] as u128) | (1 << 64)) - (other.0[3] as u128) + (b2 >> 64) - 1;
 
-        let (r2_t, b2_a) = self.0[2].overflowing_sub(other.0[2]);
-        let (r2, b2_b) = r2_t.overflowing_sub(b1 as u64);
-        let b2 = b2_a | b2_b;
+        let borrow = 1 - (b3 >> 64) as u64;
+        let r0 = b0 as u64;
+        let r1 = b1 as u64;
+        let r2 = b2 as u64;
+        let r3 = b3 as u64;
 
-        let (r3_t, b3_a) = self.0[3].overflowing_sub(other.0[3]);
-        let (r3, b3_b) = r3_t.overflowing_sub(b2 as u64);
-        let b3 = b3_a | b3_b;
+        let b0_red = ((r0 as u128) | (1 << 64)) - ((borrow * 38) as u128);
+        let b1_red = ((r1 as u128) | (1 << 64)) + (b0_red >> 64) - 1;
+        let b2_red = ((r2 as u128) | (1 << 64)) + (b1_red >> 64) - 1;
+        let b3_red = ((r3 as u128) | (1 << 64)) + (b2_red >> 64) - 1;
 
-        let mut fe = FieldElement([r0, r1, r2, r3]);
-        if b3 {
-            fe = fe.sub_u64_raw(38);
-        }
-        fe
+        FieldElement([b0_red as u64, b1_red as u64, b2_red as u64, b3_red as u64])
     }
     
     #[inline(always)]
     pub fn sub_u64(&self, val: u64) -> Self {
-        let (r0, b) = self.0[0].overflowing_sub(val);
-        let (r1, b) = self.0[1].overflowing_sub(b as u64);
-        let (r2, b) = self.0[2].overflowing_sub(b as u64);
-        let (r3, b) = self.0[3].overflowing_sub(b as u64);
-        let mut res = FieldElement([r0, r1, r2, r3]);
-        if b {
-            res = res.sub_u64_raw(38);
-        }
-        res
+        let b0 = ((self.0[0] as u128) | (1 << 64)) - (val as u128);
+        let b1 = ((self.0[1] as u128) | (1 << 64)) + (b0 >> 64) - 1;
+        let b2 = ((self.0[2] as u128) | (1 << 64)) + (b1 >> 64) - 1;
+        let b3 = ((self.0[3] as u128) | (1 << 64)) + (b2 >> 64) - 1;
+
+        let borrow = 1 - (b3 >> 64) as u64;
+        let r0 = b0 as u64;
+        let r1 = b1 as u64;
+        let r2 = b2 as u64;
+        let r3 = b3 as u64;
+
+        let b0_red = ((r0 as u128) | (1 << 64)) - ((borrow * 38) as u128);
+        let b1_red = ((r1 as u128) | (1 << 64)) + (b0_red >> 64) - 1;
+        let b2_red = ((r2 as u128) | (1 << 64)) + (b1_red >> 64) - 1;
+        let b3_red = ((r3 as u128) | (1 << 64)) + (b2_red >> 64) - 1;
+
+        FieldElement([b0_red as u64, b1_red as u64, b2_red as u64, b3_red as u64])
     }
 
-    #[inline(always)]
-    fn sub_u64_raw(&self, val: u64) -> Self {
-        let (r0, b) = self.0[0].overflowing_sub(val);
-        let (r1, b) = self.0[1].overflowing_sub(b as u64);
-        let (r2, b) = self.0[2].overflowing_sub(b as u64);
-        let (r3, _) = self.0[3].overflowing_sub(b as u64);
-        FieldElement([r0, r1, r2, r3])
-    }
 
     #[inline(always)]
     fn reduce_product(r: &[u64; 8]) -> Self {
-        let mut carry = 0u128;
-        let mut res_limbs = [0u64; 4];
-        for i in 0..4 {
-            let term = (r[i + 4] as u128) * 38 + (r[i] as u128) + carry;
-            res_limbs[i] = term as u64;
-            carry = term >> 64;
-        }
+        let t0 = (r[4] as u128) * 38 + (r[0] as u128);
+        let t1 = (r[5] as u128) * 38 + (r[1] as u128) + (t0 >> 64);
+        let t2 = (r[6] as u128) * 38 + (r[2] as u128) + (t1 >> 64);
+        let t3 = (r[7] as u128) * 38 + (r[3] as u128) + (t2 >> 64);
+        let carry = (t3 >> 64) as u64;
 
-        let mut res = FieldElement(res_limbs);
-        if carry > 0 {
-            res = res.add_u64_raw((carry * 38) as u64);
-        }
+        let r0 = t0 as u64;
+        let r1 = t1 as u64;
+        let r2 = t2 as u64;
+        let r3 = t3 as u64;
 
-        let h = res.0[3] >> 63;
-        res.0[3] &= 0x7FFFFFFFFFFFFFFF;
-        if h > 0 {
-            res = res.add_u64_raw(h * 19);
-        }
-        res
+        let c0 = (r0 as u128) + ((carry * 38) as u128);
+        let c1 = (r1 as u128) + (c0 >> 64);
+        let c2 = (r2 as u128) + (c1 >> 64);
+        let c3 = (r3 as u128) + (c2 >> 64);
+
+        let h = ((c3 as u64) >> 63) as u64;
+        let r3_final = (c3 as u64) & 0x7FFFFFFFFFFFFFFF;
+
+        let d0 = (c0 as u64 as u128) + ((h * 19) as u128);
+        let d1 = (c1 as u64 as u128) + (d0 >> 64);
+        let d2 = (c2 as u64 as u128) + (d1 >> 64);
+        let d3 = (r3_final as u128) + (d2 >> 64);
+
+        FieldElement([d0 as u64, d1 as u64, d2 as u64, d3 as u64])
     }
 
     #[inline(always)]
@@ -293,56 +296,53 @@ impl FieldElement {
         w5 = t as u64;
         let w6 = (t >> 64) as u64;
 
-        let w = [0u64, w1, w2, w3, w4, w5, w6, 0u64];
-
-        // Step 2: Double w (shift left by 1 bit)
-        let mut r = [0u64; 8];
-        let mut carry_bit = 0u64;
-        let mut i = 0;
-        while i < 8 {
-            let new_carry = w[i] >> 63;
-            r[i] = (w[i] << 1) | carry_bit;
-            carry_bit = new_carry;
-            i += 1;
-        }
+        // Step 2: Unrolled shift left by 1 bit (2 * cross products)
+        let r0 = 0u64;
+        let r1 = w1 << 1;
+        let r2 = (w2 << 1) | (w1 >> 63);
+        let r3 = (w3 << 1) | (w2 >> 63);
+        let r4 = (w4 << 1) | (w3 >> 63);
+        let r5 = (w5 << 1) | (w4 >> 63);
+        let r6 = (w6 << 1) | (w5 >> 63);
+        let r7 = w6 >> 63;
 
         // Step 3: Add diagonal squares a[i]^2 (4 multiplications)
         let sq0 = (a[0] as u128) * (a[0] as u128);
-        let t = (r[0] as u128) + (sq0 as u64 as u128);
-        r[0] = t as u64;
+        let t = (r0 as u128) + (sq0 as u64 as u128);
+        let out0 = t as u64;
         let mut c = (sq0 >> 64) + (t >> 64);
 
-        let t = (r[1] as u128) + c;
-        r[1] = t as u64;
+        let t = (r1 as u128) + c;
+        let out1 = t as u64;
         c = t >> 64;
 
         let sq1 = (a[1] as u128) * (a[1] as u128);
-        let t = (r[2] as u128) + (sq1 as u64 as u128) + c;
-        r[2] = t as u64;
+        let t = (r2 as u128) + (sq1 as u64 as u128) + c;
+        let out2 = t as u64;
         c = (sq1 >> 64) + (t >> 64);
 
-        let t = (r[3] as u128) + c;
-        r[3] = t as u64;
+        let t = (r3 as u128) + c;
+        let out3 = t as u64;
         c = t >> 64;
 
         let sq2 = (a[2] as u128) * (a[2] as u128);
-        let t = (r[4] as u128) + (sq2 as u64 as u128) + c;
-        r[4] = t as u64;
+        let t = (r4 as u128) + (sq2 as u64 as u128) + c;
+        let out4 = t as u64;
         c = (sq2 >> 64) + (t >> 64);
 
-        let t = (r[5] as u128) + c;
-        r[5] = t as u64;
+        let t = (r5 as u128) + c;
+        let out5 = t as u64;
         c = t >> 64;
 
         let sq3 = (a[3] as u128) * (a[3] as u128);
-        let t = (r[6] as u128) + (sq3 as u64 as u128) + c;
-        r[6] = t as u64;
+        let t = (r6 as u128) + (sq3 as u64 as u128) + c;
+        let out6 = t as u64;
         c = (sq3 >> 64) + (t >> 64);
 
-        let t = (r[7] as u128) + c;
-        r[7] = t as u64;
+        let t = (r7 as u128) + c;
+        let out7 = t as u64;
 
-        Self::reduce_product(&r)
+        Self::reduce_product(&[out0, out1, out2, out3, out4, out5, out6, out7])
     }
 
     #[inline(always)]

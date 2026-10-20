@@ -725,14 +725,22 @@ impl Ledger {
                 let added = self.confirm_max(*confirmation_root, max_blocks);
 
                 if !added.is_empty() {
-                    blocks_confirmed += added.len();
+                    let count = added.len();
+                    blocks_confirmed += count;
                     for block in added {
                         confirmed.push((block, *confirmation_root));
+                    }
+                    if count < max_blocks {
+                        break;
                     }
                 } else {
                     break;
                 }
             }
+        }
+
+        if !confirmed.is_empty() {
+            cementing_observer.batch_confirmed(confirmed);
         }
     }
 }

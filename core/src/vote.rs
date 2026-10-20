@@ -62,7 +62,7 @@ impl VoteError {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Vote {
     timestamp: VoteTimestamp,
 
@@ -74,6 +74,22 @@ pub struct Vote {
 
     // The hashes for which this vote directly covers
     pub hashes: Vec<BlockHash>,
+
+    validated: core::sync::atomic::AtomicBool,
+}
+
+impl Clone for Vote {
+    fn clone(&self) -> Self {
+        Self {
+            timestamp: self.timestamp,
+            voter: self.voter,
+            signature: self.signature.clone(),
+            hashes: self.hashes.clone(),
+            validated: core::sync::atomic::AtomicBool::new(
+                self.validated.load(core::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
 }
 
 static HASH_PREFIX: &str = "vote ";
@@ -86,6 +102,7 @@ impl Vote {
             voter: PublicKey::zero(),
             signature: Signature::new(),
             hashes: Vec::new(),
+            validated: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -106,6 +123,7 @@ impl Vote {
             timestamp: VoteTimestamp::new(timestamp, duration),
             signature: Signature::new(),
             hashes,
+            validated: core::sync::atomic::AtomicBool::new(true),
         };
         result.signature = priv_key.sign(result.hash().as_bytes());
         result
@@ -159,11 +177,17 @@ impl Vote {
         while stream.in_avail()? > 0 && self.hashes.len() < Self::MAX_HASHES {
             self.hashes.push(BlockHash::deserialize(stream)?);
         }
+        self.validated.store(false, core::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
-        self.voter.verify(self.hash().as_bytes(), &self.signature)
+        if self.validated.load(core::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        self.voter.verify(self.hash().as_bytes(), &self.signature)?;
+        self.validated.store(true, core::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn serialized_size(count: usize) -> usize {

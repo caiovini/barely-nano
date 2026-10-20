@@ -6,20 +6,74 @@ use crate::{
     Signature, WorkNonce,
 };
 use anyhow::Result;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Clone, Default, Debug)]
 pub struct StateBlock {
     hashables: StateHashables,
     signature: Signature,
     hash: BlockHash,
     work: WorkNonce,
+    pub signature_verified: AtomicBool,
+}
+
+impl Clone for StateBlock {
+    fn clone(&self) -> Self {
+        Self {
+            hashables: self.hashables.clone(),
+            signature: self.signature.clone(),
+            hash: self.hash,
+            work: self.work,
+            signature_verified: AtomicBool::new(self.signature_verified.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl Default for StateBlock {
+    fn default() -> Self {
+        Self {
+            hashables: StateHashables::default(),
+            signature: Signature::default(),
+            hash: BlockHash::default(),
+            work: WorkNonce::default(),
+            signature_verified: AtomicBool::new(false),
+        }
+    }
+}
+
+impl core::fmt::Debug for StateBlock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StateBlock")
+            .field("hashables", &self.hashables)
+            .field("signature", &self.signature)
+            .field("hash", &self.hash)
+            .field("work", &self.work)
+            .field("signature_verified", &self.signature_verified.load(Ordering::Relaxed))
+            .finish()
+    }
 }
 
 impl StateBlock {
+    #[inline(always)]
+    pub fn is_signature_verified(&self) -> bool {
+        self.signature_verified.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn set_signature_verified(&self, verified: bool) {
+        self.signature_verified.store(verified, Ordering::Relaxed);
+    }
+
     pub fn verify_signature(&self) -> anyhow::Result<()> {
-        self.account()
+        if self.signature_verified.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let res = self.account()
             .as_key()
-            .verify(self.hash().as_bytes(), self.signature())
+            .verify(self.hash().as_bytes(), self.signature());
+        if res.is_ok() {
+            self.signature_verified.store(true, Ordering::Relaxed);
+        }
+        res
     }
 
     pub fn account(&self) -> Account {
@@ -79,6 +133,7 @@ impl StateBlock {
             signature,
             hashables,
             hash,
+            signature_verified: AtomicBool::new(false),
         })
     }
 }
@@ -116,6 +171,7 @@ impl BlockBase for StateBlock {
 
     fn set_signature(&mut self, signature: Signature) {
         self.signature = signature;
+        self.signature_verified.store(false, Ordering::Relaxed);
     }
 
     fn set_work(&mut self, work: WorkNonce) {
@@ -260,6 +316,7 @@ impl<'a> From<StateBlockArgs<'a>> for Block {
             signature,
             hash,
             work: value.work,
+            signature_verified: AtomicBool::new(true),
         })
     }
 }
@@ -292,6 +349,7 @@ impl<'a> From<EpochBlockArgs<'a>> for Block {
             signature,
             hash,
             work: value.work,
+            signature_verified: AtomicBool::new(true),
         })
     }
 }
@@ -313,6 +371,7 @@ impl From<JsonStateBlock> for StateBlock {
             signature: value.signature,
             hashables,
             hash,
+            signature_verified: AtomicBool::new(false),
         }
     }
 }

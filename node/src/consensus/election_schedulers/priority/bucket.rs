@@ -81,6 +81,11 @@ impl Bucket {
         }
     }
 
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.block_queue.is_empty()
+    }
+
     pub fn available(&self, aec: &ActiveElectionsContainer) -> bool {
         let Some(highest_block) = self.block_queue.highest_prio() else {
             // No blocks enqueued
@@ -112,7 +117,7 @@ impl Bucket {
         now: Timestamp,
         stats: &BucketStats,
     ) {
-        if !self.available(&aec) {
+        if self.block_queue.is_empty() || !self.available(&aec) {
             return;
         }
 

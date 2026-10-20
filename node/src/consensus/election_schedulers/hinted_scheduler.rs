@@ -218,6 +218,10 @@ impl HintedScheduler {
             return;
         }
 
+        if self.vote_cache.lock().empty() {
+            return;
+        }
+
         if self.predicate() {
             self.run_interactive()
         }

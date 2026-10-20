@@ -49,7 +49,9 @@ impl BlockBatchProcessor {
 
         let ledger_res = if batch.len() == 1 {
             let ctx = &batch[0];
-            let is_valid = if let Some(account) = ctx.block.account_field() {
+            let is_valid = if ctx.block.is_signature_verified() || ctx.source == BlockSource::Local {
+                true
+            } else if let Some(account) = ctx.block.account_field() {
                 ctx.block.verify_with_key(&account.as_key()).is_ok()
             } else {
                 false
@@ -58,10 +60,16 @@ impl BlockBatchProcessor {
         } else {
             // 1. Submit all blocks for parallel signature verification
             let verifications: Vec<_> = batch.iter().map(|ctx| {
-                // For State blocks, we can derive the account immediately.
-                // For Legacy blocks, we might need a B-Tree lookup (Unknown).
-                let account = ctx.block.account_field();
-                self.signature_checker.push(Arc::new(ctx.block.clone()), account)
+                if ctx.block.is_signature_verified() || ctx.source == BlockSource::Local {
+                    let result = Arc::new(core::sync::atomic::AtomicU8::new(crate::signatures::SignatureResult::Valid as u8));
+                    let finished = Arc::new(core::sync::atomic::AtomicBool::new(true));
+                    (result, finished)
+                } else {
+                    // For State blocks, we can derive the account immediately.
+                    // For Legacy blocks, we might need a B-Tree lookup (Unknown).
+                    let account = ctx.block.account_field();
+                    self.signature_checker.push(Arc::new(ctx.block.clone()), account)
+                }
             }).collect();
 
             // 2. Help verify while waiting for the batch to finish

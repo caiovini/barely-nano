@@ -12,14 +12,14 @@ impl<'a> BlockValidator<'a> {
     }
 
     pub(crate) fn ensure_valid_signature(&self) -> Result<(), BlockError> {
-        if self.signature_verified {
+        if self.signature_verified || self.block.is_signature_verified() {
             return Ok(());
         }
         let result = if self.is_epoch_block() {
             self.epochs.validate_epoch_signature(self.block)
         } else {
             let pub_key: PublicKey = self.account.into();
-            pub_key.verify(self.block.hash().as_bytes(), self.block.signature())
+            self.block.verify_with_key(&pub_key)
         };
         
         if result.is_err() {

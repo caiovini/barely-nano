@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 use tracing::debug;
 
@@ -40,6 +40,7 @@ pub struct PriorityScheduler {
     activate_successors_listener: OutputListenerMt<SavedBlock>,
     activations_per_bucket: Vec<AtomicU64>,
     is_bootstrap_active: Box<dyn Fn() -> bool + Send + Sync>,
+    queued_count: AtomicUsize,
 }
 
 impl PriorityScheduler {
@@ -69,6 +70,7 @@ impl PriorityScheduler {
             activate_successors_listener: Default::default(),
             activations_per_bucket,
             is_bootstrap_active,
+            queued_count: AtomicUsize::new(0),
         }
     }
 
@@ -179,7 +181,9 @@ impl PriorityScheduler {
         };
 
         match insert_result {
-            Ok(Eviction::None) => {}
+            Ok(Eviction::None) => {
+                self.queued_count.fetch_add(1, Ordering::Relaxed);
+            }
             Ok(Eviction::Evicted) => {
                 self.stats
                     .inc(StatType::ElectionScheduler, DetailType::Evicted);
@@ -242,6 +246,10 @@ impl PriorityScheduler {
     }
 
     pub fn run_one(&self) {
+        if self.queued_count.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+
         self.stats
             .inc(StatType::ElectionScheduler, DetailType::Loop);
 
@@ -250,17 +258,23 @@ impl PriorityScheduler {
         let mut aec = self.aec.write();
         let mut inserted = true;
 
-        while inserted {
+        while inserted && self.queued_count.load(Ordering::Relaxed) > 0 {
             inserted = false;
             let activated_before = self.bucket_stats.activate_success.load(Ordering::Relaxed);
             for bucket in buckets.iter_mut().rev() {
+                if bucket.is_empty() {
+                    continue;
+                }
                 bucket.activate(&mut aec, now, &self.bucket_stats);
             }
             let activated_after = self.bucket_stats.activate_success.load(Ordering::Relaxed);
             if activated_after > activated_before {
+                let diff = (activated_after - activated_before) as usize;
+                let current = self.queued_count.load(Ordering::Relaxed);
+                self.queued_count.store(current.saturating_sub(diff), Ordering::Relaxed);
                 tracing::debug!(
                     "PriorityScheduler: activated {} blocks",
-                    activated_after - activated_before
+                    diff
                 );
                 inserted = true;
             }

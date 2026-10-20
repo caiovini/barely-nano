@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use spin::{ Mutex, RwLock };
 use crate::utils::{Condvar, JoinHandle};
 use core::mem::size_of;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use rsnano_core::{utils::ContainerInfo, Amount, Block, BlockHash, SavedBlock};
 use rsnano_stats::{DetailType, StatType, Stats};
@@ -19,6 +20,7 @@ pub struct ManualScheduler {
     active_elections: Arc<RwLock<ActiveElectionsContainer>>,
     clock: Arc<SteadyClock>,
     ledger: Arc<Ledger>,
+    has_blocks: AtomicBool,
 }
 
 impl ManualScheduler {
@@ -35,6 +37,7 @@ impl ManualScheduler {
             active_elections,
             clock,
             ledger,
+            has_blocks: AtomicBool::new(false),
             mutex: Mutex::new(ManualSchedulerImpl {
                 queue: Default::default(),
                 stopped: false,
@@ -67,17 +70,23 @@ impl ManualScheduler {
         {
             let mut guard = self.mutex.lock();
             guard.queue.push_back(block);
+            self.has_blocks.store(true, Ordering::Relaxed);
         }
         self.notify();
     }
 
     pub fn run_once(&self) {
+        if !self.has_blocks.load(Ordering::Relaxed) {
+            return;
+        }
+
         let mut guard = self.mutex.lock();
         if !guard.stopped && guard.predicate() {
             self.stats
                 .inc(StatType::ElectionScheduler, DetailType::Loop);
 
             let block = guard.queue.pop_front().unwrap();
+            self.has_blocks.store(!guard.queue.is_empty(), Ordering::Relaxed);
             drop(guard);
 
             let hash = block.hash();
@@ -94,6 +103,8 @@ impl ManualScheduler {
             {
                 aec.transition_active(&hash);
             }
+        } else {
+            self.has_blocks.store(false, Ordering::Relaxed);
         }
     }
 
