@@ -110,6 +110,40 @@ impl ProjectivePoint {
             t: r_t,
         }
     }
+
+    #[inline(always)]
+    pub fn to_bytes_with_z_inv(&self, z_inv: &FieldElement) -> [u8; 32] {
+        let x = self.x.mul(z_inv).reduce();
+        let y = self.y.mul(z_inv).reduce();
+        let mut bytes = y.to_bytes();
+        if (x.0[0] & 1) != 0 {
+            bytes[31] |= 0x80;
+        }
+        bytes
+    }
+
+    #[inline(always)]
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let z_inv = self.z.invert();
+        self.to_bytes_with_z_inv(&z_inv)
+    }
+
+    #[inline(always)]
+    pub fn equals_signature_r(&self, signature_r: &[u8; 32]) -> bool {
+        let z_inv = self.z.invert();
+        let y = self.y.mul(&z_inv).reduce();
+        let y_bytes = y.to_bytes();
+        if y_bytes[..31] != signature_r[..31] {
+            return false;
+        }
+        if (y_bytes[31] & 0x7f) != (signature_r[31] & 0x7f) {
+            return false;
+        }
+        let x = self.x.mul(&z_inv).reduce();
+        let x_bit = (x.0[0] & 1) as u8;
+        let expected_x_bit = signature_r[31] >> 7;
+        x_bit == expected_x_bit
+    }
 }
 
 /// Point in Completed Coordinates ((X : Z), (Y : T))
@@ -404,18 +438,19 @@ impl Point {
         self.to_bytes_with_z_inv(&z_inv)
     }
 
-    pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+    #[inline(always)]
+    pub fn get_or_create_neg_table(bytes: &[u8; 32]) -> Option<[PrecomputedPoint; 8]> {
         let cached = PUBKEY_POINT_CACHE.try_with(|cache| {
             for entry in cache.iter() {
                 if entry.valid && &entry.key == bytes {
-                    return Some(entry.point);
+                    return Some(entry.neg_table_a);
                 }
             }
             None
         }).flatten();
 
-        if let Some(pt) = cached {
-            return Some(pt);
+        if let Some(table) = cached {
+            return Some(table);
         }
 
         let pt = Self::from_bytes_uncached(bytes)?;
@@ -463,7 +498,7 @@ impl Point {
             };
         });
 
-        Some(pt)
+        Some(precomp_table)
     }
 
     #[inline(always)]
@@ -472,6 +507,32 @@ impl Point {
             for entry in cache.iter() {
                 if entry.valid && &entry.key == bytes {
                     return Some(entry.neg_table_a);
+                }
+            }
+            None
+        }).flatten()
+    }
+
+    pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        let cached = PUBKEY_POINT_CACHE.try_with(|cache| {
+            for entry in cache.iter() {
+                if entry.valid && &entry.key == bytes {
+                    return Some(entry.point);
+                }
+            }
+            None
+        }).flatten();
+
+        if let Some(pt) = cached {
+            return Some(pt);
+        }
+
+        let _ = Self::get_or_create_neg_table(bytes)?;
+
+        PUBKEY_POINT_CACHE.try_with(|cache| {
+            for entry in cache.iter() {
+                if entry.valid && &entry.key == bytes {
+                    return Some(entry.point);
                 }
             }
             None
@@ -560,7 +621,7 @@ impl Point {
         s: &[u8; 32],
         table_a: &[PrecomputedPoint; 8],
         k: &[u8; 32],
-    ) -> Self {
+    ) -> ProjectivePoint {
         let slide_a = sliding_window(k, 5);
         let slide_b = sliding_window(s, 7);
 
@@ -593,7 +654,7 @@ impl Point {
             }
 
             if i == 0 {
-                return t.to_p3();
+                return t.to_p2();
             }
             r = t.to_p2();
             i -= 1;
@@ -602,7 +663,7 @@ impl Point {
 
     /// Interleaved double scalar multiplication computing s*B + k*A in a single shared doubling loop.
     /// Dynamically constructs an 8-entry PrecomputedPoint table of odd multiples of A via batch inversion.
-    pub fn double_scalar_mul_base_and_point(s: &[u8; 32], a: &Point, k: &[u8; 32]) -> Self {
+    pub fn double_scalar_mul_base_and_point(s: &[u8; 32], a: &Point, k: &[u8; 32]) -> ProjectivePoint {
         let mut table_a = [*a; 8];
         let double_a = a.double();
         for i in 0..7 {
@@ -636,8 +697,13 @@ impl Point {
 /// with odd non-zero digits in range [-(2^(w-1)-1), 2^(w-1)-1].
 fn sliding_window(scalar: &[u8; 32], windowsize: usize) -> [i8; 256] {
     let mut r = [0i8; 256];
-    for i in 0..256 {
-        r[i] = ((scalar[i / 8] >> (i % 8)) & 1) as i8;
+    for (i, &byte) in scalar.iter().enumerate() {
+        let mut b = byte;
+        let base = i * 8;
+        for bit in 0..8 {
+            r[base + bit] = (b & 1) as i8;
+            b >>= 1;
+        }
     }
     let m = ((1 << (windowsize - 1)) - 1) as i8;
     let max_b = (windowsize - 1).min(6);
@@ -1086,7 +1152,11 @@ pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
 }
 
 pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
-    let a = if let Some(p) = Point::from_bytes(public_key) { p } else { return false };
+    let neg_table = if let Some(t) = Point::get_or_create_neg_table(public_key) {
+        t
+    } else {
+        return false;
+    };
     
     let mut hasher = blake2b::Blake2bHasher::new(64);
     hasher.update(&signature[..32]); // Native R
@@ -1097,20 +1167,9 @@ pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bo
     
     let mut s_le = [0u8; 32];
     s_le.copy_from_slice(&signature[32..]);
-    // Do not reverse
     
-    let sb_minus_ka = if let Some(neg_table) = Point::get_cached_neg_table(public_key) {
-        Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_table, &k_bytes)
-    } else {
-        let neg_a = Point {
-            x: FieldElement::ZERO.sub(&a.x),
-            y: a.y,
-            z: a.z,
-            t: FieldElement::ZERO.sub(&a.t),
-        };
-        Point::double_scalar_mul_base_and_point(&s_le, &neg_a, &k_bytes)
-    };
-    sb_minus_ka.to_bytes() == signature[..32]
+    let sb_minus_ka = Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_table, &k_bytes);
+    sb_minus_ka.equals_signature_r((&signature[..32]).try_into().unwrap())
 }
 
 pub fn verify_batch_4(
@@ -1125,11 +1184,13 @@ pub fn verify_batch_4(
     let all_match = messages[1].len() == len0 && messages[2].len() == len0 && messages[3].len() == len0;
     
     if all_match && len0 <= 128 {
-        let mut points_a = [Point::identity(); 4];
-        
+        let mut neg_tables = [[PrecomputedPoint::IDENTITY; 8]; 4];
         for i in 0..4 {
-            let a = if let Some(p) = Point::from_bytes(public_keys[i]) { p } else { return results };
-            points_a[i] = a;
+            if let Some(t) = Point::get_or_create_neg_table(public_keys[i]) {
+                neg_tables[i] = t;
+            } else {
+                return results;
+            }
         }
         
         // Zero-allocation stack buffer: each slice has size (64 + len0)
@@ -1147,24 +1208,14 @@ pub fn verify_batch_4(
         
         let k_hashes = blake2b::hash64_batch_4(payload_refs);
         
-        let mut sb_minus_ka = [Point::identity(); 4];
+        let mut sb_minus_ka = [ProjectivePoint::IDENTITY; 4];
         for i in 0..4 {
             let k_bytes = sc_reduce(&k_hashes[i]);
             
             let mut s_le = [0u8; 32];
             s_le.copy_from_slice(&signatures[i][32..]);
             
-            sb_minus_ka[i] = if let Some(neg_table) = Point::get_cached_neg_table(public_keys[i]) {
-                Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_table, &k_bytes)
-            } else {
-                let neg_a = Point {
-                    x: FieldElement::ZERO.sub(&points_a[i].x),
-                    y: points_a[i].y,
-                    z: points_a[i].z,
-                    t: FieldElement::ZERO.sub(&points_a[i].t),
-                };
-                Point::double_scalar_mul_base_and_point(&s_le, &neg_a, &k_bytes)
-            };
+            sb_minus_ka[i] = Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_tables[i], &k_bytes);
         }
 
         let z_invs = FieldElement::batch_invert_4([

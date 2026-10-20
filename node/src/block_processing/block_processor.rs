@@ -22,6 +22,7 @@ pub struct BlockProcessor {
     backlog_waiter: Arc<BacklogWaiter>,
     event_publisher: Mutex<Option<BackpressureSender<LedgerEvent>>>,
     pub signature_checker: Arc<crate::signatures::SignatureChecker>,
+    cached_loop: Mutex<Option<BlockProcessorLoop>>,
 }
 
 impl BlockProcessor {
@@ -33,15 +34,31 @@ impl BlockProcessor {
         event_publisher: BackpressureSender<LedgerEvent>,
         signature_checker: Arc<crate::signatures::SignatureChecker>,
     ) -> Self {
+        let process_stats = Arc::new(BlockBatchProcessorStats::default());
+        let process = BlockBatchProcessor {
+            ledger: ledger.clone(),
+            unchecked: unchecked.clone(),
+            stats: process_stats.clone(),
+            event_publisher: event_publisher.clone(),
+            clock: Arc::new(rsnano_nullable_clock::SteadyClock::default()),
+            signature_checker: signature_checker.clone(),
+        };
+        let cached_loop = BlockProcessorLoop {
+            queue: queue.clone(),
+            process,
+            backlog_waiter: backlog_waiter.clone(),
+        };
+
         Self {
             queue,
             ledger,
             unchecked,
-            process_stats: Arc::new(BlockBatchProcessorStats::default()),
+            process_stats,
             threads: Mutex::new(Vec::new()),
             backlog_waiter,
             event_publisher: Mutex::new(Some(event_publisher)),
             signature_checker,
+            cached_loop: Mutex::new(Some(cached_loop)),
         }
     }
 
@@ -70,6 +87,12 @@ impl BlockProcessor {
     }
 
     pub fn run_once(&self) {
+        if let Some(mut guard) = self.cached_loop.try_lock() {
+            if let Some(loop_state) = guard.as_mut() {
+                loop_state.run_once();
+                return;
+            }
+        }
 
         let mut loop_state = self.create_loop();
         loop_state.run_once();
@@ -101,6 +124,7 @@ impl BlockProcessor {
 
     pub fn stop(&self) {
         drop(self.event_publisher.lock().take());
+        drop(self.cached_loop.lock().take());
         self.queue.stop();
         let mut threads = self.threads.lock();
         for _join_handle in threads.drain(..) {

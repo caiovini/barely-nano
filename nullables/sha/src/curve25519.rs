@@ -253,10 +253,96 @@ impl FieldElement {
         Self::reduce_product(&[r0, r1, r2, r3, r4, r5, r6, r7])
     }
 
-    /// Dedicated 256-bit squaring.
+    /// Dedicated 256-bit squaring using upper-triangular cross products (10M vs 16M).
     #[inline(always)]
     pub fn square(&self) -> Self {
-        self.mul(self)
+        let a = &self.0;
+
+        // Step 1: Strictly upper-triangular products (6 multiplications)
+        let p01 = (a[0] as u128) * (a[1] as u128);
+        let p02 = (a[0] as u128) * (a[2] as u128);
+        let p03 = (a[0] as u128) * (a[3] as u128);
+
+        let w1 = p01 as u64;
+        let mut c = p01 >> 64;
+
+        let t = p02 + c;
+        let w2 = t as u64;
+        c = t >> 64;
+
+        let t = p03 + c;
+        let mut w3 = t as u64;
+        let mut w4 = (t >> 64) as u64;
+
+        // Row 1
+        let p12 = (a[1] as u128) * (a[2] as u128);
+        let p13 = (a[1] as u128) * (a[3] as u128);
+
+        let t = (p12 as u128) + (w3 as u128);
+        w3 = t as u64;
+        c = t >> 64;
+
+        let t = (p13 as u128) + (w4 as u128) + c;
+        w4 = t as u64;
+        let mut w5 = (t >> 64) as u64;
+
+        // Row 2
+        let p23 = (a[2] as u128) * (a[3] as u128);
+
+        let t = (p23 as u128) + (w5 as u128);
+        w5 = t as u64;
+        let w6 = (t >> 64) as u64;
+
+        let w = [0u64, w1, w2, w3, w4, w5, w6, 0u64];
+
+        // Step 2: Double w (shift left by 1 bit)
+        let mut r = [0u64; 8];
+        let mut carry_bit = 0u64;
+        let mut i = 0;
+        while i < 8 {
+            let new_carry = w[i] >> 63;
+            r[i] = (w[i] << 1) | carry_bit;
+            carry_bit = new_carry;
+            i += 1;
+        }
+
+        // Step 3: Add diagonal squares a[i]^2 (4 multiplications)
+        let sq0 = (a[0] as u128) * (a[0] as u128);
+        let t = (r[0] as u128) + (sq0 as u64 as u128);
+        r[0] = t as u64;
+        let mut c = (sq0 >> 64) + (t >> 64);
+
+        let t = (r[1] as u128) + c;
+        r[1] = t as u64;
+        c = t >> 64;
+
+        let sq1 = (a[1] as u128) * (a[1] as u128);
+        let t = (r[2] as u128) + (sq1 as u64 as u128) + c;
+        r[2] = t as u64;
+        c = (sq1 >> 64) + (t >> 64);
+
+        let t = (r[3] as u128) + c;
+        r[3] = t as u64;
+        c = t >> 64;
+
+        let sq2 = (a[2] as u128) * (a[2] as u128);
+        let t = (r[4] as u128) + (sq2 as u64 as u128) + c;
+        r[4] = t as u64;
+        c = (sq2 >> 64) + (t >> 64);
+
+        let t = (r[5] as u128) + c;
+        r[5] = t as u64;
+        c = t >> 64;
+
+        let sq3 = (a[3] as u128) * (a[3] as u128);
+        let t = (r[6] as u128) + (sq3 as u64 as u128) + c;
+        r[6] = t as u64;
+        c = (sq3 >> 64) + (t >> 64);
+
+        let t = (r[7] as u128) + c;
+        r[7] = t as u64;
+
+        Self::reduce_product(&r)
     }
 
     #[inline(always)]
