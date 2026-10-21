@@ -2,7 +2,7 @@ CARGO ?= cargo
 OBJCOPY ?= $(or $(shell which llvm-objcopy 2>/dev/null),$(shell find $(HOME)/.rustup -name llvm-objcopy 2>/dev/null | head -n1),riscv64-linux-gnu-objcopy)
 MKIMAGE ?= mkimage
 
-.PHONY: build build-smode build-block-test build-spammer boot-scr run-crypto-tests run-picocom clean
+.PHONY: build build-smode build-block-test build-spammer boot-scr run-crypto-tests run-picocom run-stress build-stress stress clean
 
 boot.scr: boot.cmd
 	$(MKIMAGE) -C none -A riscv -T script -d boot.cmd boot.scr
@@ -42,6 +42,15 @@ run-crypto-tests:
 
 run-picocom:
 	sudo picocom -b 115200 /dev/ttyUSB0 > orpi.log
+
+# ── Network Stress Testing (sends blocks to port 7075) ────────────────────────
+build-stress:
+	RUSTFLAGS="" $(CARGO) build --release --manifest-path ../rsnano-node/tools/nano-stress/Cargo.toml --target x86_64-unknown-linux-gnu
+
+run-stress: build-stress
+	../rsnano-node/target/x86_64-unknown-linux-gnu/release/nano-stress $(if $(ARGS),$(ARGS),--target 192.168.1.200:7075 --rpc http://192.168.1.200:7076 --network dev)
+
+stress: run-stress
 
 # ── Aliases ──────────────────────────────────────────────────────────────────
 build: build-smode

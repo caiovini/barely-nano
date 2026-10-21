@@ -13,6 +13,7 @@ pub struct BareMetalToml {
     pub ipv4_prefix_len: Option<u8>,
     pub gateway: Option<String>,
     pub dns_server: Option<String>,
+    pub wipe_blocks: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]

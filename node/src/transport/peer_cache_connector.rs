@@ -21,6 +21,7 @@ pub struct PeerCacheConnector {
     stats: Arc<Stats>,
     first_run: Arc<AtomicBool>,
     ///Delay between each connection attempt. This throttles new connections.
+    #[allow(dead_code)]
     reach_out_delay: Duration,
 }
 
@@ -86,7 +87,7 @@ impl PeerCacheConnectorExt for Arc<spin::Mutex<PeerCacheConnector>> {
 
 
 impl Tickable for PeerCacheConnector {
-    fn tick(&mut self, cancel_token: &CancellationToken) {
+    fn tick(&mut self, _cancel_token: &CancellationToken) {
         self.stats
             .inc(StatType::Network, DetailType::LoopReachoutCached);
         let cached_peers = self.load_peers_from_cache();
@@ -99,10 +100,6 @@ impl Tickable for PeerCacheConnector {
             self.stats
                 .inc(StatType::Network, DetailType::ReachoutCached);
             let _ = self.peer_connector.connect_to(peer);
-            // Throttle reachout attempts
-            if cancel_token.wait_for_cancellation(self.reach_out_delay) {
-                break;
-            }
         }
     }
 }

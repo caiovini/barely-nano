@@ -593,15 +593,24 @@ fn boot_hart_main(hart_id: usize) {
 
         kernel_common::storage::init_uboot_blk();
 
+        let wipe_requested = daemon_toml
+            .bare_metal
+            .as_ref()
+            .and_then(|bm| bm.wipe_blocks)
+            .unwrap_or(false);
+
         #[cfg(feature = "block-test")]
-        {
-            uart::print(b"[block-test] Wiping B-Tree shards for deterministic dev genesis state...\n");
+        let wipe_requested = true;
+
+        if wipe_requested {
+            uart::print(b"[storage] Wiping all B-Tree shards to start from zero...\n");
             for i in 0..kernel_common::storage::SHARD_COUNT {
                 if let Some(db) = kernel_common::storage::SHARDS[i].lock().as_mut() {
                     db.wipe();
                 }
             }
-            uart::print(b"[block-test] B-Tree shards wiped.\n");
+            kernel_common::storage::flush_all_shards();
+            uart::print(b"[storage] All B-Tree shards wiped and flushed to NVMe.\n");
         }
 
         let exec = kernel_common::async_rt::Executor::new();
@@ -1882,9 +1891,6 @@ fn run_maintenance_and_network_loop(
         }
         iterations += 1;
 
-        // Pacing: Throttle Hart 1 network/maintenance loop to resolve lock starvation of NET.lock
-        for _ in 0..5000 {
-            core::hint::spin_loop();
-        }
+        core::hint::spin_loop();
     }
 }

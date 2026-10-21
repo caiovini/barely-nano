@@ -2,9 +2,16 @@ use smoltcp::phy::{Device, DeviceCapabilities, RxToken, TxToken};
 use smoltcp::time::Instant;
 use crate::uboot;
 
+pub const RX_RING_SIZE: usize = 512;
+pub const PACKET_BUF_SIZE: usize = 1536;
+
 pub struct UbootNetDevice {
     info: uboot::DeviceInfo,
-    rx_buffer: [u8; 2048],
+    rx_ring: alloc::boxed::Box<[[u8; PACKET_BUF_SIZE]]>,
+    rx_lens: [u16; RX_RING_SIZE],
+    rx_head: usize,
+    rx_tail: usize,
+    rx_count: usize,
     tx_buffer: TxBuffer,
 }
 
@@ -16,7 +23,11 @@ impl UbootNetDevice {
     pub fn new(info: uboot::DeviceInfo) -> Self {
         Self {
             info,
-            rx_buffer: [0u8; 2048],
+            rx_ring: alloc::vec![[0u8; PACKET_BUF_SIZE]; RX_RING_SIZE].into_boxed_slice(),
+            rx_lens: [0u16; RX_RING_SIZE],
+            rx_head: 0,
+            rx_tail: 0,
+            rx_count: 0,
             tx_buffer: TxBuffer { data: [0u8; 2048] },
         }
     }
@@ -27,14 +38,32 @@ impl Device for UbootNetDevice {
     type TxToken<'a> = UbootTxToken<'a> where Self: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let buffer = &mut self.rx_buffer[..];
-        let bytes_read = uboot::eth_receive(&self.info, buffer);
-        
-        if bytes_read > 0 {
-            let buffer = &buffer[..bytes_read as usize];
-            
-            let rx = UbootRxToken { buf: buffer };
-            let tx = UbootTxToken { 
+        // When ring buffer is empty, refill by batch-draining from U-Boot's hardware DMA ring
+        if self.rx_count == 0 {
+            let free_slots = RX_RING_SIZE - self.rx_count;
+            let received = uboot::eth_receive_batch(
+                &self.info,
+                &mut self.rx_ring,
+                &mut self.rx_lens,
+                self.rx_tail,
+                free_slots,
+            );
+            if received > 0 {
+                self.rx_tail = (self.rx_tail + received) % RX_RING_SIZE;
+                self.rx_count += received;
+            }
+        }
+
+        if self.rx_count > 0 {
+            let head = self.rx_head;
+            let len = self.rx_lens[head] as usize;
+            self.rx_head = (self.rx_head + 1) % RX_RING_SIZE;
+            self.rx_count -= 1;
+
+            let rx = UbootRxToken {
+                buf: &self.rx_ring[head][..len],
+            };
+            let tx = UbootTxToken {
                 info: &self.info,
                 tx_buffer: &mut self.tx_buffer.data,
             };
@@ -54,7 +83,7 @@ impl Device for UbootNetDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.max_transmission_unit = 1500;
-        caps.max_burst_size = Some(1);
+        caps.max_burst_size = Some(RX_RING_SIZE);
         caps.medium = smoltcp::phy::Medium::Ethernet;
         caps.checksum.ipv4 = smoltcp::phy::Checksum::Tx;
         caps.checksum.tcp = smoltcp::phy::Checksum::Tx;

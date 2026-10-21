@@ -92,6 +92,8 @@ Traditional filesystems (like FAT32 or EXT4) introduce substantial overhead and 
 |---|---|---|
 | `make build` / `make build-smode` | `simd` | **Live network mode** — builds `barely-nano.bin` and `boot.scr` for the Orange Pi RV2 |
 | `make build-block-test` / `make build-spammer` | `block-test,simd` | **Deterministic block benchmark** — measures full Nano block generation, verification, B-Tree insertion, consensus & cementation time and BPS |
+| `make build-stress` | — | Builds the host-side `nano-stress` testing tool (`x86_64`) |
+| `make run-stress` / `make stress` | — | **Network stress test** — streams blocks to node on port 7075 with real-time metrics |
 | `make run-crypto-tests` | `simd` | Runs host-side cryptographic unit tests |
 | `make run-picocom` | — | Captures serial console output from `/dev/ttyUSB0` to `orpi.log` |
 | `make clean` | — | Cleans Cargo build artifacts |
@@ -199,6 +201,80 @@ In a bare-metal environment with an incomplete ledger (e.g., during the initial 
 
 **To temporarily observe all representatives (even those with 0 weight):**
 Set `representative_vote_weight_minimum = "0"` under `[node]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml). This is useful for debugging network connectivity but can be raised once the ledger is sufficiently synced to provide accurate weight data.
+
+## Network Stress Testing
+
+The repository provides a dedicated high-throughput stress testing tool (`nano-stress`) to test node stability, B-Tree storage performance, and queue behaviour under heavy load by generating cryptographically valid blocks and streaming them directly over TCP to port **7075**.
+
+### 1. Node Dev Network Setup
+
+Generating blocks on the live network requires significant PoW compute. In the **`dev`** network, PoW difficulty is effectively zero / negligible (~128 Blake2b hashes, or 0 with `--zero-pow`), and genesis funds are controlled by the known `DEV_GENESIS_KEY`.
+
+To prepare the node for stress testing, set the following in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) on the SD card:
+
+```toml
+[bare_metal]
+network = "dev"
+wipe_blocks = true         # Wipes NVMe B-Tree shards to start fresh from dev genesis
+ipv4_address = "192.168.1.200"
+
+[node]
+peering_port = 7075        # Port where blocks will be published
+enable_voting = true
+allow_local_peers = true
+online_weight_minimum = "0"
+representative_vote_weight_minimum = "0"
+preconfigured_peers = []   # Do not connect to public live peers in dev mode
+
+[rpc]
+enable = true
+port = 7076
+enable_control = true
+```
+
+Reboot the board. The node will initialize the dev ledger with `DEV_GENESIS_BLOCK` and start listening on ports `7075` (peering) and `7076` (RPC).
+
+### 2. Running the Stress Test
+
+The stress tool builds natively on the host machine (`x86_64`) and can be driven directly via [`Makefile`](file:///mnt/data/rust-workspace/barely-nano/Makefile):
+
+```bash
+# Build the tool and stream default batch (1,000 blocks at 500 BPS to 192.168.1.200:7075)
+make run-stress
+# (or using alias)
+make stress
+```
+
+#### Custom Stress Options
+
+Pass parameters using `ARGS`:
+
+```bash
+# Benchmark block generation locally without network transmission (dry run)
+make run-stress ARGS="--dry-run --blocks 10000"
+
+# Stream 5,000 blocks across 10 independent accounts at a controlled rate of 500 BPS
+make run-stress ARGS="--blocks 5000 --rate 500 --accounts 10"
+
+# Unlimited throughput burst test across 20 independent accounts
+make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
+
+# Target a different IP or peering port
+make run-stress ARGS="--target 192.168.1.200:7075 --rpc http://192.168.1.200:7076 --blocks 2000 --rate 500"
+
+# Change block strategy (e.g. testing representative changes across accounts)
+make run-stress ARGS="--strategy change --blocks 2000 --rate 500 --accounts 5"
+```
+
+> [!NOTE]
+> Do **not** pass `--zero-pow` when streaming to the node. The node validates block entry thresholds against dev network rules (`0xf000000000000000`). Dev PoW calculation takes only ~100 µs on x86_64, ensuring all blocks pass ledger entry criteria.
+
+The tool automatically:
+1. Verifies node reachability and network alignment via RPC (`7076`).
+2. Performs the Nano P2P `NodeIdHandshake` on port `7075` to upgrade the channel to `Realtime`.
+3. Streams framed `Publish` messages with valid Ed25519 signatures and dev PoW.
+4. Outputs real-time progress (sent blocks, elapsed time, BPS, and KB/s).
+5. Queries post-stress ledger growth (`count`, `cemented`, and `unchecked`) through RPC.
 
 ## Structure
 - `config.toml` - Declarative TOML configuration for node, bootstrap, queues, RPC, and bare-metal network interface.

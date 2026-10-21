@@ -229,6 +229,50 @@ pub fn eth_receive(info: &DeviceInfo, buffer: &mut [u8]) -> i32 {
     -1
 }
 
+/// Receives a batch of raw network packets using the U-Boot Ethernet driver,
+/// amortizing U-Boot context switches and locks across all available packets in the DMA ring.
+pub fn eth_receive_batch(
+    info: &DeviceInfo,
+    slots: &mut [[u8; 1536]],
+    lens: &mut [u16],
+    start_tail: usize,
+    max_count: usize,
+) -> usize {
+    let api = UBOOT_API.load(Ordering::Relaxed);
+    if api.is_null() {
+        return 0;
+    }
+    let _lock = UBOOT_LOCK.lock();
+    let _ctx = UBootContext::enter();
+    let total_slots = slots.len();
+    let mut received = 0;
+    let mut curr_idx = start_tail;
+
+    while received < max_count {
+        let mut len = slots[curr_idx].len() as i32;
+        let mut actual_len = 0i32;
+        let mut ret = 0i32;
+        unsafe {
+            ((*api).syscall)(
+                API_DEV_READ,
+                &mut ret,
+                info as *const DeviceInfo,
+                slots[curr_idx].as_mut_ptr(),
+                &mut len,
+                &mut actual_len,
+            );
+        }
+        if ret == 0 && actual_len > 0 {
+            lens[curr_idx] = actual_len as u16;
+            curr_idx = (curr_idx + 1) % total_slots;
+            received += 1;
+        } else {
+            break;
+        }
+    }
+    received
+}
+
 pub fn env_get(name: &str) -> Option<*const u8> {
     let jt = UBOOT_JT.load(Ordering::Relaxed);
     if !jt.is_null() {

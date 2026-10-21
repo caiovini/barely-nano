@@ -95,7 +95,7 @@
 /* We assume ARCH_DMA_MINALIGN >= 16; 16 is the EQOS HW minimum */
 #define EQOS_DESCRIPTOR_ALIGN           ARCH_DMA_MINALIGN
 #define EQOS_DESCRIPTORS_TX             4
-#define EQOS_DESCRIPTORS_RX             32
+#define EQOS_DESCRIPTORS_RX             512
 #define EQOS_DESCRIPTORS_NUM            (EQOS_DESCRIPTORS_TX + EQOS_DESCRIPTORS_RX)
 #define EQOS_DESCRIPTORS_SIZE           ALIGN(EQOS_DESCRIPTORS_NUM * \
                                             EQOS_DESCRIPTOR_SIZE, ARCH_DMA_MINALIGN)

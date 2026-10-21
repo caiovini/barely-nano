@@ -161,6 +161,11 @@ impl<'a> NetworkContext<'a> {
             
             Some(self.sockets.add(established_socket))
         } else {
+            let socket = self.sockets.get_mut::<TcpSocket>(self.peering_handle);
+            if !socket.is_open() {
+                let peering_port = NET_CONFIG.lock().peering_port;
+                let _ = socket.listen(peering_port);
+            }
             None
         }
     }
@@ -420,7 +425,9 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
             net_cfg.dns_server[2],
             net_cfg.dns_server[3],
         ).into()];
-        let dns_socket = DnsSocket::new(dns_servers, vec![]);
+        let mut dns_queries = alloc::vec::Vec::new();
+        dns_queries.resize_with(8, || None);
+        let dns_socket = DnsSocket::new(dns_servers, dns_queries);
         let dns_handle = sockets.add(dns_socket);
 
         let udp_rx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 4], vec![0; 1024]);

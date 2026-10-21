@@ -23,3 +23,7 @@ env
 
 # IDE
 .vscode/
+
+# Tools
+tools/nanospam/target/
+

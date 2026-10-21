@@ -278,7 +278,7 @@ fn init_shards(mut storage: StorageContext) {
     for i in 0..SHARD_COUNT {
         // Shards start at Page 1 to avoid colliding with the header
         let base_page = 1 + (i * (shard_size + 1));
-        let bpm = bpm::BufferPool::new(shared_storage.clone(), 128, base_page);
+        let bpm = bpm::BufferPool::new(shared_storage.clone(), 2048, base_page);
         let btree = btree::BTree::new(bpm);
         *SHARDS[i].lock() = Some(btree);
     }

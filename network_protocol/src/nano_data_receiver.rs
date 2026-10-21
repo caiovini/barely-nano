@@ -23,7 +23,7 @@ pub struct NanoDataReceiver {
     first_message: bool,
     node_id: NodeId,
     handshake_stats: Arc<HandshakeStats>,
-    retry_enqueue: Option<Message>,
+    retry_enqueue: Mutex<Option<Message>>,
 }
 
 impl NanoDataReceiver {
@@ -50,7 +50,7 @@ impl NanoDataReceiver {
             first_message: true,
             node_id: NodeId::ZERO,
             handshake_stats,
-            retry_enqueue: None,
+            retry_enqueue: Mutex::new(None),
         }
     }
 
@@ -100,7 +100,7 @@ impl NanoDataReceiver {
                 "Message queue full! Pausing receiver for {}",
                 self.channel.peer_addr()
             );
-            self.retry_enqueue = Some(message);
+            *self.retry_enqueue.lock() = Some(message);
             ReceiveResult::Pause
         }
     }
@@ -249,7 +249,11 @@ impl NanoDataReceiver {
                 HandshakeStatus::Realtime(node_id) => {
                     kernel_common::uart::putchar(b'h');
                     self.node_id = node_id;
-                    return ReceiveResult::Pause;
+                    if self.to_realtime_connection(&node_id) {
+                        return ReceiveResult::Continue;
+                    } else {
+                        return ReceiveResult::Abort;
+                    }
                 }
             }
         } else if self.channel.mode() == ChannelMode::Realtime {
@@ -284,6 +288,23 @@ impl DataReceiver for NanoDataReceiver {
                     ) {
                         ReceiveResult::Continue
                     } else {
+                        kernel_common::uart::print(b"[DESER_ERR:");
+                        match &e {
+                            ParseMessageError::Other(s) => {
+                                kernel_common::uart::print(b"other:");
+                                kernel_common::uart::print(s.as_bytes());
+                            }
+                            ParseMessageError::InvalidHeader => kernel_common::uart::print(b"hdr"),
+                            ParseMessageError::InvalidMessageType => kernel_common::uart::print(b"type"),
+                            ParseMessageError::InvalidMessage(t) => {
+                                kernel_common::uart::print(b"msg_");
+                                kernel_common::uart::print_usize(*t as usize);
+                            }
+                            ParseMessageError::InvalidNetwork => kernel_common::uart::print(b"net"),
+                            ParseMessageError::OutdatedVersion => kernel_common::uart::print(b"ver"),
+                            _ => kernel_common::uart::print(b"unknown"),
+                        }
+                        kernel_common::uart::print(b"]");
                         tracing::debug!(
                             "Message deserialization error: {:?} (addr: {})",
                             e,
@@ -334,16 +355,16 @@ impl DataReceiver for NanoDataReceiver {
                 ReceiveResult::Continue
             }
             ChannelMode::Realtime => {
-                let message = self.retry_enqueue.clone();
-                match message {
-                    Some(message) => {
-                        if self.try_enqueue(message) {
-                            ReceiveResult::Continue
-                        } else {
-                            ReceiveResult::Pause
-                        }
+                let mut guard = self.retry_enqueue.lock();
+                if let Some(message) = guard.as_ref() {
+                    if self.try_enqueue(message.clone()) {
+                        *guard = None;
+                        ReceiveResult::Continue
+                    } else {
+                        ReceiveResult::Pause
                     }
-                    None => ReceiveResult::Continue,
+                } else {
+                    ReceiveResult::Continue
                 }
             }
         }

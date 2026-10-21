@@ -8,15 +8,17 @@
 [bare_metal]
 # Nano network variant: "live" (NanoLiveNetwork), "beta" (NanoBetaNetwork), "dev" (NanoDevNetwork), or "test" (NanoTestNetwork)
 network = "live"
+# Set to true to wipe all blocks from persistent NVMe storage and start from zero (Genesis)
+wipe_blocks = false
 # Ethernet MAC address used by the U-Boot / smoltcp interface
 mac_address = "c0:74:2b:f9:15:ec"
 # Static IPv4 address and subnet prefix length
-ipv4_address = "192.168.0.200"
+ipv4_address = "192.168.1.200"
 ipv4_prefix_len = 24
 # Default IPv4 gateway
-gateway = "192.168.0.1"
+gateway = "192.168.1.1"
 # DNS resolver address
-dns_server = "1.1.1.1"
+dns_server = "192.168.1.1"
 
 [node]
 peering_port = 7075
@@ -31,7 +33,11 @@ representative_vote_weight_minimum = "0"
 # Preconfigured peers ("address:port" or hostname)
 preconfigured_peers = [
     "peering.nano.org:7075",
-    "192.168.1.151:7075", # local peer for testing
+		 "192.168.1.151:7075",  # local peer for testing
+         "37.120.187.138:7075", # live PR peer
+         "66.96.83.211:7075",   # live PR peer
+         "31.171.245.217:7075", # live PR peer
+         "139.59.31.249:7075",  # live PR peer
 ]
 
 [node.network]
