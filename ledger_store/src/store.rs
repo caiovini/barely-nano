@@ -44,7 +44,10 @@ pub struct BtreeStore {
 
 impl BtreeStore {
     pub fn new() -> Self {
-        let cache = Arc::new(LedgerCache::new());
+        Self::new_with_cache(Arc::new(LedgerCache::new()))
+    }
+
+    pub fn new_with_cache(cache: Arc<LedgerCache>) -> Self {
         Self {
             cache: cache.clone(),
             block: BtreeBlockStore::new(cache.clone()),

@@ -3,7 +3,7 @@ use core::cmp::{max, min};
 
 use rsnano_core::{utils::get_cpu_count, Amount};
 use rsnano_stats::Stats;
-use rsnano_ledger_store::{BtreeStore, LedgerCache};
+use rsnano_ledger_store::BtreeStore;
 
 use crate::{BootstrapWeights, Ledger, LedgerConstants, RepWeightCache};
 
@@ -52,7 +52,8 @@ impl LedgerBuilder {
     }
 
     pub fn finish(mut self) -> anyhow::Result<Ledger> {
-        let ledger_cache = Arc::new(LedgerCache::new());
+        let store = BtreeStore::new();
+        let ledger_cache = store.cache.clone();
         let bootstrap_weights = self.bootstrap_weights.unwrap_or_default();
 
         let rep_weights = Arc::new(RepWeightCache::with_bootstrap_weights(
@@ -68,8 +69,6 @@ impl LedgerBuilder {
         if self.thread_count == 0 {
             self.thread_count = max(1, min(40, 11 * get_cpu_count()));
         }
-
-        let store = BtreeStore::new();
 
         Ledger::new(
             store,
