@@ -325,7 +325,7 @@ impl Default for ProtocolInfo {
         Self {
             version_using: 0x1B,
             version_max: 0x1B,
-            version_min: 0x00,
+            version_min: 0x14,
             network: Networks::NanoLiveNetwork,
         }
     }

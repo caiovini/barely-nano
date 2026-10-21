@@ -163,7 +163,7 @@ impl Network {
             local_addr,
             peer_addr,
             direction,
-            0, // version
+            self.protocol.version_min, // version
             now,
             self.limiter.clone(),
             self.stats.clone(),
@@ -319,7 +319,10 @@ impl Network {
     pub fn purge(&mut self, now: Timestamp, cutoff_period: Duration) -> Vec<Arc<Channel>> {
         let mut to_remove = Vec::new();
         for (id, channel) in &self.channels {
-            if channel.is_closed() || now.millis() - channel.last_activity().millis() >= cutoff_period.as_millis() as i64 {
+            if channel.is_closed()
+                || now.millis() - channel.last_activity().millis() >= cutoff_period.as_millis() as i64
+                || channel.protocol_version() < self.protocol.version_min
+            {
                 to_remove.push(*id);
                 kernel_common::uart::putchar(b'~');
             }
