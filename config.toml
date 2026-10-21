@@ -33,11 +33,11 @@ representative_vote_weight_minimum = "0"
 # Preconfigured peers ("address:port" or hostname)
 preconfigured_peers = [
     "peering.nano.org:7075",
-		 "192.168.1.151:7075",  # local peer for testing
-         "37.120.187.138:7075", # live PR peer
-         "66.96.83.211:7075",   # live PR peer
-         "31.171.245.217:7075", # live PR peer
-         "139.59.31.249:7075",  # live PR peer
+    "192.168.1.151:7075",  # local peer for testing
+    "37.120.187.138:7075", # live PR peer
+    "66.96.83.211:7075",   # live PR peer
+    "31.171.245.217:7075", # live PR peer
+    "139.59.31.249:7075",  # live PR peer
 ]
 
 [node.network]

@@ -604,7 +604,6 @@ impl Ledger {
                     if let Some(saved_block) =
                         BlockInserter::new(self, &mut (), block, &instructions).insert()
                     {
-                        self.store.cache.block_count.fetch_add(1, Ordering::SeqCst);
                         tracing::debug!(
                             "Ledger: processed block {} (Account: {}, Height: {})",
                             saved_block.hash(),

@@ -81,6 +81,54 @@ impl BtreePendingStore {
         results
     }
 
+    pub fn for_each_from<F>(&self, start: PendingKey, mut f: F)
+    where
+        F: FnMut(PendingKey, PendingInfo),
+    {
+        let mut start_key = [0u8; KEY_SIZE];
+        start_key[0] = Self::TABLE_ID;
+        start_key[1..65].copy_from_slice(&start.to_bytes());
+
+        let start_shard = get_shard_index(&start_key);
+
+        for i in start_shard..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(btree) = lock.as_mut() {
+                let seek_key = if i == start_shard {
+                    start_key
+                } else {
+                    let mut k = [0u8; KEY_SIZE];
+                    k[0] = Self::TABLE_ID;
+                    k[1] = (i as u8) << 4;
+                    k
+                };
+                let mut it = btree.iter(seek_key);
+                while let Some((k, v)) = it.next_kv() {
+                    if k[0] != Self::TABLE_ID {
+                        break;
+                    }
+                    let mut reader = BufferReader::new(&v);
+                    if let Ok(info) = PendingInfo::deserialize(&mut reader) {
+                        let mut key_reader = BufferReader::new(&k[1..]);
+                        if let Ok(key) = PendingKey::deserialize(&mut key_reader) {
+                            f(key, info);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn iter_range(&self, start: PendingKey) -> Vec<(PendingKey, PendingInfo)> {
+        let mut results = Vec::new();
+        self.for_each_from(start, |key, info| {
+            if results.len() < 512 {
+                results.push((key, info));
+            }
+        });
+        results
+    }
+
     pub fn for_each<F>(&self, mut f: F)
     where
         F: FnMut(PendingKey, PendingInfo),

@@ -94,11 +94,20 @@ impl BtreeAccountStore {
         F: FnMut(Account, AccountInfo),
     {
         let start_key = self.make_key(&start);
+        let start_shard = get_shard_index(&start_key);
 
-        for i in 0..SHARD_COUNT {
+        for i in start_shard..SHARD_COUNT {
             let mut lock = SHARDS[i].lock();
             if let Some(db) = lock.as_mut() {
-                let mut it = db.iter(start_key);
+                let seek_key = if i == start_shard {
+                    start_key
+                } else {
+                    let mut k = [0u8; KEY_SIZE];
+                    k[0] = Self::TABLE_ID;
+                    k[1] = (i as u8) << 4;
+                    k
+                };
+                let mut it = db.iter(seek_key);
                 while let Some((key, value)) = it.next_kv() {
                     if key[0] != Self::TABLE_ID {
                         break;

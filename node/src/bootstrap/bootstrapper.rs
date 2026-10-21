@@ -174,11 +174,15 @@ impl Bootstrapper {
     }
 
     pub fn initialize(&self, genesis_account: &Account) {
+        self.prioritize_account(genesis_account);
+    }
+
+    pub fn prioritize_account(&self, account: &Account) {
         let inserted = self
             .state
             .lock()
             .candidate_accounts
-            .priority_set(genesis_account, crate::bootstrap::state::CandidateAccounts::PRIORITY_MAX);
+            .priority_set(account, crate::bootstrap::state::CandidateAccounts::PRIORITY_MAX);
 
         if inserted {
             self.priority_inserted()

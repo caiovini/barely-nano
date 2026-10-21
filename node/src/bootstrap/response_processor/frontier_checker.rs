@@ -51,13 +51,7 @@ impl<'a> FrontierChecker<'a> {
                     pending += 1;
                     accounts.push(frontier.account);
                 }
-                FrontierCheckResult::UnknownAccount => {
-                    outdated += 1;
-                    accounts.push(frontier.account);
-                }
-                _ => {
-                    
-                }
+                FrontierCheckResult::UnknownAccount | FrontierCheckResult::UpToDate => {}
             }
         }
 
@@ -125,8 +119,8 @@ mod tests {
             LedgerSpec::default(),
             &frontiers,
             OutdatedAccounts {
-                accounts: vec![frontiers[0].account],
-                outdated: 1,
+                accounts: Vec::new(),
+                outdated: 0,
                 pending: 0,
                 fontiers_received: 1,
             },
@@ -211,8 +205,8 @@ mod tests {
         };
         let frontiers = [Frontier::new(Account::from(1), BlockHash::from(2))];
         let expected = OutdatedAccounts {
-            accounts: vec![frontiers[0].account],
-            outdated: 1,
+            accounts: Vec::new(),
+            outdated: 0,
             pending: 0,
             fontiers_received: 1,
         };
@@ -227,8 +221,8 @@ mod tests {
         };
         let frontiers = [Frontier::new(Account::from(1), BlockHash::from(2))];
         let expected = OutdatedAccounts {
-            accounts: vec![frontiers[0].account],
-            outdated: 1,
+            accounts: Vec::new(),
+            outdated: 0,
             pending: 0,
             fontiers_received: 1,
         };

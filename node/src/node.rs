@@ -552,6 +552,12 @@ impl Node {
             steady_clock.clone(),
         ));
         bootstrapper.initialize(&network_params.ledger.genesis_account);
+        for (account, _) in ledger.any().iter_accounts() {
+            bootstrapper.prioritize_account(&account);
+        }
+        for (key, _) in ledger.store.pending.iter() {
+            bootstrapper.prioritize_account(&key.receiving_account);
+        }
 
         let bootstrapper_w = Arc::downgrade(&bootstrapper);
         let election_schedulers = Arc::new(ElectionSchedulers::new(

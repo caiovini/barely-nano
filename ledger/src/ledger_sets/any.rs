@@ -105,9 +105,15 @@ impl<'a> OwningAnySet<'a> {
 
     pub fn iter_pending_range(
         &self,
-        _range: impl RangeBounds<PendingKey> + 'static,
+        range: impl RangeBounds<PendingKey> + 'static,
     ) -> Vec<(PendingKey, PendingInfo)> {
-        Vec::new()
+        use core::ops::Bound::*;
+        let start = match range.start_bound() {
+            Included(k) => *k,
+            Excluded(k) => *k,
+            Unbounded => PendingKey::new(Account::zero(), BlockHash::zero()),
+        };
+        self.store.pending.iter_range(start)
     }
 
     pub fn iter_accounts(&self) -> Vec<(Account, AccountInfo)> {
