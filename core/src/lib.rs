@@ -323,8 +323,8 @@ pub struct ProtocolInfo {
 impl Default for ProtocolInfo {
     fn default() -> Self {
         Self {
-            version_using: 0x1B,
-            version_max: 0x1B,
+            version_using: 0x15,
+            version_max: 0x15,
             version_min: 0x14,
             network: Networks::NanoLiveNetwork,
         }

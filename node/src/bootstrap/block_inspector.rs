@@ -72,7 +72,7 @@ impl BlockInspector {
         state: &mut BootstrapState,
         result: &ProcessedResult,
         account: &Account,
-        is_cascading: bool,
+        _is_cascading: bool,
     ) {
         let hash = result.block.hash();
 
@@ -168,11 +168,6 @@ impl BlockInspector {
                 }
             }
             Err(BlockError::GapPrevious) => {
-                if result.source == BlockSource::Bootstrap && !is_cascading {
-                    // Long-term ban for pruned nodes that return incomplete histories
-                    state.scoring.punish(result.channel_id, 100000);
-                }
-
                 // Prevent live traffic from evicting accounts from the priority list
                 if result.source == BlockSource::Live
                     && !state.candidate_accounts.priority_half_full()

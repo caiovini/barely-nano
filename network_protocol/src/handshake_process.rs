@@ -58,8 +58,7 @@ impl HandshakeProcess {
                 512,
             );
             let buffer = serializer.serialize(&message);
-            self.channel
-                .send(buffer, rsnano_network::TrafficType::Generic);
+            self.channel.send_handshake(buffer);
         }
         Ok(())
     }
