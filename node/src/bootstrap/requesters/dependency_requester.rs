@@ -31,29 +31,31 @@ impl DependencyRequester {
 
 impl BootstrapPromise<AscPullQuerySpec> for DependencyRequester {
     fn poll(&mut self, state: &mut BootstrapState, now: Timestamp) -> PollResult<AscPullQuerySpec> {
-        match self.state {
-            DependencyState::Initial => {
-                self.stats
-                    .inc(StatType::Bootstrap, DetailType::LoopDependencies);
-                self.state = DependencyState::WaitChannel;
-                PollResult::Progress
-            }
-            DependencyState::WaitChannel => match self.channel_waiter.poll(state, now) {
-                PollResult::Wait => PollResult::Wait,
-                PollResult::Progress => PollResult::Progress,
-                PollResult::Finished(channel) => {
-                    self.state = DependencyState::WaitBlocking(channel);
-                    PollResult::Progress
-                }
-            },
-            DependencyState::WaitBlocking(ref channel) => {
-                if let Some(spec) = state.next_blocking_query(channel, now) {
+        loop {
+            match self.state {
+                DependencyState::Initial => {
                     self.stats
-                        .inc(StatType::BootstrapNext, DetailType::NextBlocking);
-                    self.state = DependencyState::Initial;
-                    PollResult::Finished(spec)
-                } else {
-                    PollResult::Wait
+                        .inc(StatType::Bootstrap, DetailType::LoopDependencies);
+                    self.state = DependencyState::WaitChannel;
+                }
+                DependencyState::WaitChannel => match self.channel_waiter.poll(state, now) {
+                    PollResult::Wait => return PollResult::Wait,
+                    PollResult::Progress => continue,
+                    PollResult::Finished(channel) => {
+                        self.state = DependencyState::WaitBlocking(channel);
+                    }
+                },
+                DependencyState::WaitBlocking(ref channel) => {
+                    if let Some(spec) = state.next_blocking_query(channel, now) {
+                        self.stats
+                            .inc(StatType::BootstrapNext, DetailType::NextBlocking);
+                        self.state = DependencyState::Initial;
+                        return PollResult::Finished(spec);
+                    } else {
+                        state.scoring.request_finished(channel.channel_id());
+                        self.state = DependencyState::Initial;
+                        return PollResult::Wait;
+                    }
                 }
             }
         }

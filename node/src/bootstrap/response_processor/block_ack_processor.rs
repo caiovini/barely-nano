@@ -96,9 +96,9 @@ impl BlockAckProcessor {
                         block,
                         BlockSource::Bootstrap,
                         channel_id,
-                        Box::new(move |_| {
-                            stats.inc(StatType::Bootstrap, DetailType::TimestampReset);
-                            {
+                        Box::new(move |res| {
+                            if res.is_ok() {
+                                stats.inc(StatType::Bootstrap, DetailType::TimestampReset);
                                 let mut guard = state.lock();
                                 guard.candidate_accounts.reset_last_request(&account);
                             }

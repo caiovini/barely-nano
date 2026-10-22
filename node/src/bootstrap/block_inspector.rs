@@ -72,8 +72,12 @@ impl BlockInspector {
         state: &mut BootstrapState,
         result: &ProcessedResult,
         account: &Account,
-        _is_cascading: bool,
+        is_cascading: bool,
     ) {
+        if is_cascading {
+            return;
+        }
+
         let hash = result.block.hash();
 
         match result.status {

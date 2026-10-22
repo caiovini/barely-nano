@@ -589,9 +589,20 @@ impl Ledger {
         batch: impl IntoIterator<Item = (&'a Block, bool)>,
     ) -> BatchProcessResult {
         let mut processed = Vec::new();
+        let mut failed_accounts = alloc::collections::BTreeSet::new();
 
         for (block, signature_verified) in batch.into_iter() {
             let hash = block.hash();
+
+            // Fast-path: if an earlier block of this account failed in this batch,
+            // this block's predecessor cannot exist. Reject immediately as GapPrevious.
+            if let Some(account) = block.account_field() {
+                if failed_accounts.contains(&account) {
+                    processed.push((Err(BlockError::GapPrevious), None));
+                    continue;
+                }
+            }
+
             tracing::debug!("Ledger: validating block {}", hash);
 
             let any = OwningAnySet::new(&self.store, &self.constants);
@@ -612,11 +623,17 @@ impl Ledger {
                         );
                         processed.push((Ok(()), Some(saved_block)));
                     } else {
+                        if let Some(account) = block.account_field() {
+                            failed_accounts.insert(account);
+                        }
                         tracing::debug!("Ledger: conflict for block {}", block.hash());
                         processed.push((Err(BlockError::Conflict), None));
                     }
                 }
                 Err(err) => {
+                    if let Some(account) = block.account_field() {
+                        failed_accounts.insert(account);
+                    }
                     tracing::debug!("Ledger: validation failed for block {}! Error: {:?}", hash, err);
 
                     tracing::debug!(

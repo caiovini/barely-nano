@@ -9,7 +9,7 @@ use strum::{EnumCount, IntoEnumIterator};
 use tracing::{debug, warn};
 
 use rsnano_core::{
-    BlockType, Epoch, UncheckedInfo,
+    Block, BlockType, Epoch, UncheckedInfo,
     utils::{BackpressureSender, backpressure_channel},
 };
 use rsnano_ledger::{BlockError, Ledger};
@@ -47,59 +47,15 @@ impl BlockBatchProcessor {
 
         self.roll_back_competitor_blocks(&batch);
 
-        let ledger_res = if batch.len() == 1 {
-            let ctx = &batch[0];
-            let is_valid = if ctx.block.is_signature_verified() || ctx.source == BlockSource::Local {
-                true
-            } else if let Some(account) = ctx.block.account_field() {
-                ctx.block.verify_with_key(&account.as_key()).is_ok()
-            } else {
-                false
-            };
-            self.ledger.process_batch_with_verifications([(&ctx.block, is_valid)])
-        } else {
-            // 1. Submit all blocks for parallel signature verification
-            let verifications: Vec<_> = batch.iter().map(|ctx| {
-                if ctx.block.is_signature_verified() || ctx.source == BlockSource::Local {
-                    let result = Arc::new(core::sync::atomic::AtomicU8::new(crate::signatures::SignatureResult::Valid as u8));
-                    let finished = Arc::new(core::sync::atomic::AtomicBool::new(true));
-                    (result, finished)
-                } else {
-                    // For State blocks, we can derive the account immediately.
-                    // For Legacy blocks, we might need a B-Tree lookup (Unknown).
-                    let account = ctx.block.account_field();
-                    self.signature_checker.push(Arc::new(ctx.block.clone()), account)
-                }
-            }).collect();
+        let ledger_input: Vec<(&Block, bool)> = batch
+            .iter()
+            .map(|ctx| {
+                let is_valid = ctx.block.is_signature_verified() || ctx.source == BlockSource::Local;
+                (&ctx.block, is_valid)
+            })
+            .collect();
 
-            // 2. Help verify while waiting for the batch to finish
-            for (_, finished) in &verifications {
-                while !finished.load(core::sync::atomic::Ordering::SeqCst) {
-                    if !self.signature_checker.help_verify() {
-                        core::hint::spin_loop();
-                    }
-                }
-            }
-
-            // 3. Process the batch in the ledger, using pre-verified signatures where available
-            let mut valid_indices = Vec::new();
-            let mut ledger_input = Vec::new();
-
-            for ((i, ctx), (result, _)) in batch.iter().enumerate().zip(verifications) {
-                let res_u8 = result.load(core::sync::atomic::Ordering::Acquire);
-                valid_indices.push(i);
-                ledger_input.push((&ctx.block, res_u8 == crate::signatures::SignatureResult::Valid as u8));
-            }
-
-            let lr = self.ledger.process_batch_with_verifications(ledger_input);
-            let mut processed = vec![(Err(BlockError::BadSignature), None); batch.len()];
-            for (i, res) in valid_indices.into_iter().zip(lr.processed) {
-                processed[i] = res;
-            }
-            rsnano_ledger::BatchProcessResult { processed }
-        };
-
-        let mut result = ledger_res;
+        let mut result = self.ledger.process_batch_with_verifications(ledger_input);
 
         let processed_result: Vec<_> = result
             .processed

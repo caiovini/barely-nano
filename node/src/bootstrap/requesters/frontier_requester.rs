@@ -67,51 +67,53 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
         boot_state: &mut BootstrapState,
         now: Timestamp,
     ) -> PollResult<AscPullQuerySpec> {
-        match self.state {
-            FrontierState::Initial => {
-                self.stats
-                    .inc(StatType::Bootstrap, DetailType::LoopFrontiers);
-                self.state = FrontierState::WaitLimiter;
-                return PollResult::Progress;
-            }
-            FrontierState::WaitLimiter => {
-                if self.frontiers_limiter.try_consume(1, now) {
-                    self.state = FrontierState::WaitAckProcessor;
-                    return PollResult::Progress;
-                }
-            }
-            FrontierState::WaitAckProcessor => {
-                if !boot_state.frontier_ack_processor_busy {
-                    self.state = FrontierState::WaitChannel;
-                    return PollResult::Progress;
-                }
-            }
-            FrontierState::WaitChannel => match self.channel_waiter.poll(boot_state, now) {
-                PollResult::Wait => {
-                    return PollResult::Wait;
-                }
-                PollResult::Progress => return PollResult::Progress,
-                PollResult::Finished(channel) => {
-                    self.state = FrontierState::WaitFrontier(channel);
-                    return PollResult::Progress;
-                }
-            },
-            FrontierState::WaitFrontier(ref channel) => {
-                let now = self.clock.now();
-                let start = boot_state.frontier_scan.next(now);
-                if !start.is_zero() {
+        loop {
+            match self.state {
+                FrontierState::Initial => {
                     self.stats
-                        .inc(StatType::BootstrapNext, DetailType::NextFrontier);
-                    let spec = Self::create_query_spec(channel, start);
-                    self.state = FrontierState::Initial;
-                    return PollResult::Finished(spec);
-                } else {
-                    self.stats
-                        .inc(StatType::BootstrapFrontierScan, DetailType::NextNone);
+                        .inc(StatType::Bootstrap, DetailType::LoopFrontiers);
+                    self.state = FrontierState::WaitLimiter;
+                }
+                FrontierState::WaitLimiter => {
+                    if self.frontiers_limiter.try_consume(1, now) {
+                        self.state = FrontierState::WaitAckProcessor;
+                    } else {
+                        return PollResult::Wait;
+                    }
+                }
+                FrontierState::WaitAckProcessor => {
+                    if !boot_state.frontier_ack_processor_busy {
+                        self.state = FrontierState::WaitChannel;
+                    } else {
+                        return PollResult::Wait;
+                    }
+                }
+                FrontierState::WaitChannel => match self.channel_waiter.poll(boot_state, now) {
+                    PollResult::Wait => return PollResult::Wait,
+                    PollResult::Progress => continue,
+                    PollResult::Finished(channel) => {
+                        self.state = FrontierState::WaitFrontier(channel);
+                    }
+                },
+                FrontierState::WaitFrontier(ref channel) => {
+                    let now = self.clock.now();
+                    let start = boot_state.frontier_scan.next(now);
+                    if !start.is_zero() {
+                        self.stats
+                            .inc(StatType::BootstrapNext, DetailType::NextFrontier);
+                        let spec = Self::create_query_spec(channel, start);
+                        self.state = FrontierState::Initial;
+                        return PollResult::Finished(spec);
+                    } else {
+                        self.stats
+                            .inc(StatType::BootstrapFrontierScan, DetailType::NextNone);
+                        boot_state.scoring.request_finished(channel.channel_id());
+                        self.state = FrontierState::Initial;
+                        return PollResult::Wait;
+                    }
                 }
             }
         }
-        PollResult::Wait
     }
 }
 
