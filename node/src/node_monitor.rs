@@ -145,10 +145,10 @@ impl NodeMonitor {
 
         let _missing = confirmed_count.saturating_sub(block_count + pruned_count);
         let unchecked_count = self.unchecked.len();
-        let _queries_count = self.bootstrapper.state().running_queries.len();
-        let _prio_len = self.bootstrapper.state().candidate_accounts.priority_len();
+        let queries_count = self.bootstrapper.state().running_queries.len();
+        let prio_len = self.bootstrapper.state().candidate_accounts.priority_len();
         let blocked_len = self.bootstrapper.state().candidate_accounts.blocked_len();
-        let _bp_queue = self.block_processor.total_queue_len();
+        let bp_queue = self.block_processor.total_queue_len();
         let _bp_progress = self.block_processor.total_processed();
         let _peer_count = self.network.read().channels_info().total;
 
@@ -164,13 +164,17 @@ impl NodeMonitor {
 
         let account_count = self.ledger.account_count();
         info!(
-            "Blocks: {} (conf: {} | unchecked: {} | accs: {}) | rate: {} bps | {} cps",
+            "Blocks: {} (conf: {} | unchecked: {} | accs: {}) | rate: {} bps | {} cps | Boot: [q: {}, prio: {}, blk: {}, bpq: {}]",
             block_count,
             confirmed_count,
             unchecked_count,
             account_count,
             blocks_checked_rate,
             blocks_confirmed_rate,
+            queries_count,
+            prio_len,
+            blocked_len,
+            bp_queue,
         );
     }
 }

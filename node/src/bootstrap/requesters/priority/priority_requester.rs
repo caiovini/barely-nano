@@ -74,41 +74,42 @@ enum PriorityState {
 
 impl BootstrapPromise<AscPullQuerySpec> for PriorityRequester {
     fn poll(&mut self, state: &mut BootstrapState, now: Timestamp) -> PollResult<AscPullQuerySpec> {
-        match self.state {
-            PriorityState::Initial => {
-                self.stats.loop_count.fetch_add(1, Ordering::Relaxed);
-                self.state = PriorityState::WaitBlockProcessor;
-                PollResult::Progress
-            }
-            PriorityState::WaitBlockProcessor => {
-                if self.block_processor_free() {
-                    self.state = PriorityState::WaitChannel;
-                    PollResult::Progress
-                } else {
-                    self.stats
-                        .wait_block_processor
-                        .fetch_add(1, Ordering::Relaxed);
-                    PollResult::Wait
+        loop {
+            match self.state {
+                PriorityState::Initial => {
+                    self.stats.loop_count.fetch_add(1, Ordering::Relaxed);
+                    self.state = PriorityState::WaitBlockProcessor;
                 }
-            }
-            PriorityState::WaitChannel => match self.channel_waiter.poll(state, now) {
-                PollResult::Progress => PollResult::Progress,
-                PollResult::Wait => PollResult::Wait,
-                PollResult::Finished(channel) => {
-                    self.state = PriorityState::WaitPriority(channel);
-                    PollResult::Progress
+                PriorityState::WaitBlockProcessor => {
+                    if self.block_processor_free() {
+                        self.state = PriorityState::WaitChannel;
+                    } else {
+                        self.stats
+                            .wait_block_processor
+                            .fetch_add(1, Ordering::Relaxed);
+                        return PollResult::Wait;
+                    }
                 }
-            },
-            PriorityState::WaitPriority(ref channel) => {
-                if let Some(query) =
-                    self.query_factory
-                        .next_priority_query(state, channel.clone(), self.clock.now())
-                {
-                    self.state = PriorityState::Initial;
-                    PollResult::Finished(query)
-                } else {
-                    self.stats.wait_priority.fetch_add(1, Ordering::Relaxed);
-                    PollResult::Wait
+                PriorityState::WaitChannel => match self.channel_waiter.poll(state, now) {
+                    PollResult::Progress => {}
+                    PollResult::Wait => return PollResult::Wait,
+                    PollResult::Finished(channel) => {
+                        self.state = PriorityState::WaitPriority(channel);
+                    }
+                },
+                PriorityState::WaitPriority(ref channel) => {
+                    if let Some(query) =
+                        self.query_factory
+                            .next_priority_query(state, channel.clone(), self.clock.now())
+                    {
+                        self.state = PriorityState::Initial;
+                        return PollResult::Finished(query);
+                    } else {
+                        self.stats.wait_priority.fetch_add(1, Ordering::Relaxed);
+                        state.scoring.request_finished(channel.channel_id());
+                        self.state = PriorityState::Initial;
+                        return PollResult::Wait;
+                    }
                 }
             }
         }

@@ -80,6 +80,11 @@ impl BlockAckProcessor {
             blocks.pop_front();
         }
 
+        if blocks.is_empty() {
+            self.process_empty_response(query);
+            return;
+        }
+
         while let Some(block) = blocks.pop_front() {
             if blocks.is_empty() {
                 // It's the last block submitted for this account chain, reset timestamp to allow more requests

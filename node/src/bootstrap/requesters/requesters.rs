@@ -169,26 +169,27 @@ impl Requesters {
                         break;
                     }
 
-                    let now = runner.clock.now();
+                    let mut sent_any = false;
+                    for _ in 0..16 {
+                        let now = runner.clock.now();
+                        let result = {
+                            let mut state = runner.state.lock();
+                            promise.poll(&mut state, now)
+                        };
 
-                    let result = {
-                        let mut state = runner.state.lock();
-                        promise.poll(&mut state, now)
-                    };
+                        match result {
+                            PollResult::Finished(_) => {}
+                            PollResult::Wait => break,
+                            PollResult::Progress => {
+                                sent_any = true;
+                            }
+                        }
+                    }
 
-                    match result {
-                        PollResult::Finished(_) => {
-                            // This should not happen for SendQueriesPromise
-                        }
-                        PollResult::Wait => {
-                            // All channels busy or rate limited, wait a bit
-                            kernel_common::async_rt::sleep(core::time::Duration::from_millis(10))
-                                .await;
-                        }
-                        PollResult::Progress => {
-                            // Sent a query, try to send more immediately!
-                            kernel_common::async_rt::yield_now().await;
-                        }
+                    if sent_any {
+                        kernel_common::async_rt::yield_now().await;
+                    } else {
+                        kernel_common::async_rt::sleep(core::time::Duration::from_millis(5)).await;
                     }
                 }
             },

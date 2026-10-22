@@ -59,53 +59,45 @@ impl BootstrapPromise<Arc<Channel>> for ChannelWaiter {
         boot_state: &mut BootstrapState,
         now: Timestamp,
     ) -> PollResult<Arc<Channel>> {
-        match self.state {
-            ChannelWaitState::Initial => {
-                self.state = ChannelWaitState::WaitRunningQueries;
-                return PollResult::Progress;
-            }
-            ChannelWaitState::WaitRunningQueries => {
-                // Limit the number of in-flight requests
-                if boot_state.running_queries.len() < self.max_requests {
-                    self.state = ChannelWaitState::WaitLimiter;
-                    return PollResult::Progress;
+        loop {
+            match self.state {
+                ChannelWaitState::Initial => {
+                    self.state = ChannelWaitState::WaitRunningQueries;
                 }
-                self.stats.queries_overfill.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    "ChannelWaiter: waiting for running queries (count: {})",
-                    boot_state.running_queries.len()
-                );
-            }
-            ChannelWaitState::WaitLimiter => {
-                // Wait until more requests can be sent
-                if self.limiter.lock().try_consume(1, now) {
-                    self.state = ChannelWaitState::WaitChannel;
-                    return PollResult::Progress;
-                }
-                self.stats.rate_limit.fetch_add(1, Ordering::Relaxed);
-                // tracing::info!("ChannelWaiter: rate limited");
-            }
-            ChannelWaitState::WaitChannel => {
-                // Wait until a channel is available
-                let network = self.network.read();
-                let channel_ids = Self::candidate_channels(&network);
-
-                if channel_ids.is_empty() {
-                    tracing::debug!("ChannelWaiter: no realtime channels available");
-                }
-
-                if let Some(channel_id) = boot_state.scoring.channel(channel_ids) {
-                    if let Some(channel) = network.get(channel_id) {
-                        self.state = ChannelWaitState::Initial;
-                        return PollResult::Finished(channel.clone());
+                ChannelWaitState::WaitRunningQueries => {
+                    // Limit the number of in-flight requests
+                    if boot_state.running_queries.len() < self.max_requests {
+                        self.state = ChannelWaitState::WaitLimiter;
+                    } else {
+                        self.stats.queries_overfill.fetch_add(1, Ordering::Relaxed);
+                        return PollResult::Wait;
                     }
                 }
-                self.stats.no_candidate.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!("ChannelWaiter: no candidate channel found by scoring");
+                ChannelWaitState::WaitLimiter => {
+                    // Wait until more requests can be sent
+                    if self.limiter.lock().try_consume(1, now) {
+                        self.state = ChannelWaitState::WaitChannel;
+                    } else {
+                        self.stats.rate_limit.fetch_add(1, Ordering::Relaxed);
+                        return PollResult::Wait;
+                    }
+                }
+                ChannelWaitState::WaitChannel => {
+                    // Wait until a channel is available
+                    let network = self.network.read();
+                    let channel_ids = Self::candidate_channels(&network);
+
+                    if let Some(channel_id) = boot_state.scoring.channel(channel_ids) {
+                        if let Some(channel) = network.get(channel_id) {
+                            self.state = ChannelWaitState::Initial;
+                            return PollResult::Finished(channel.clone());
+                        }
+                    }
+                    self.stats.no_candidate.fetch_add(1, Ordering::Relaxed);
+                    return PollResult::Wait;
+                }
             }
         }
-
-        PollResult::Wait
     }
 }
 
