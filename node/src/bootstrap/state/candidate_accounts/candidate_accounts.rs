@@ -1,5 +1,6 @@
 use core::cmp::min;
 use core::time::Duration;
+use rsnano_ledger::{Ledger, LedgerSet};
 use super::{
     blocking_container::{BlockingContainer, BlockingEntry},
     priority::Priority,
@@ -225,6 +226,35 @@ impl CandidateAccounts {
         }
 
         false
+    }
+
+    pub fn unblock_hash(&mut self, hash: &BlockHash) -> usize {
+        let accounts = self.blocking.accounts_by_dependency(hash);
+        let mut unblocked = 0;
+        for account in accounts {
+            if self.unblock(account, Some(*hash)) {
+                unblocked += 1;
+            }
+        }
+        unblocked
+    }
+
+    pub fn unblock_fulfilled(&mut self, ledger: &Ledger) -> usize {
+        let any = ledger.any();
+        let mut unblocked = 0;
+        let entries: alloc::vec::Vec<(Account, BlockHash)> = self.blocking
+            .iter_by_insertion_order()
+            .map(|e| (e.account, e.dependency))
+            .collect();
+
+        for (account, dependency) in entries {
+            if any.block_exists(&dependency) {
+                if self.unblock(account, Some(dependency)) {
+                    unblocked += 1;
+                }
+            }
+        }
+        unblocked
     }
 
     /// Should be called periodically to remove old entries from the blocking set

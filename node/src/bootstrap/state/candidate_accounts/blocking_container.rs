@@ -159,6 +159,10 @@ impl BlockingContainer {
         self.by_account.get(account)
     }
 
+    pub fn accounts_by_dependency(&self, dependency: &BlockHash) -> Vec<Account> {
+        self.by_dependency.get(dependency).cloned().unwrap_or_default()
+    }
+
     pub fn pop_oldest(&mut self) -> Option<BlockingEntry> {
         let oldest = self.sequenced.front()?.clone();
         self.remove(&oldest)

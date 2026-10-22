@@ -7,7 +7,7 @@ use rsnano_ledger::{AnySet, BlockError, Ledger};
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{DetailType, StatType, Stats};
 
-use super::state::{BootstrapState, PriorityUpResult};
+use super::state::BootstrapState;
 use crate::block_processing::{BlockSource, ProcessedResult};
 
 /// Inspects a processed block and adjusts the bootstrap state accordingly
@@ -47,6 +47,17 @@ impl BlockInspector {
             }
             
             self.inspect_block(&mut state, result, &account, is_cascading);
+        }
+
+        if state.candidate_accounts.blocked_len() > 0 {
+            let unblocked = state.candidate_accounts.unblock_fulfilled(&self.ledger);
+            if unblocked > 0 {
+                self.stats.add(
+                    StatType::BootstrapAccountSets,
+                    DetailType::PriorityUnblocked,
+                    unblocked as u64,
+                );
+            }
         }
     }
 
@@ -102,46 +113,29 @@ impl BlockInspector {
                             .inc(StatType::BootstrapAccountSets, DetailType::UnblockFailed);
                     }
 
-                    let boost = super::state::Priority::new(1024.0);
-                    match state.candidate_accounts.priority_up_with(&account, boost) {
-                        PriorityUpResult::Updated => {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::Prioritize);
-                        }
-                        PriorityUpResult::Inserted => {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::Prioritize);
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
-                        }
-                        PriorityUpResult::AccountBlocked => {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
-                        }
-                        PriorityUpResult::InvalidAccount => {}
+                    // Unblock any accounts waiting for this specific block hash
+                    let unblocked = state.candidate_accounts.unblock_hash(&hash);
+                    if unblocked > 0 {
+                        self.stats.add(
+                            StatType::BootstrapAccountSets,
+                            DetailType::PriorityUnblocked,
+                            unblocked as u64,
+                        );
                     }
 
+                    let boost = super::state::Priority::new(1024.0);
+                    let _ = state.candidate_accounts.priority_up_with(&account, boost);
+
                     if saved_block.is_send() {
-                        let destination = saved_block.destination().unwrap();
-                        // Unblocking automatically inserts account into priority set
-                        if state.candidate_accounts.unblock(destination, Some(hash)) {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::Unblock);
-                            self.stats.inc(
-                                StatType::BootstrapAccountSets,
-                                DetailType::PriorityUnblocked,
-                            );
-                        } else {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::UnblockFailed);
+                        if let Some(destination) = saved_block.destination() {
+                            if !destination.is_zero() {
+                                let _ = state.candidate_accounts.unblock(destination, Some(hash));
+                                if state.candidate_accounts.priority_set_initial(&destination) {
+                                    self.stats
+                                        .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
+                                }
+                            }
                         }
-                        if state.candidate_accounts.priority_set_initial(&destination) {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
-                        } else {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
-                        };
                     }
                 }
             }
