@@ -5,6 +5,7 @@ use spin::Mutex;
 use rsnano_messages::BlocksAckPayload;
 use rsnano_network::ChannelId;
 use rsnano_stats::{DetailType, Direction, StatType, Stats};
+use rsnano_ledger::{Ledger, LedgerSet};
 
 use crate::{
     block_processing::{BlockContext, BlockProcessorQueue, BlockSource},
@@ -15,6 +16,7 @@ pub(crate) struct BlockAckProcessor {
     state: Arc<Mutex<BootstrapState>>,
     stats: Arc<Stats>,
     block_processor_queue: Arc<BlockProcessorQueue>,
+    ledger: Arc<Ledger>,
 }
 
 impl BlockAckProcessor {
@@ -22,11 +24,13 @@ impl BlockAckProcessor {
         state: Arc<Mutex<BootstrapState>>,
         stats: Arc<Stats>,
         block_processor_queue: Arc<BlockProcessorQueue>,
+        ledger: Arc<Ledger>,
     ) -> Self {
         Self {
             state,
             stats,
             block_processor_queue,
+            ledger,
         }
     }
 
@@ -82,6 +86,48 @@ impl BlockAckProcessor {
 
         if blocks.is_empty() {
             self.process_empty_response(query);
+            return;
+        }
+
+        let any = self.ledger.any();
+
+        // 1. Drop blocks that are already known in the ledger
+        while let Some(b) = blocks.front() {
+            if any.block_exists(&b.hash()) {
+                blocks.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if blocks.is_empty() {
+            self.process_empty_response(query);
+            return;
+        }
+
+        let first = blocks.front().unwrap();
+        let target_account = first.account_field().unwrap_or(query.account);
+
+        // 2. If the first block is missing its dependency, block the account immediately
+        // and do not flood the BlockProcessorQueue with doomed cascading blocks.
+        if first.previous().is_zero() {
+            let source = first.source_or_link();
+            if !source.is_zero() && !any.block_exists(&source) {
+                if !target_account.is_zero() {
+                    let now = rsnano_nullable_clock::Timestamp::now();
+                    let mut guard = self.state.lock();
+                    guard.candidate_accounts.block(target_account, source, now);
+                    self.stats.inc(StatType::BootstrapAccountSets, DetailType::Block);
+                }
+                return;
+            }
+        } else if !any.block_exists(&first.previous()) {
+            if !target_account.is_zero() {
+                let now = rsnano_nullable_clock::Timestamp::now();
+                let mut guard = self.state.lock();
+                guard.candidate_accounts.block(target_account, first.previous(), now);
+                self.stats.inc(StatType::BootstrapAccountSets, DetailType::Block);
+            }
             return;
         }
 
@@ -159,7 +205,8 @@ mod tests {
         let state = Arc::new(Mutex::new(BootstrapState::default()));
         let stats = Arc::new(Stats::default());
         let block_processor_queue = Arc::new(BlockProcessorQueue::default());
-        let processor = BlockAckProcessor::new(state, stats.clone(), block_processor_queue);
+        let ledger = Arc::new(Ledger::new_null());
+        let processor = BlockAckProcessor::new(state, stats.clone(), block_processor_queue, ledger);
 
         let query = RunningQuery::new_test_instance();
         let response = BlocksAckPayload::new_test_instance();
@@ -188,7 +235,8 @@ mod tests {
         let state = Arc::new(Mutex::new(BootstrapState::default()));
         let stats = Arc::new(Stats::default());
         let block_processor_queue = Arc::new(BlockProcessorQueue::default());
-        let processor = BlockAckProcessor::new(state, stats.clone(), block_processor_queue);
+        let ledger = Arc::new(Ledger::new_null());
+        let processor = BlockAckProcessor::new(state, stats.clone(), block_processor_queue, ledger);
 
         let account = Account::from(42);
 

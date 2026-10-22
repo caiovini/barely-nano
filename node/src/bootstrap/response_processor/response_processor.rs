@@ -51,9 +51,9 @@ impl ResponseProcessor {
         block_processor_queue: Arc<BlockProcessorQueue>,
         ledger: Arc<Ledger>,
     ) -> Self {
-        let frontiers = FrontierAckProcessor::new(stats.clone(), ledger, state.clone());
+        let frontiers = FrontierAckProcessor::new(stats.clone(), ledger.clone(), state.clone());
         let accounts = AccountAckProcessor::new(stats.clone(), state.clone());
-        let blocks = BlockAckProcessor::new(state.clone(), stats, block_processor_queue);
+        let blocks = BlockAckProcessor::new(state.clone(), stats, block_processor_queue, ledger);
 
         Self {
             state,
