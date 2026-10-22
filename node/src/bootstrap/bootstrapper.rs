@@ -90,7 +90,6 @@ pub struct Bootstrapper {
     state_changed: Arc<Condvar>,
     config: BootstrapConfig,
     clock: Arc<SteadyClock>,
-    ledger: Arc<Ledger>,
     response_handler: ResponseProcessor,
     block_inspector: BlockInspector,
     requesters: Requesters,
@@ -148,7 +147,6 @@ impl Bootstrapper {
             config,
             stats,
             clock,
-            ledger,
             response_handler,
             block_inspector,
             requesters,
@@ -223,16 +221,6 @@ impl Bootstrapper {
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
         let mut state = self.state.lock();
         cleanup.cleanup(&mut state);
-        if state.candidate_accounts.blocked_len() > 0 {
-            let unblocked = state.candidate_accounts.unblock_fulfilled(&self.ledger);
-            if unblocked > 0 {
-                self.stats.add(
-                    StatType::BootstrapAccountSets,
-                    DetailType::PriorityUnblocked,
-                    unblocked as u64,
-                );
-            }
-        }
         self.prune_banned_peers(&mut state);
         self.state_changed.notify_all();
     }

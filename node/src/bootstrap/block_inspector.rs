@@ -48,17 +48,6 @@ impl BlockInspector {
             
             self.inspect_block(&mut state, result, &account, is_cascading);
         }
-
-        if state.candidate_accounts.blocked_len() > 0 {
-            let unblocked = state.candidate_accounts.unblock_fulfilled(&self.ledger);
-            if unblocked > 0 {
-                self.stats.add(
-                    StatType::BootstrapAccountSets,
-                    DetailType::PriorityUnblocked,
-                    unblocked as u64,
-                );
-            }
-        }
     }
 
     fn get_account(

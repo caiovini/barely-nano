@@ -105,32 +105,6 @@ impl BlockAckProcessor {
             return;
         }
 
-        let first = blocks.front().unwrap();
-        let target_account = first.account_field().unwrap_or(query.account);
-
-        // 2. If the first block is missing its dependency, block the account immediately
-        // and do not flood the BlockProcessorQueue with doomed cascading blocks.
-        if first.previous().is_zero() {
-            let source = first.source_or_link();
-            if !source.is_zero() && !any.block_exists(&source) {
-                if !target_account.is_zero() {
-                    let now = rsnano_nullable_clock::Timestamp::now();
-                    let mut guard = self.state.lock();
-                    guard.candidate_accounts.block(target_account, source, now);
-                    self.stats.inc(StatType::BootstrapAccountSets, DetailType::Block);
-                }
-                return;
-            }
-        } else if !any.block_exists(&first.previous()) {
-            if !target_account.is_zero() {
-                let now = rsnano_nullable_clock::Timestamp::now();
-                let mut guard = self.state.lock();
-                guard.candidate_accounts.block(target_account, first.previous(), now);
-                self.stats.inc(StatType::BootstrapAccountSets, DetailType::Block);
-            }
-            return;
-        }
-
         while let Some(block) = blocks.pop_front() {
             if blocks.is_empty() {
                 // It's the last block submitted for this account chain, reset timestamp to allow more requests
