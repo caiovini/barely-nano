@@ -85,13 +85,13 @@ impl NodeMonitor {
             let guard = state.lock();
             let blocked_len = guard.candidate_accounts.blocked_len();
             if blocked_len > 0 {
-                debug!("--- BLOCKED ACCOUNTS SAMPLE (Total: {}) ---", blocked_len);
+                info!("--- BLOCKED ACCOUNTS SAMPLE (Total: {}) ---", blocked_len);
                 let mut count = 0;
                 for entry in guard.candidate_accounts.iter_blocked() {
                     if count >= 10 {
                         break;
                     }
-                    debug!(
+                    info!(
                         "  #{} Acc: {} -> Dep: {} (Known Acc: {})",
                         count,
                         entry.account.encode_account(),
@@ -104,7 +104,7 @@ impl NodeMonitor {
                     );
                     count += 1;
                 }
-                debug!("--------------------------------------------");
+                info!("--------------------------------------------");
             }
         }
 
@@ -157,14 +157,14 @@ impl NodeMonitor {
             .state()
             .candidate_accounts
             .known_dependencies();
-        let _blocking_unknown = blocked_len.saturating_sub(blocking_known);
+        let blocking_unknown = blocked_len.saturating_sub(blocking_known);
 
         let blocks_checked_rate = self.block_rates.bps();
         let blocks_confirmed_rate = self.block_rates.cps();
 
         let account_count = self.ledger.account_count();
         info!(
-            "Blocks: {} (conf: {} | unchecked: {} | accs: {}) | rate: {} bps | {} cps | Boot: [q: {}, prio: {}, blk: {}, bpq: {}]",
+            "Blocks: {} (conf: {} | unchecked: {} | accs: {}) | rate: {} bps | {} cps | Boot: [q: {}, prio: {}, blk: {} (k:{}/u:{}), bpq: {}]",
             block_count,
             confirmed_count,
             unchecked_count,
@@ -174,6 +174,8 @@ impl NodeMonitor {
             queries_count,
             prio_len,
             blocked_len,
+            blocking_known,
+            blocking_unknown,
             bp_queue,
         );
     }

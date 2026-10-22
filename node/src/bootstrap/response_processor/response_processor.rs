@@ -74,8 +74,8 @@ impl ResponseProcessor {
         now: Timestamp,
     ) -> Result<ProcessInfo, ProcessError> {
         let query = self.take_running_query_for(&response)?;
-        self.process_response(&query, response, channel_id)?;
         self.update_peer_scoring(channel_id);
+        self.process_response(&query, response, channel_id)?;
         Ok(ProcessInfo::new(&query, now))
     }
 
