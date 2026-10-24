@@ -64,6 +64,7 @@ database_rate_limit = 4096
 frontier_rate_limit = 128
 channel_limit = 64
 max_requests = 16384
+block_processor_threshold = 16384
 
 [node.bootstrap.frontier_scan]
 max_pending = 128

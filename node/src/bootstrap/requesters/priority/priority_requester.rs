@@ -50,7 +50,7 @@ impl PriorityRequester {
             stats,
             channel_waiter,
             query_factory,
-            block_processor_threshold: 1024,
+            block_processor_threshold: 16384,
             clock,
         }
     }

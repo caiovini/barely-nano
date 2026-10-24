@@ -72,7 +72,7 @@ impl Default for BootstrapConfig {
             request_timeout: Duration::from_secs(15),
             throttle_coefficient: 8 * 1024,
             throttle_wait: Duration::from_millis(100),
-            block_processor_theshold: 1000,
+            block_processor_theshold: 16384,
             min_protocol_version: 0x14, // TODO don't hard code
             max_requests: 1024,
             optimistic_request_percentage: 10,
@@ -254,7 +254,7 @@ impl Bootstrapper {
             state.candidate_accounts.priority_len()
         };
 
-        if prio_len == 0 {
+        if prio_len < 64 {
             for (account, _) in self.ledger.any().iter_accounts() {
                 self.prioritize_account(&account);
             }
