@@ -958,7 +958,6 @@ fn run_block_processor_loop(
     kernel_common::uart::print(b"[boot] Hart 2: Block Processor loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
-    let mut last_flush = kernel_common::clint::mtime();
     loop {
         let mtime = kernel_common::clint::mtime();
         if mtime - last_watchdog > seconds(1) {
@@ -975,18 +974,6 @@ fn run_block_processor_loop(
 
         if node_arc.block_processor.total_queue_len() > 0 {
             node_arc.block_processor.run_once();
-
-            // Fallback flush (Hart 6 performs asynchronous background shard flushing)
-            if mtime - last_flush > seconds(30) {
-                for i in 0..kernel_common::storage::SHARD_COUNT {
-                    if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
-                        if let Some(btree) = btree_guard.as_mut() {
-                            let _ = btree.flush();
-                        }
-                    }
-                }
-                last_flush = mtime;
-            }
         }
         if node_arc.unchecked.buffer_count() > 0 {
             node_arc.unchecked.run_once();
@@ -1325,28 +1312,29 @@ fn run_heavy_io_loop(
     let mut last_flush = kernel_common::clint::mtime();
     let mut last_bootstrap_tick = kernel_common::clint::mtime();
     let mut last_node_tick = kernel_common::clint::mtime();
+    let mut current_flush_shard = 0;
     let mut iterations = 0;
     loop {
         let mtime = kernel_common::clint::mtime();
 
-        if mtime - last_bootstrap_tick > millis(1000) {
+        if mtime - last_bootstrap_tick > seconds(2) {
             node_arc.bootstrapper.run_once();
             last_bootstrap_tick = mtime;
         }
 
-        // Asynchronous background flush for all B-Tree storage shards
-        if mtime - last_flush > seconds(30) {
-            for i in 0..kernel_common::storage::SHARD_COUNT {
-                if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
-                    if let Some(btree) = btree_guard.as_mut() {
-                        let _ = btree.flush();
-                    }
+        // Smooth round-robin background flush: 1 shard every 2 seconds (cycles all 16 shards every 32s)
+        if mtime - last_flush > seconds(2) {
+            let shard_idx = current_flush_shard;
+            current_flush_shard = (current_flush_shard + 1) % kernel_common::storage::SHARD_COUNT;
+            if let Some(mut btree_guard) = kernel_common::storage::SHARDS[shard_idx].try_lock() {
+                if let Some(btree) = btree_guard.as_mut() {
+                    let _ = btree.flush();
                 }
             }
             last_flush = mtime;
         }
 
-        if mtime - last_node_tick > millis(1000) {
+        if mtime - last_node_tick > seconds(2) {
             node_arc.tick();
             last_node_tick = mtime;
         }
@@ -1381,7 +1369,9 @@ fn run_heavy_io_loop(
 
         iterations += 1;
         if !worked_sig && !worked_task {
-            core::hint::spin_loop();
+            for _ in 0..100 {
+                core::hint::spin_loop();
+            }
         }
     }
 }
