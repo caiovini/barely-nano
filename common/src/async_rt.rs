@@ -67,11 +67,17 @@ impl Wake for Task {
     }
 }
 
+pub struct TimerEntry {
+    pub target_ticks: u64,
+    pub waker: Waker,
+}
+
 /// A minimal multicore-safe executor for bare-metal.
 #[derive(Clone)]
 pub struct Executor {
     pub local_queues: Arc<[Mutex<VecDeque<Arc<Task>>>; 8]>,
     pub injector_queue: Arc<Mutex<VecDeque<Arc<Task>>>>,
+    pub timers: Arc<Mutex<alloc::vec::Vec<TimerEntry>>>,
     pub spawned_count: Arc<core::sync::atomic::AtomicUsize>,
     pub completed_count: Arc<core::sync::atomic::AtomicUsize>,
     next_spawn_hart: Arc<core::sync::atomic::AtomicU8>,
@@ -89,9 +95,28 @@ impl Executor {
         Self {
             local_queues: Arc::new(queues),
             injector_queue: Arc::new(Mutex::new(VecDeque::new())),
+            timers: Arc::new(Mutex::new(alloc::vec::Vec::new())),
             spawned_count: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
             completed_count: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
             next_spawn_hart: Arc::new(core::sync::atomic::AtomicU8::new(0)),
+        }
+    }
+
+    pub fn poll_timers(&self) {
+        let now = crate::clint::mtime();
+        if let Some(mut timers) = self.timers.try_lock() {
+            if timers.is_empty() {
+                return;
+            }
+            let mut i = 0;
+            while i < timers.len() {
+                if now >= timers[i].target_ticks {
+                    let entry = timers.swap_remove(i);
+                    entry.waker.wake();
+                } else {
+                    i += 1;
+                }
+            }
         }
     }
 
@@ -129,6 +154,8 @@ impl Executor {
     }
 
     pub fn run_once(&self, hart_id: usize) -> bool {
+        self.poll_timers();
+
         let task = self.pop_task(hart_id);
         let Some(task) = task else { return false; };
 
@@ -255,17 +282,28 @@ pub fn yield_now() -> YieldNow {
 
 pub struct Sleep {
     target_ticks: u64,
+    registered: bool,
 }
 
 impl Future for Sleep {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let now = crate::clint::mtime();
         if now >= self.target_ticks {
             Poll::Ready(())
         } else {
-            cx.waker().wake_by_ref();
+            if !self.registered {
+                let ptr = EXECUTOR_PTR.load(Ordering::Acquire);
+                if !ptr.is_null() {
+                    let executor = unsafe { &*ptr };
+                    executor.timers.lock().push(TimerEntry {
+                        target_ticks: self.target_ticks,
+                        waker: cx.waker().clone(),
+                    });
+                    self.registered = true;
+                }
+            }
             Poll::Pending
         }
     }
@@ -275,6 +313,7 @@ pub fn sleep(duration: core::time::Duration) -> Sleep {
     let ticks = (duration.as_nanos() * crate::clint::FREQ as u128 / 1_000_000_000) as u64;
     Sleep {
         target_ticks: crate::clint::mtime() + ticks,
+        registered: false,
     }
 }
 

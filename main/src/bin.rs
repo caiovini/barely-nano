@@ -1176,13 +1176,11 @@ fn run_monitor_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 7 (Monitor) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-                iterations = 0;
-            }
+            kernel_common::uart::print(b"[heartbeat] Hart 7 (Monitor) | Iters: ");
+            kernel_common::uart::print_usize(iterations);
+            kernel_common::uart::print(b"\n");
+            last_heartbeat = mtime;
+            iterations = 0;
         }
 
         if mtime - last_tick > seconds(15) {
@@ -1331,13 +1329,13 @@ fn run_heavy_io_loop(
     loop {
         let mtime = kernel_common::clint::mtime();
 
-        if mtime - last_bootstrap_tick > millis(100) {
+        if mtime - last_bootstrap_tick > millis(1000) {
             node_arc.bootstrapper.run_once();
             last_bootstrap_tick = mtime;
         }
 
         // Asynchronous background flush for all B-Tree storage shards
-        if mtime - last_flush > seconds(3) {
+        if mtime - last_flush > seconds(30) {
             for i in 0..kernel_common::storage::SHARD_COUNT {
                 if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
                     if let Some(btree) = btree_guard.as_mut() {
@@ -1348,21 +1346,19 @@ fn run_heavy_io_loop(
             last_flush = mtime;
         }
 
-        if mtime - last_node_tick > millis(100) {
+        if mtime - last_node_tick > millis(1000) {
             node_arc.tick();
             last_node_tick = mtime;
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart ");
-                kernel_common::uart::print_usize_no_lock(hart_id);
-                kernel_common::uart::print_no_lock(b" (HeavyIO) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-                iterations = 0;
-            }
+            kernel_common::uart::print(b"[heartbeat] Hart ");
+            kernel_common::uart::print_usize(hart_id);
+            kernel_common::uart::print(b" (HeavyIO) | Iters: ");
+            kernel_common::uart::print_usize(iterations);
+            kernel_common::uart::print(b"\n");
+            last_heartbeat = mtime;
+            iterations = 0;
         }
 
         let mut worked_sig = false;
@@ -1374,14 +1370,17 @@ fn run_heavy_io_loop(
             }
         }
 
+        let mut worked_task = false;
         for _ in 0..16 {
-            if !exec.run_once(hart_id) {
+            if exec.run_once(hart_id) {
+                worked_task = true;
+            } else {
                 break;
             }
         }
 
         iterations += 1;
-        if !worked_sig {
+        if !worked_sig && !worked_task {
             core::hint::spin_loop();
         }
     }
