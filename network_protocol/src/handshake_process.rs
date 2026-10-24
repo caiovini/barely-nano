@@ -97,43 +97,6 @@ impl HandshakeProcess {
             let node_id = response.node_id;
 
             if let Some(cookie) = self.syn_cookies.cookie(&self.channel.peer_addr()) {
-                // Debug: print cookie being used for validation
-                kernel_common::uart::print(b"[hs] cookie:");
-                for b in &cookie {
-                    kernel_common::uart::print_u8_hex(*b);
-                }
-                kernel_common::uart::putchar(b'\n');
-
-                // Debug: print node_id
-                kernel_common::uart::print(b"[hs] nodeid:");
-                for b in node_id.as_key().as_bytes() {
-                    kernel_common::uart::print_u8_hex(*b);
-                }
-                kernel_common::uart::putchar(b'\n');
-
-                // Debug: print sig first 16 bytes (R component)
-                kernel_common::uart::print(b"[hs] sig_r:");
-                for b in &response.signature.as_bytes()[..16] {
-                    kernel_common::uart::print_u8_hex(*b);
-                }
-                kernel_common::uart::putchar(b'\n');
-
-                // Debug: print genesis
-                if let Some(ref v2) = response.v2 {
-                    kernel_common::uart::print(b"[hs] genesis:");
-                    for b in v2.genesis.as_bytes() {
-                        kernel_common::uart::print_u8_hex(*b);
-                    }
-                    kernel_common::uart::putchar(b'\n');
-
-                    // Print local genesis for comparison
-                    kernel_common::uart::print(b"[hs] local_genesis:");
-                    for b in self.genesis_block_hash.as_bytes() {
-                        kernel_common::uart::print_u8_hex(*b);
-                    }
-                    kernel_common::uart::putchar(b'\n');
-                }
-
                 if let Err(_) = response.validate(&cookie) {
                     kernel_common::uart::putchar(b'X'); // X for validation fail
                     status = HandshakeStatus::Abort;

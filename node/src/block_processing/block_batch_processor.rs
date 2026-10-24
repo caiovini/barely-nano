@@ -171,30 +171,24 @@ impl BlockBatchProcessor {
                     }
                 }
                 Err(BlockError::GapPrevious) => {
-                    if block_ctx.source != BlockSource::Bootstrap {
-                        self.unchecked
-                            .put(block.previous().into(), UncheckedInfo::new(block.clone()));
-                    }
+                    self.unchecked
+                        .put(block.previous().into(), UncheckedInfo::new(block.clone()));
                 }
                 Err(BlockError::GapSource) => {
-                    if block_ctx.source != BlockSource::Bootstrap {
-                        self.unchecked.put(
-                            block
-                                .source_field()
-                                .unwrap_or(block.link_field().unwrap_or_default().into())
-                                .into(),
-                            UncheckedInfo::new(block.clone()),
-                        );
-                    }
+                    self.unchecked.put(
+                        block
+                            .source_field()
+                            .unwrap_or(block.link_field().unwrap_or_default().into())
+                            .into(),
+                        UncheckedInfo::new(block.clone()),
+                    );
                 }
                 Err(BlockError::GapEpochOpenPending) => {
-                    if block_ctx.source != BlockSource::Bootstrap {
-                        // Specific unchecked key starting with epoch open block account public key
-                        self.unchecked.put(
-                            block.account_field().unwrap().into(),
-                            UncheckedInfo::new(block.clone()),
-                        );
-                    }
+                    // Specific unchecked key starting with epoch open block account public key
+                    self.unchecked.put(
+                        block.account_field().unwrap().into(),
+                        UncheckedInfo::new(block.clone()),
+                    );
                 }
                 Err(BlockError::Old) => {
                     debug!("Block is old: {}", hash)

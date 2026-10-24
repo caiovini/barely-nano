@@ -249,17 +249,14 @@ impl Bootstrapper {
             }
         }
 
-        let prio_len = {
+        let is_empty = {
             let state = self.state.lock();
-            state.candidate_accounts.priority_len()
+            state.candidate_accounts.priority_len() == 0 && state.candidate_accounts.blocked_len() == 0
         };
 
-        if prio_len < 64 {
+        if is_empty {
             for (account, _) in self.ledger.any().iter_accounts() {
                 self.prioritize_account(&account);
-            }
-            for (key, _) in self.ledger.store.pending.iter() {
-                self.prioritize_account(&key.receiving_account);
             }
         }
 
