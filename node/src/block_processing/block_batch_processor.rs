@@ -47,6 +47,37 @@ impl BlockBatchProcessor {
 
         self.roll_back_competitor_blocks(&batch);
 
+        // Parallel signature verification across harts
+        let mut verification_tasks = alloc::vec::Vec::new();
+        for ctx in &batch {
+            if !ctx.block.is_signature_verified() && ctx.source != BlockSource::Local {
+                let (res, finished) = self.signature_checker.push(
+                    Arc::new(ctx.block.clone()),
+                    ctx.block.account_field(),
+                );
+                verification_tasks.push((ctx.clone(), res, finished));
+            }
+        }
+
+        if !verification_tasks.is_empty() {
+            while verification_tasks
+                .iter()
+                .any(|(_, _, finished)| !finished.load(core::sync::atomic::Ordering::Acquire))
+            {
+                if !self.signature_checker.help_verify() {
+                    core::hint::spin_loop();
+                }
+            }
+
+            for (ctx, res, _) in verification_tasks {
+                if res.load(core::sync::atomic::Ordering::Acquire)
+                    == crate::signatures::SignatureResult::Valid as u8
+                {
+                    ctx.block.set_signature_verified(true);
+                }
+            }
+        }
+
         let ledger_input: Vec<(&Block, bool)> = batch
             .iter()
             .map(|ctx| {

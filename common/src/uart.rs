@@ -28,7 +28,7 @@ pub fn current_hart_id() -> usize {
 }
 
 pub fn is_log_suppressed(s: &[u8]) -> bool {
-    if s.starts_with(b"[monitor]") || s.starts_with(b"[heartbeat]") {
+    if s.starts_with(b"[monitor]") || s.starts_with(b"[heartbeat]") || s.starts_with(b"   [stats]") {
         return false;
     }
     if s.starts_with(b"[tcp]")
@@ -39,29 +39,16 @@ pub fn is_log_suppressed(s: &[u8]) -> bool {
         || s.starts_with(b".[rx]")
         || s.starts_with(b"![tx]")
         || s.starts_with(b"?")
+        || s.starts_with(b"[peer]")
     {
         return true;
     }
     false
 }
 
-pub fn putchar(b: u8) {
-    if b == b'p' || b == b'.' || b == b'!' {
-        return;
-    }
-    let hart_id = current_hart_id();
-    if SUPPRESS_LINE[hart_id].load(core::sync::atomic::Ordering::Relaxed) {
-        if b == b'\n' {
-            SUPPRESS_LINE[hart_id].store(false, core::sync::atomic::Ordering::Relaxed);
-        }
-        return;
-    }
-    let _intr = InterruptGuard::new();
-    if let Some(_lock) = UART_LOCK.try_lock() {
-        putchar_no_lock(b);
-    } else {
-        putchar_no_lock(b);
-    }
+#[inline(always)]
+pub fn putchar(_b: u8) {
+    // Disabled single-glyph debug tracing to eliminate UART busy-wait throttling.
 }
 
 pub struct InterruptGuard {

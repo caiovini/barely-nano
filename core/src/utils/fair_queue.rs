@@ -148,10 +148,13 @@ where
         result
     }
 
-    pub fn remove(&mut self, key: &S) {
+    pub fn remove(&mut self, key: &S) -> Option<VecDeque<T>> {
         if let Some(removed) = self.queues.remove(key) {
             self.total_len -= removed.len();
             self.current_queue_key = None;
+            Some(removed.requests)
+        } else {
+            None
         }
     }
 

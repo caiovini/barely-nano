@@ -193,13 +193,6 @@ impl Stats {
 
         if updates.is_empty() { return Ok(()); }
 
-        {
-            let _uart_guard = kernel_common::uart::UART_LOCK.lock();
-            let mut sorted_updates = updates.clone();
-            sorted_updates.sort_by(|a, b| b.1.cmp(&a.1));
-            
-        }
-
         let mut lock = kernel_common::storage::SHARDS[0].lock();
         if let Some(db) = lock.as_mut() {
             for (key, val) in updates {

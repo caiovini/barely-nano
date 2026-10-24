@@ -967,14 +967,10 @@ fn run_block_processor_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(
-                    b"[heartbeat] Hart 2 (BlockProc) | Total Blocks: ",
-                );
-                kernel_common::uart::print_usize_no_lock(node_arc.ledger.block_count());
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-            }
+            kernel_common::uart::print(b"[heartbeat] Hart 2 (BlockProc) | Total Blocks: ");
+            kernel_common::uart::print_usize(node_arc.ledger.block_count());
+            kernel_common::uart::print(b"\n");
+            last_heartbeat = mtime;
         }
 
         if node_arc.block_processor.total_queue_len() > 0 {

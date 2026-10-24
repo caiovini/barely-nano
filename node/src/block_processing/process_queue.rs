@@ -44,6 +44,7 @@ impl Default for ProcessQueueConfig {
 pub(crate) struct ProcessQueue {
     queue: FairQueue<(BlockSource, ChannelId), Arc<BlockContext>>,
     batch_size: usize,
+    queued_hashes: alloc::collections::BTreeSet<rsnano_core::BlockHash>,
 }
 
 impl ProcessQueue {
@@ -68,14 +69,24 @@ impl ProcessQueue {
 
         Self {
             queue: FairQueue::new(max_size_query, priority_query),
-            batch_size: 256,
+            batch_size: config.batch_size,
+            queued_hashes: alloc::collections::BTreeSet::new(),
         }
     }
 
     pub fn push(&mut self, context: Arc<BlockContext>) -> bool {
+        let hash = context.block.hash();
+        if self.queued_hashes.contains(&hash) {
+            return false;
+        }
         let source = context.source;
         let channel_id = context.channel_id;
-        self.queue.push((source, channel_id), context)
+        if self.queue.push((source, channel_id), context) {
+            self.queued_hashes.insert(hash);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn next_batch(&mut self) -> VecDeque<Arc<BlockContext>> {
@@ -90,6 +101,7 @@ impl ProcessQueue {
         if !self.queue.is_empty() {
             let ((source, _), request) = self.queue.next().unwrap();
             assert!(source != BlockSource::Forced || request.source == BlockSource::Forced);
+            self.queued_hashes.remove(&request.block.hash());
             return request;
         }
 
@@ -97,7 +109,11 @@ impl ProcessQueue {
     }
 
     pub fn remove(&mut self, source: BlockSource, channel_id: ChannelId) {
-        self.queue.remove(&(source, channel_id));
+        if let Some(removed) = self.queue.remove(&(source, channel_id)) {
+            for ctx in removed {
+                self.queued_hashes.remove(&ctx.block.hash());
+            }
+        }
     }
 
     pub fn source_len(&self, source: BlockSource) -> usize {

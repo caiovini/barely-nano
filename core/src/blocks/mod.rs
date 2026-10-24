@@ -288,6 +288,13 @@ impl Block {
         }
     }
 
+    #[inline(always)]
+    pub fn set_signature_verified(&self, verified: bool) {
+        if let Block::State(b) = self {
+            b.set_signature_verified(verified);
+        }
+    }
+
     pub fn deserialize(stream: &mut dyn Stream) -> anyhow::Result<Block> {
         let block_type =
             BlockType::from_u8(stream.read_u8()?).ok_or_else(|| anyhow!("invalid block type"))?;
