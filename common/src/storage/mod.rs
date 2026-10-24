@@ -144,11 +144,10 @@ impl StorageContext {
 
 pub fn flush_all_shards() {
     for i in 0..SHARD_COUNT {
-        if let Some(mut guard) = SHARDS[i].try_lock() {
-            if let Some(db) = guard.as_mut() {
-                let db: &mut btree::BTree = db;
-                let _ = db.flush();
-            }
+        let mut guard = SHARDS[i].lock();
+        if let Some(db) = guard.as_mut() {
+            let db: &mut btree::BTree = db;
+            let _ = db.flush();
         }
     }
 }

@@ -41,7 +41,12 @@ impl BtreeFinalVoteStore {
         None
     }
 
-    pub fn del(&self, _root: &Root) {
-        // B-tree currently doesn't support delete.
+    pub fn del(&self, root: &Root) {
+        let key = self.make_key(root);
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
+        if let Some(db) = lock.as_mut() {
+            db.delete(key);
+        }
     }
 }

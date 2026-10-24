@@ -40,12 +40,23 @@ impl BtreePrunedStore {
         }
     }
 
-    pub fn del(&self, _hash: &BlockHash) {
-        // B-tree currently doesn't support delete.
+    pub fn del(&self, hash: &BlockHash) {
+        let key = self.make_key(hash);
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
+        if let Some(db) = lock.as_mut() {
+            db.delete(key);
+        }
     }
 
     pub fn count(&self, _tx: &dyn core::any::Any) -> u64 {
-        // Mock count for now
-        0
+        let mut count = 0;
+        for shard in SHARDS.iter() {
+            let mut lock = shard.lock();
+            if let Some(db) = lock.as_mut() {
+                count += db.count_prefixed(Self::TABLE_ID) as u64;
+            }
+        }
+        count
     }
 }

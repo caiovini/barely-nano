@@ -157,11 +157,14 @@ impl Requesters {
         let message_sender = self.message_sender.clone();
         let clock = self.clock.clone();
         let stats = self.stats.clone();
+        let request_timeout = self.config.request_timeout;
         kernel_common::async_rt::spawn_named(
             async move {
+                let mut query_sender = QuerySender::new(message_sender, clock, stats);
+                query_sender.set_request_timeout(request_timeout);
                 let mut promise = SendQueriesPromise::new(
                     query_factory,
-                    QuerySender::new(message_sender, clock, stats),
+                    query_sender,
                 );
 
                 loop {

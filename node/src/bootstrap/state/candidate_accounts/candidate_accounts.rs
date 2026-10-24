@@ -239,6 +239,17 @@ impl CandidateAccounts {
         unblocked
     }
 
+    /// Returns the currently blocked accounts and the block hashes they wait for.
+    ///
+    /// Callers can resolve the hashes without holding the BootstrapState lock, then
+    /// call `unblock(account, Some(hash))` to apply the result.
+    pub fn blocked_dependencies(&self) -> alloc::vec::Vec<(Account, BlockHash)> {
+        self.blocking
+            .iter_by_insertion_order()
+            .map(|entry| (entry.account, entry.dependency))
+            .collect()
+    }
+
     pub fn unblock_fulfilled(&mut self, ledger: &Ledger) -> usize {
         let any = ledger.any();
         let mut unblocked = 0;

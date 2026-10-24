@@ -9,7 +9,7 @@ use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
     Account,
 };
-use rsnano_ledger::Ledger;
+use rsnano_ledger::{Ledger, LedgerSet};
 use rsnano_messages::{AscPullAck, BlocksAckPayload};
 use rsnano_network::{token_bucket::TokenBucket, ChannelId, DeadChannelCleanupStep, Network};
 use rsnano_nullable_clock::SteadyClock;
@@ -69,7 +69,7 @@ impl Default for BootstrapConfig {
             frontier_rate_limit: 8,
             database_warmup_ratio: 10,
             max_pull_count: BlocksAckPayload::MAX_BLOCKS,
-            request_timeout: Duration::from_secs(60),
+            request_timeout: Duration::from_secs(15),
             throttle_coefficient: 8 * 1024,
             throttle_wait: Duration::from_millis(100),
             block_processor_theshold: 1000,
@@ -90,6 +90,7 @@ pub struct Bootstrapper {
     state_changed: Arc<Condvar>,
     config: BootstrapConfig,
     clock: Arc<SteadyClock>,
+    ledger: Arc<Ledger>,
     response_handler: ResponseProcessor,
     block_inspector: BlockInspector,
     requesters: Requesters,
@@ -147,6 +148,7 @@ impl Bootstrapper {
             config,
             stats,
             clock,
+            ledger,
             response_handler,
             block_inspector,
             requesters,
@@ -221,7 +223,46 @@ impl Bootstrapper {
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
         let mut state = self.state.lock();
         cleanup.cleanup(&mut state);
+        let blocked_dependencies = state.candidate_accounts.blocked_dependencies();
         self.prune_banned_peers(&mut state);
+        drop(state);
+
+        let fulfilled = blocked_dependencies
+            .into_iter()
+            .filter(|(_, dependency)| self.ledger.any().block_exists(dependency))
+            .collect::<alloc::vec::Vec<_>>();
+
+        if !fulfilled.is_empty() {
+            let mut state = self.state.lock();
+            let mut unblocked = 0;
+            for (account, dependency) in fulfilled {
+                if state.candidate_accounts.unblock(account, Some(dependency)) {
+                    unblocked += 1;
+                }
+            }
+            if unblocked > 0 {
+                self.stats.add(
+                    StatType::BootstrapAccountSets,
+                    DetailType::PriorityUnblocked,
+                    unblocked as u64,
+                );
+            }
+        }
+
+        let prio_len = {
+            let state = self.state.lock();
+            state.candidate_accounts.priority_len()
+        };
+
+        if prio_len == 0 {
+            for (account, _) in self.ledger.any().iter_accounts() {
+                self.prioritize_account(&account);
+            }
+            for (key, _) in self.ledger.store.pending.iter() {
+                self.prioritize_account(&key.receiving_account);
+            }
+        }
+
         self.state_changed.notify_all();
     }
 

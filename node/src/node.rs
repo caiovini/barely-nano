@@ -265,9 +265,7 @@ impl Node {
 
         let mut config = args.config;
         let flags = args.flags;
-        if flags.enable_voting {
-            config.enable_voting = true;
-        }
+        config.enable_voting = flags.enable_voting;
 
         let work_factory = Arc::new(WorkFactory::disabled());
 
@@ -316,7 +314,6 @@ impl Node {
         info!("Confirmed count: {}", ledger.confirmed_count());
         info!("Account count: {}", ledger.account_count());
 
-        // In the QEMU environment, all inbound connections come from the same IP (10.0.2.2).
         // We increase the cookie limit to allow all connections to complete the handshake.
         let syn_cookies = Arc::new(SynCookies::new(64, steady_clock.clone()));
 

@@ -166,6 +166,7 @@ impl MetaData {
 pub struct BTree {
     pub bpm: BufferPool,
     meta: MetaData,
+    max_pages: usize,
 }
 
 impl BTree {
@@ -178,7 +179,8 @@ impl BTree {
             MetaData::from_bytes(guard.data())
         };
         
-        let mut tree = Self { bpm, meta };
+        let max_pages = crate::storage::SHARD_SIZE_PAGES.load(core::sync::atomic::Ordering::SeqCst);
+        let mut tree = Self { bpm, meta, max_pages };
         
         // Print shard parameters
         crate::uart::print(b"[btree] Init: root=");
@@ -222,9 +224,13 @@ impl BTree {
     pub fn wipe(&mut self) {
         self.meta = MetaData {
             root_page_id: 0,
-            next_free_page: 0,
+            next_free_page: 1,
             first_free_page: 0,
         };
+        let root_id = self.allocate_page();
+        let root_node = BTreeNode::new(true);
+        self.write_node(root_id, &root_node);
+        self.meta.root_page_id = root_id;
         self.save_meta();
         let _ = self.flush();
     }
@@ -243,6 +249,9 @@ impl BTree {
         } else {
             if self.meta.next_free_page == 0 {
                 self.meta.next_free_page = 1;
+            }
+            if self.max_pages != 0 && self.meta.next_free_page as usize >= self.max_pages {
+                panic!("BTree shard capacity exhausted");
             }
             let id = self.meta.next_free_page;
             self.meta.next_free_page += 1;

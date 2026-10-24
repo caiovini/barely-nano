@@ -3,7 +3,7 @@ use alloc::collections::BTreeSet;
 use spin::Mutex;
 
 use rsnano_core::{Account, Block, BlockType, SavedBlock};
-use rsnano_ledger::{AnySet, BlockError, Ledger};
+use rsnano_ledger::{AnySet, BlockError, Ledger, LedgerSet};
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{DetailType, StatType, Stats};
 
@@ -162,12 +162,15 @@ impl BlockInspector {
                 {
                     if result.block.block_type() == BlockType::State {
                         let account = result.block.account_field().unwrap();
-                        if state.candidate_accounts.priority_set_initial(&account) {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
-                        } else {
-                            self.stats
-                                .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
+                        let any = self.ledger.any();
+                        if any.get_account(&account).is_some() || any.receivable_exists(account) {
+                            if state.candidate_accounts.priority_set_initial(&account) {
+                                self.stats
+                                    .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
+                            } else {
+                                self.stats
+                                    .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
+                            }
                         }
                     }
                 }
