@@ -165,11 +165,21 @@ impl CandidateAccounts {
             return false;
         }
 
-        if !priorities.contains(account) && !_blocking.contains(account) {
-            priorities.insert(PriorityEntry::new(*account, priority, pull_type));
+        if _blocking.contains(account) {
+            return false;
+        }
+
+        if priorities.contains(account) {
+            priorities.modify(account, |entry| {
+                entry.priority = priority;
+                entry.fails = 0;
+                entry.last_request = None;
+                true
+            });
             true
         } else {
-            false
+            priorities.insert(PriorityEntry::new(*account, priority, pull_type));
+            true
         }
     }
 
