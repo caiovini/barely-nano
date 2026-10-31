@@ -33,7 +33,7 @@ impl TcpListener {
                     break;
                 }
 
-                let handle = if let Some(ref mut ctx) = *::kernel_common::net::NET.lock() {
+                let handle = if let Some(ref mut ctx) = *::kernel_common::net::lock_net_worker() {
                     ctx.accept_peering()
                 } else {
                     None
@@ -52,5 +52,14 @@ impl TcpListener {
 
     pub fn stop(&self) {
         self.cancel_token.cancel();
+    }
+
+    pub fn local_address(&self) -> core::net::SocketAddrV6 {
+        core::net::SocketAddrV6::new(
+            core::net::Ipv6Addr::LOCALHOST,
+            self.network_adapter.listening_port(),
+            0,
+            0,
+        )
     }
 }

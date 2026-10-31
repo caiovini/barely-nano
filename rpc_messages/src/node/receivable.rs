@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn serialize_wallet_receivable_dto_blocks() {
-        let mut blocks = IndexMap::new();
+        let mut blocks = IndexMap::default();
         blocks.insert(Account::zero(), vec![BlockHash::zero()]);
         let works = AccountsReceivableResponse::Simple(AccountsReceivableSimple { blocks });
         let expected_json = r#"{"blocks":{"nano_1111111111111111111111111111111111111111111111111111hifc8npp":["0000000000000000000000000000000000000000000000000000000000000000"]}}"#;
@@ -195,7 +195,7 @@ mod tests {
         let json_data = r#"{"blocks":{"nano_1111111111111111111111111111111111111111111111111111hifc8npp":["0000000000000000000000000000000000000000000000000000000000000000"]}}"#;
         let works: AccountsReceivableResponse = serde_json::from_str(json_data).unwrap();
 
-        let mut expected_blocks = IndexMap::new();
+        let mut expected_blocks = IndexMap::default();
         expected_blocks.insert(Account::zero(), vec![BlockHash::zero()]);
 
         let expected_works = AccountsReceivableResponse::Simple(AccountsReceivableSimple {
@@ -207,8 +207,8 @@ mod tests {
 
     #[test]
     fn serialize_wallet_receivable_dto_threshold() {
-        let mut blocks = IndexMap::new();
-        let mut inner_map = IndexMap::new();
+        let mut blocks = IndexMap::default();
+        let mut inner_map = IndexMap::default();
         inner_map.insert(BlockHash::zero(), Amount::from(1000));
         blocks.insert(Account::zero(), inner_map);
 
@@ -225,8 +225,8 @@ mod tests {
         let json_data = r#"{"blocks":{"nano_1111111111111111111111111111111111111111111111111111hifc8npp":{"0000000000000000000000000000000000000000000000000000000000000000":"1000"}}}"#;
         let works: AccountsReceivableResponse = serde_json::from_str(json_data).unwrap();
 
-        let mut expected_blocks = IndexMap::new();
-        let mut inner_map = IndexMap::new();
+        let mut expected_blocks = IndexMap::default();
+        let mut inner_map = IndexMap::default();
         inner_map.insert(BlockHash::zero(), Amount::from(1000));
         expected_blocks.insert(Account::zero(), inner_map);
 
@@ -239,8 +239,8 @@ mod tests {
 
     #[test]
     fn serialize_wallet_receivable_dto_source() {
-        let mut blocks = IndexMap::new();
-        let mut inner_map = IndexMap::new();
+        let mut blocks = IndexMap::default();
+        let mut inner_map = IndexMap::default();
         inner_map.insert(
             BlockHash::zero(),
             SourceInfo {
@@ -264,8 +264,8 @@ mod tests {
         let json_data = r#"{"blocks":{"nano_1111111111111111111111111111111111111111111111111111hifc8npp":{"0000000000000000000000000000000000000000000000000000000000000000":{"amount":"1000","source":"nano_1111111111111111111111111111111111111111111111111111hifc8npp"}}}}"#;
         let works: AccountsReceivableResponse = serde_json::from_str(json_data).unwrap();
 
-        let mut expected_blocks = IndexMap::new();
-        let mut inner_map = IndexMap::new();
+        let mut expected_blocks = IndexMap::default();
+        let mut inner_map = IndexMap::default();
         inner_map.insert(
             BlockHash::zero(),
             SourceInfo {

@@ -117,13 +117,21 @@ impl TokenBucket {
             return;
         };
 
-        let tokens_to_add = (last_refill.elapsed(now).as_nanos() as f64 / 1e9_f64
-            * self.refill_rate as f64) as usize;
+        let elapsed_nanos = last_refill.elapsed(now).as_nanos();
+        let tokens_to_add =
+            ((elapsed_nanos * self.refill_rate as u128) / 1_000_000_000) as usize;
         // Only update if there are any tokens to add
         if tokens_to_add > 0 {
-            self.current_size =
-                core::cmp::min(self.current_size + tokens_to_add, self.max_token_count);
-            self.last_refill = Some(now);
+            if self.current_size + tokens_to_add >= self.max_token_count {
+                self.current_size = self.max_token_count;
+                self.last_refill = Some(now);
+            } else {
+                self.current_size += tokens_to_add;
+                let consumed_nanos = ((tokens_to_add as u128 * 1_000_000_000)
+                    / self.refill_rate.max(1) as u128) as u64;
+                self.last_refill =
+                    Some(last_refill + core::time::Duration::from_nanos(consumed_nanos));
+            }
         }
     }
 }

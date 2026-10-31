@@ -86,7 +86,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
                 }
             }
             AecEvent::ElectionConfirmed(election) => {
-                self.confirming_set.add(election.clone());
+                self.confirming_set.add((*election).clone());
                 // Ensure election winner is broadcasted
                 self.winner_block_broadcaster
                     .lock()
@@ -128,7 +128,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
 
                 // Roll back the previous winner and add the new winner to the ledger
                 self.block_processor_queue.push(BlockContext::new(
-                    new_winner.clone(),
+                    (*new_winner).clone(),
                     BlockSource::Forced,
                     ChannelId::LOOPBACK,
                 ));
@@ -154,9 +154,9 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
             }
             AecEvent::BlockConfirmed(block, election) => {
                 if let Some(tx) = &self.node_observer {
-                    let _ = tx.send(NodeEvent::BlockConfirmed(block, election.clone()));
+                    let _ = tx.send(NodeEvent::BlockConfirmed(*block, (*election).clone()));
                 }
-                self.recently_cemented_inserter.insert(election);
+                self.recently_cemented_inserter.insert(*election);
             }
             AecEvent::Recovered => self.election_schedulers.notify(),
         }

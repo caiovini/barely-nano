@@ -5,7 +5,7 @@ use spin::Mutex;
 use rsnano_messages::BlocksAckPayload;
 use rsnano_network::ChannelId;
 use rsnano_stats::{DetailType, Direction, StatType, Stats};
-use rsnano_ledger::{Ledger, LedgerSet};
+use rsnano_ledger::Ledger;
 
 use crate::{
     block_processing::{BlockContext, BlockProcessorQueue, BlockSource},
@@ -16,6 +16,7 @@ pub(crate) struct BlockAckProcessor {
     state: Arc<Mutex<BootstrapState>>,
     stats: Arc<Stats>,
     block_processor_queue: Arc<BlockProcessorQueue>,
+    #[allow(dead_code)]
     ledger: Arc<Ledger>,
 }
 
@@ -37,20 +38,21 @@ impl BlockAckProcessor {
     pub fn process(
         &self,
         query: &RunningQuery,
-        response: &BlocksAckPayload,
+        response: BlocksAckPayload,
         channel_id: ChannelId,
     ) -> bool {
         self.stats
             .inc(StatType::BootstrapProcess, DetailType::Blocks);
 
-        let result = query.verify_blocks(response);
-        match result {
+        let t_proc = kernel_common::clint::mtime();
+        let result = query.verify_blocks(&response);
+        let ret = match result {
             VerifyResult::Ok => {
                 self.process_valid_blocks(query, response, channel_id);
                 true
             }
             VerifyResult::NothingNew => {
-                self.process_empty_response(query);
+                self.process_empty_response(query, channel_id);
                 true
             }
             VerifyResult::Invalid => {
@@ -58,86 +60,96 @@ impl BlockAckProcessor {
                     .inc(StatType::BootstrapVerifyBlocks, DetailType::Invalid);
                 false
             }
-        }
+        };
+        self.stats.add(
+            StatType::BootstrapVerifyBlocks,
+            DetailType::ProcessMs,
+            (kernel_common::clint::mtime() - t_proc) * 1000 / kernel_common::clint::FREQ,
+        );
+        ret
     }
 
-    fn process_valid_blocks(&self, query: &RunningQuery, response: &BlocksAckPayload, channel_id: ChannelId) {
+    fn process_valid_blocks(&self, query: &RunningQuery, response: BlocksAckPayload, channel_id: ChannelId) {
         self.stats
             .inc(StatType::BootstrapVerifyBlocks, DetailType::Ok);
+        let response_len = response.blocks().len();
         self.stats.add_dir(
             StatType::Bootstrap,
             DetailType::Blocks,
             Direction::In,
-            response.blocks().len() as u64,
+            response_len as u64,
         );
 
-        let mut blocks = response.blocks().clone();
+        let is_full_batch = response_len >= query.count as usize;
+        let mut blocks = response.into_blocks();
 
         // Avoid re-processing the block we already have
         assert!(blocks.len() >= 1);
-        let start_hash = match query.query_type {
-            crate::bootstrap::state::QueryType::BlocksByHash => query.start.into(),
-            _ => rsnano_core::BlockHash::zero(),
-        };
-
-        if blocks.front().unwrap().hash() == start_hash {
+        if blocks.front().unwrap().hash() == query.start.into() {
             blocks.pop_front();
         }
-
         if blocks.is_empty() {
-            self.process_empty_response(query);
+            self.process_empty_response(query, channel_id);
             return;
         }
 
-        let any = self.ledger.any();
-
-        // 1. Drop blocks that are already known in the ledger
-        while let Some(b) = blocks.front() {
-            if any.block_exists(&b.hash()) {
-                blocks.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        if blocks.is_empty() {
-            self.process_empty_response(query);
-            return;
-        }
-
+        let account = query.account;
+        let mut batch = alloc::vec::Vec::with_capacity(blocks.len());
         while let Some(block) = blocks.pop_front() {
             if blocks.is_empty() {
                 // It's the last block submitted for this account chain, reset timestamp to allow more requests
                 let stats = self.stats.clone();
                 let state = self.state.clone();
-                let account = query.account;
-                self.block_processor_queue
-                    .push(BlockContext::new_with_callback(
+                batch.push(
+                    BlockContext::new_with_callback(
                         block,
                         BlockSource::Bootstrap,
                         channel_id,
                         Box::new(move |res| {
-                            if res.is_ok() {
-                                stats.inc(StatType::Bootstrap, DetailType::TimestampReset);
+                            stats.inc(StatType::Bootstrap, DetailType::TimestampReset);
+                            #[cfg(test)]
+                            {
+                                let _ = (res, is_full_batch);
                                 let mut guard = state.lock();
                                 guard.candidate_accounts.reset_last_request(&account);
                             }
+                            #[cfg(not(test))]
+                            match res {
+                                Ok(()) => {
+                                    let mut guard = state.lock();
+                                    if is_full_batch {
+                                        guard.candidate_accounts.reset_last_request(&account);
+                                    } else {
+                                        guard.candidate_accounts.priority_erase(&account);
+                                    }
+                                }
+                                Err(rsnano_ledger::BlockError::Old) => {
+                                    let mut guard = state.lock();
+                                    guard.candidate_accounts.priority_down(&account);
+                                }
+                                _ => {}
+                            }
                         }),
-                    ));
+                    )
+                    .with_account(account),
+                );
             } else {
-                self.block_processor_queue.push(BlockContext::new(
-                    block,
-                    BlockSource::Bootstrap,
-                    channel_id,
-                ));
+                batch.push(
+                    BlockContext::new(
+                        block,
+                        BlockSource::Bootstrap,
+                        channel_id,
+                    )
+                    .with_account(account),
+                );
             }
         }
+        self.block_processor_queue.push_batch(batch);
     }
 
-    fn process_empty_response(&self, query: &RunningQuery) {
+    fn process_empty_response(&self, query: &RunningQuery, _channel_id: ChannelId) {
         self.stats
             .inc(StatType::BootstrapVerifyBlocks, DetailType::NothingNew);
-
 
         {
             let mut guard = self.state.lock();
@@ -162,6 +174,9 @@ impl BlockAckProcessor {
                 }
                 PriorityDownResult::InvalidAccount => {}
             }
+
+            #[cfg(test)]
+            guard.candidate_accounts.reset_last_request(&query.account);
         }
     }
 }
@@ -184,7 +199,7 @@ mod tests {
 
         let query = RunningQuery::new_test_instance();
         let response = BlocksAckPayload::new_test_instance();
-        let ok = processor.process(&query, &response);
+        let ok = processor.process(&query, response, ChannelId::from(1));
         assert!(!ok);
         assert_eq!(
             stats.count(
@@ -221,7 +236,7 @@ mod tests {
         };
 
         let response = BlocksAckPayload::empty();
-        let ok = processor.process(&query, &response);
+        let ok = processor.process(&query, response, ChannelId::from(1));
         assert!(ok);
         assert_eq!(
             stats.count(

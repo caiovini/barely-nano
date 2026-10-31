@@ -19,10 +19,11 @@ where
     K: Hash + Eq + Clone,
 {
     pub fn new(max_len: usize) -> Self {
+        let cap = max_len.min(4096);
         Self {
             max_len,
-            entries: HashMap::new(),
-            sequential: VecDeque::new(),
+            entries: HashMap::with_capacity(cap),
+            sequential: VecDeque::with_capacity(cap),
             next_id: 1,
         }
     }
@@ -39,6 +40,10 @@ where
         let new_id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let result = self.entries.insert(key.clone(), (value, new_id));
+        if let Some((_, old_id)) = &result {
+            let old_id = *old_id;
+            self.sequential.retain(|(_, id)| *id != old_id);
+        }
         self.sequential.push_back((key, new_id));
         while self.entries.len() > self.max_len() {
             let (k, id_to_remove) = self.sequential.pop_front().unwrap();

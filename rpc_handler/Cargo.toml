@@ -9,6 +9,7 @@ rsnano_stats = { path = "../stats" }
 rsnano_node = { path = "../node" }
 rsnano_ledger = { path = "../ledger" }
 rsnano_network = { path = "../network" }
+rsnano_nullable_clock = { path = "../nullables/clock" }
 rsnano_rpc_messages = { path = "../rpc_messages" }
 serde = { version = "=1.0.210", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
@@ -19,4 +20,4 @@ hashbrown = { version = "0.14", default-features = false, features = ["serde", "
 indexmap = { version = "2.5", default-features = false, features = ["serde"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["sync"] }
+rsnano_messages = { path = "../messages" }

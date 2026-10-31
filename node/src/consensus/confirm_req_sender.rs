@@ -23,7 +23,7 @@ impl ConfirmReqSender {
         Self {
             stats,
             clock,
-            last_requests: BoundedHashMap::new(1024 * 32),
+            last_requests: BoundedHashMap::new(4096),
         }
     }
 

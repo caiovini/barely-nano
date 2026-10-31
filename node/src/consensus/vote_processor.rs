@@ -112,24 +112,29 @@ impl VoteProcessor {
         }
     }
 
-    pub fn run_once(&self) {
-        if self.queue.stopped() {
-            return;
-        }
-        if self.cool_down.load(Ordering::Relaxed) {
-            return;
+    pub fn run_once(&self) -> bool {
+        if self.queue.is_empty_relaxed() || self.cool_down.load(Ordering::Relaxed) {
+            return false;
         }
 
         let batch = {
-            let mut guard = self.queue.data.lock();
+            let Some(mut guard) = self.queue.data.try_lock() else {
+                return false;
+            };
             if guard.stopped || guard.queue.is_empty() {
-                return;
+                self.queue.pending_count.store(guard.queue.len(), Ordering::Relaxed);
+                return false;
             }
-            guard.queue.next_batch(self.queue.config.batch_size)
+            let b = guard.queue.next_batch(self.queue.config.batch_size);
+            self.queue.pending_count.store(guard.queue.len(), Ordering::Relaxed);
+            b
         };
 
         if !batch.is_empty() {
             self.handle_batch(batch);
+            true
+        } else {
+            false
         }
     }
 

@@ -4,11 +4,8 @@ use spin::{Mutex, RwLock};
 
 use tracing::{debug, info};
 
-use rsnano_core::{
-    Account,
-    utils::{CancellationToken, Tickable},
-};
-use rsnano_ledger::{ConfirmedSet, Ledger};
+use rsnano_core::utils::{CancellationToken, Tickable};
+use rsnano_ledger::Ledger;
 use rsnano_network::Network;
 
 use crate::{
@@ -61,54 +58,7 @@ impl NodeMonitor {
         let block_count = self.ledger.block_count();
         let pruned_count = self.ledger.pruned_count();
 
-        if block_count < 500 {
-            debug!("Dumping Ledger Blocks:");
-            let any = self.ledger.any();
-            let accounts = any.accounts_range(Account::zero()..);
-            for (acc, info) in accounts {
-                debug!(
-                    "  Account {}: head={}, count={}, conf={}",
-                    acc.encode_account(),
-                    info.head,
-                    info.block_count,
-                    self.ledger
-                        .confirmed()
-                        .get_conf_info(&acc)
-                        .map(|i| i.frontier)
-                        .unwrap_or_default()
-                );
-            }
-        }
-
-        {
-            let state = self.bootstrapper.get_state();
-            let guard = state.lock();
-            let blocked_len = guard.candidate_accounts.blocked_len();
-            if blocked_len > 0 {
-                info!("--- BLOCKED ACCOUNTS SAMPLE (Total: {}) ---", blocked_len);
-                let mut count = 0;
-                for entry in guard.candidate_accounts.iter_blocked() {
-                    if count >= 10 {
-                        break;
-                    }
-                    info!(
-                        "  #{} Acc: {} -> Dep: {} (Known Acc: {})",
-                        count,
-                        entry.account.encode_account(),
-                        entry.dependency,
-                        if entry.dependency_account.is_zero() {
-                            "none".into()
-                        } else {
-                            entry.dependency_account.encode_account()
-                        }
-                    );
-                    count += 1;
-                }
-                info!("--------------------------------------------");
-            }
-        }
-
-        let channels = self.network.read().channels_info();
+        let channels = self.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
         info!(
             "Peers: {} (realtime: {} | inbound: {} | outbound: {}) | NetQueue: {}",
             channels.total,
@@ -118,16 +68,26 @@ impl NodeMonitor {
             channels.queued_messages
         );
 
-        debug!("Bootstrap active: {}", self.bootstrapper.is_active());
+        if let Some(st) = self.bootstrapper.get_state().try_lock() {
+            let active = st.candidate_accounts.priority_len() > 0
+                || st.candidate_accounts.blocked_len() > 0
+                || st.running_queries.len() > 0
+                || !st.frontier_scan.is_done();
+            debug!("Bootstrap active: {}", active);
+        }
 
         {
             let (delta, online, peered) = {
-                let online_reps = self.online_reps.lock();
-                (
-                    online_reps.quorum_delta(),
-                    online_reps.online_weight(),
-                    online_reps.peered_weight(),
-                )
+                let online_reps = self.online_reps.try_lock();
+                if let Some(reps) = online_reps {
+                    (
+                        reps.quorum_delta(),
+                        reps.online_weight(),
+                        reps.peered_weight(),
+                    )
+                } else {
+                    Default::default()
+                }
             };
             info!(
                 "Quorum: {} (online stake: {} | stake peered: {})",
@@ -137,7 +97,7 @@ impl NodeMonitor {
             );
         }
 
-        let elections = self.active_elections.read().info();
+        let elections = self.active_elections.try_read().map(|e| e.info()).unwrap_or_default();
         info!(
             "Elections active: {} (priority: {} | hinted: {} | optimistic: {})",
             elections.total, elections.priority, elections.hinted, elections.optimistic
@@ -145,24 +105,28 @@ impl NodeMonitor {
 
         let _missing = confirmed_count.saturating_sub(block_count + pruned_count);
         let unchecked_count = self.unchecked.len();
-        let queries_count = self.bootstrapper.state().running_queries.len();
-        let prio_len = self.bootstrapper.state().candidate_accounts.priority_len();
-        let blocked_len = self.bootstrapper.state().candidate_accounts.blocked_len();
+        let (queries_count, prio_len, blocked_len, blocking_known) =
+            if let Some(st) = self.bootstrapper.get_state().try_lock() {
+                (
+                    st.running_queries.len(),
+                    st.candidate_accounts.priority_len(),
+                    st.candidate_accounts.blocked_len(),
+                    st.candidate_accounts.known_dependencies(),
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
         let bp_queue = self.block_processor.total_queue_len();
         let _bp_progress = self.block_processor.total_processed();
-        let _peer_count = self.network.read().channels_info().total;
+        let _peer_count = channels.total;
 
-        let blocking_known = self
-            .bootstrapper
-            .state()
-            .candidate_accounts
-            .known_dependencies();
         let blocking_unknown = blocked_len.saturating_sub(blocking_known);
 
         let blocks_checked_rate = self.block_rates.bps();
         let blocks_confirmed_rate = self.block_rates.cps();
 
         let account_count = self.ledger.account_count();
+
         info!(
             "Blocks: {} (conf: {} | unchecked: {} | accs: {}) | rate: {} bps | {} cps | Boot: [q: {}, prio: {}, blk: {} (k:{}/u:{}), bpq: {}]",
             block_count,

@@ -107,7 +107,7 @@ impl Requesters {
             requester.block_processor_threshold = self.config.block_processor_theshold;
             self.stats_sources.lock().push(requester.stats());
 
-            Some(self.spawn_query("Bootstrap", requester, runner.clone()))
+            Some(self.spawn_priorities("Bootstrap", requester, runner.clone()))
         } else {
             None
         };
@@ -144,6 +144,57 @@ impl Requesters {
         }
     }
 
+    fn spawn_priorities(
+        &self,
+        name: &'static str,
+        mut requester: PriorityRequester,
+        runner: Arc<BootstrapPromiseRunner>,
+    ) -> JoinHandle<()> {
+        tracing::info!("Spawning bootstrap requester: {}", name);
+        let message_sender = self.message_sender.clone();
+        let clock = self.clock.clone();
+        let stats = self.stats.clone();
+        let request_timeout = self.config.request_timeout;
+        kernel_common::async_rt::spawn_named(
+            async move {
+                let mut query_sender = QuerySender::new(message_sender, clock, stats);
+                query_sender.set_request_timeout(request_timeout);
+
+                loop {
+                    if runner.state.lock().stopped {
+                        break;
+                    }
+
+                    let mut sent_any = false;
+                    for _ in 0..64 {
+                        let now = runner.clock.now();
+                        let result = requester.poll_step(&runner.state, now);
+
+                        match result {
+                            PollResult::Finished(spec) => {
+                                let mut state = runner.state.lock();
+                                query_sender.send(spec, &mut state);
+                                sent_any = true;
+                            }
+                            PollResult::Wait => break,
+                            PollResult::Progress => {
+                                sent_any = true;
+                            }
+                        }
+                    }
+
+                    if sent_any {
+                        kernel_common::async_rt::yield_now().await;
+                    } else {
+                        kernel_common::async_rt::sleep(core::time::Duration::from_millis(2)).await;
+                    }
+                }
+            },
+            Some(name),
+        );
+        JoinHandle::new()
+    }
+
     fn spawn_query<T>(
         &self,
         name: &'static str,
@@ -173,7 +224,7 @@ impl Requesters {
                     }
 
                     let mut sent_any = false;
-                    for _ in 0..16 {
+                    for _ in 0..32 {
                         let now = runner.clock.now();
                         let result = {
                             let mut state = runner.state.lock();
@@ -192,7 +243,7 @@ impl Requesters {
                     if sent_any {
                         kernel_common::async_rt::yield_now().await;
                     } else {
-                        kernel_common::async_rt::sleep(core::time::Duration::from_millis(5)).await;
+                        kernel_common::async_rt::sleep(core::time::Duration::from_millis(2)).await;
                     }
                 }
             },

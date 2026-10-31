@@ -1,4 +1,4 @@
-use alloc::collections::VecDeque;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use super::{QuerySource, RunningQuery};
 use rsnano_core::{Account, BlockHash};
@@ -7,10 +7,11 @@ use hashbrown::{ HashMap };
 
 #[derive(Default)]
 pub(crate) struct RunningQueryContainer {
-    by_id: HashMap<u64, RunningQuery>,
+    next_seq: u64,
+    by_id: HashMap<u64, (u64, RunningQuery)>,
     by_account: HashMap<Account, Vec<u64>>,
     by_hash: HashMap<BlockHash, Vec<u64>>,
-    sequenced: VecDeque<u64>,
+    sequenced: BTreeMap<u64, u64>,
 }
 
 static EMPTY_IDS: Vec<u64> = Vec::new();
@@ -30,10 +31,13 @@ impl RunningQueryContainer {
 
     #[allow(dead_code)]
     pub fn get(&self, id: u64) -> Option<&RunningQuery> {
-        self.by_id.get(&id)
+        self.by_id.get(&id).map(|(_, q)| q)
     }
 
     pub fn count_by_account(&self, account: &Account, source: QuerySource) -> usize {
+        if account.is_zero() {
+            return 0;
+        }
         let count = self.iter_account(account)
             .filter(|i| i.source == source)
             .count();
@@ -53,14 +57,14 @@ impl RunningQueryContainer {
 
     fn iter_ids<'a>(&'a self, ids: Option<&'a Vec<u64>>) -> impl Iterator<Item = &'a RunningQuery> {
         let ids = ids.unwrap_or(&EMPTY_IDS);
-        ids.iter().map(|id| self.by_id.get(id).unwrap())
+        ids.iter().map(|id| &self.by_id.get(id).unwrap().1)
     }
 
     pub fn remove(&mut self, id: u64) -> Option<RunningQuery> {
-        if let Some(tag) = self.by_id.remove(&id) {
+        if let Some((seq, tag)) = self.by_id.remove(&id) {
             self.remove_by_account(id, &tag.account);
             self.remove_by_hash(id, &tag.hash);
-            self.sequenced.retain(|i| *i != id);
+            self.sequenced.remove(&seq);
             Some(tag)
         } else {
             None
@@ -68,12 +72,12 @@ impl RunningQueryContainer {
     }
 
     pub fn front(&self) -> Option<&RunningQuery> {
-        self.sequenced.front().map(|id| self.by_id.get(id).unwrap())
+        self.sequenced.first_key_value().map(|(_, id)| &self.by_id.get(id).unwrap().1)
     }
 
     pub fn pop_front(&mut self) -> Option<RunningQuery> {
-        if let Some(id) = self.sequenced.pop_front() {
-            let result = self.by_id.remove(&id).unwrap();
+        if let Some((_, id)) = self.sequenced.pop_first() {
+            let (_, result) = self.by_id.remove(&id).unwrap();
             self.remove_by_account(id, &result.account);
             self.remove_by_hash(id, &result.hash);
             Some(result)
@@ -86,21 +90,30 @@ impl RunningQueryContainer {
         let id = query.id;
         let account = query.account;
         let hash = query.hash;
-        if let Some(old) = self.by_id.insert(id, query) {
-            self.remove_internal(old.id, &old.account, &old.hash);
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        if let Some((old_seq, old)) = self.by_id.insert(id, (seq, query)) {
+            self.remove_internal(old.id, old_seq, &old.account, &old.hash);
         }
-        self.by_account.entry(account).or_default().push(id);
-        self.by_hash.entry(hash).or_default().push(id);
-        self.sequenced.push_back(id);
+        if !account.is_zero() {
+            self.by_account.entry(account).or_default().push(id);
+        }
+        if !hash.is_zero() {
+            self.by_hash.entry(hash).or_default().push(id);
+        }
+        self.sequenced.insert(seq, id);
     }
 
-    fn remove_internal(&mut self, id: u64, account: &Account, hash: &BlockHash) {
+    fn remove_internal(&mut self, id: u64, seq: u64, account: &Account, hash: &BlockHash) {
         self.remove_by_account(id, account);
         self.remove_by_hash(id, hash);
-        self.sequenced.retain(|i| *i != id);
+        self.sequenced.remove(&seq);
     }
 
     fn remove_by_account(&mut self, id: u64, account: &Account) {
+        if account.is_zero() {
+            return;
+        }
         match self.by_account.get_mut(account) {
             Some(ids) => {
                 if ids.len() == 1 {
@@ -113,6 +126,9 @@ impl RunningQueryContainer {
         }
     }
     fn remove_by_hash(&mut self, id: u64, hash: &BlockHash) {
+        if hash.is_zero() {
+            return;
+        }
         match self.by_hash.get_mut(hash) {
             Some(ids) => {
                 if ids.len() == 1 {

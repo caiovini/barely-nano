@@ -10,7 +10,6 @@
 
 use crate::storage::bpm::{BufferPool, BLOCK_SIZE};
 extern crate alloc;
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 /// Maximum number of keys a single B-Tree node can hold.
@@ -23,6 +22,27 @@ pub const KEY_SIZE: usize = 65; // 1 byte table ID + 64 bytes key
 /// Size of the value in bytes.
 pub const VALUE_SIZE: usize = 256;
 
+/// Extracts the first 8 bytes of a key as a big-endian `u64` (`ld` + `rev8` on RISC-V `Zbb`),
+/// preserving lexicographical byte ordering in a single 64-bit register.
+#[inline(always)]
+fn key_head(k: &[u8]) -> u64 {
+    u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]])
+}
+
+#[inline(always)]
+fn key_lt_with_head(a: &[u8], a_head: u64, b: &[u8], b_head: u64) -> bool {
+    if a_head != b_head {
+        a_head < b_head
+    } else {
+        a[8..KEY_SIZE] < b[8..KEY_SIZE]
+    }
+}
+
+#[inline(always)]
+fn key_eq_with_head(a: &[u8], a_head: u64, b: &[u8]) -> bool {
+    a_head == key_head(b) && a[8..KEY_SIZE] == b[8..KEY_SIZE]
+}
+
 /// A single node in the B-Tree, stored as a 4KB block.
 #[derive(Clone, Debug)]
 pub struct BTreeNode {
@@ -30,10 +50,10 @@ pub struct BTreeNode {
     pub is_leaf: bool,
     /// Number of keys currently stored in this node.
     pub num_keys: usize,
-    /// Sorted array of keys.
-    pub keys: Box<[[u8; KEY_SIZE]; MAX_KEYS]>,
-    /// Array of values associated with the keys.
-    pub values: Box<[[u8; VALUE_SIZE]; MAX_KEYS]>,
+    /// Sorted array of keys (inline on stack, avoiding global heap allocations).
+    pub keys: [[u8; KEY_SIZE]; MAX_KEYS],
+    /// Array of values associated with the keys (inline on stack, avoiding global heap allocations).
+    pub values: [[u8; VALUE_SIZE]; MAX_KEYS],
     /// Exact length of each value.
     pub value_lengths: [u16; MAX_KEYS],
     /// Page IDs of the children nodes (only used in internal nodes).
@@ -45,8 +65,8 @@ impl BTreeNode {
         Self {
             is_leaf,
             num_keys: 0,
-            keys: Box::new([[0; KEY_SIZE]; MAX_KEYS]),
-            values: Box::new([[0; VALUE_SIZE]; MAX_KEYS]),
+            keys: [[0; KEY_SIZE]; MAX_KEYS],
+            values: [[0; VALUE_SIZE]; MAX_KEYS],
             value_lengths: [0; MAX_KEYS],
             children: [0; MAX_KEYS + 1],
         }
@@ -60,8 +80,8 @@ impl BTreeNode {
             num_keys = MAX_KEYS;
         }
         
-        let mut keys = Box::new([[0u8; KEY_SIZE]; MAX_KEYS]);
-        let mut values = Box::new([[0u8; VALUE_SIZE]; MAX_KEYS]);
+        let mut keys = [[0u8; KEY_SIZE]; MAX_KEYS];
+        let mut values = [[0u8; VALUE_SIZE]; MAX_KEYS];
         let mut value_lengths = [0u16; MAX_KEYS];
         let mut children = [0u32; MAX_KEYS + 1];
 
@@ -270,7 +290,7 @@ impl BTree {
         
         let first_free = self.meta.first_free_page;
         {
-            let mut guard = self.bpm.fetch_page(page_id as usize).unwrap();
+            let mut guard = self.bpm.new_page(page_id as usize).unwrap();
             guard.data_mut()[0..4].copy_from_slice(&first_free.to_le_bytes());
         }
         
@@ -299,48 +319,194 @@ impl BTree {
         node.to_bytes(guard.data_mut());
     }
 
+    fn write_new_node(&mut self, page_id: u32, node: &BTreeNode) {
+        let mut guard = self.bpm.new_page(page_id as usize).expect("Failed to allocate frame for new node");
+        node.to_bytes(guard.data_mut());
+    }
+
     /// Searches for a key in the B-Tree and returns the associated value if found.
-    ///
-    /// This is a standard B-Tree search: starting from the root, we binary search 
-    /// (or linear search here due to small MAX_KEYS) within each node to find 
-    /// the key or determine which child to descend into.
     pub fn search(&mut self, key: &[u8; KEY_SIZE]) -> Option<Vec<u8>> {
+        self.get_with(key, |v| v.to_vec())
+    }
+
+    /// Zero-copy existence check: walks the cached page bytes in place and returns `true`
+    /// if `key` is present without allocating a `Vec<u8>` or copying value bytes.
+    pub fn contains_key(&mut self, key: &[u8; KEY_SIZE]) -> bool {
+        self.get_with(key, |_| ()).is_some()
+    }
+
+    /// Zero-copy lookup: walks the cached page bytes in place and passes the value slice
+    /// directly from the pinned 4KB page to `f` without any heap allocation.
+    pub fn get_with<R>(&mut self, key: &[u8; KEY_SIZE], f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let t0 = crate::clint::mtime();
+        let r = self.get_with_impl(key, f);
+        crate::storage::bpm::STORAGE_PROF[6].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::storage::bpm::STORAGE_PROF[7].fetch_add(crate::clint::mtime() - t0, core::sync::atomic::Ordering::Relaxed);
+        r
+    }
+
+    fn get_with_impl<R>(&mut self, key: &[u8; KEY_SIZE], f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        const KEYS_OFF: usize = 4;
+        const VALUES_OFF: usize = 4 + MAX_KEYS * KEY_SIZE;
+        const LENGTHS_OFF: usize = VALUES_OFF + MAX_KEYS * VALUE_SIZE;
+        const CHILDREN_OFF: usize = 4 + MAX_KEYS * (KEY_SIZE + VALUE_SIZE + 2);
+        let target_head = key_head(key);
         let mut current_id = self.meta.root_page_id;
         loop {
-            let node = self.read_node(current_id);
+            let guard = self.bpm.fetch_page(current_id as usize).expect("Failed to fetch node");
+            let data = guard.data();
+            let is_leaf = data[0] != 0;
+            let num_keys = (u16::from_le_bytes([data[1], data[2]]) as usize).min(MAX_KEYS);
 
-            // Binary search for the first key >= target key
-            let mut i = 0;
-            let mut low = 0;
-            let mut high = node.num_keys as isize - 1;
-            while low <= high {
-                let mid = (low + high) / 2;
-                if key > &node.keys[mid as usize] {
-                    low = mid + 1;
-                    i = low as usize;
-                } else if key < &node.keys[mid as usize] {
-                    high = mid - 1;
-                    i = mid as usize;
+            let (mut lo, mut hi) = (0usize, num_keys);
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let k = &data[KEYS_OFF + mid * KEY_SIZE..KEYS_OFF + (mid + 1) * KEY_SIZE];
+                if key_lt_with_head(k, key_head(k), key, target_head) {
+                    lo = mid + 1;
                 } else {
-                    i = mid as usize;
-                    break;
+                    hi = mid;
                 }
             }
-            if i < node.num_keys && &node.keys[i] == key {
-                let len = node.value_lengths[i] as usize;
-                return Some(node.values[i][0..len].to_vec());
+            if lo < num_keys {
+                let k = &data[KEYS_OFF + lo * KEY_SIZE..KEYS_OFF + (lo + 1) * KEY_SIZE];
+                if key_eq_with_head(key, target_head, k) {
+                    let len_off = LENGTHS_OFF + lo * 2;
+                    let len = (u16::from_le_bytes([data[len_off], data[len_off + 1]]) as usize).min(VALUE_SIZE);
+                    let vo = VALUES_OFF + lo * VALUE_SIZE;
+                    return Some(f(&data[vo..vo + len]));
+                }
             }
 
-            if node.is_leaf {
+            if is_leaf {
                 return None;
-            } else {
-                let next_id = node.children[i];
-                current_id = next_id;
             }
+            let co = CHILDREN_OFF + lo * 4;
+            current_id = u32::from_le_bytes([data[co], data[co + 1], data[co + 2], data[co + 3]]);
+            drop(guard);
+            self.bpm.prefetch_page(current_id as usize);
         }
     }
 
-    pub fn insert(&mut self, key: [u8; KEY_SIZE], value: &[u8]) {
+    /// Zero-copy lower-bound key lookup: returns the smallest key `>= start_key` in the B-Tree
+    /// by walking a single root-to-leaf path on cached 4KB page slices without allocating
+    /// `BTreeNode` boxes or an iterator stack.
+    pub fn first_key_from(&mut self, start_key: &[u8; KEY_SIZE]) -> Option<[u8; KEY_SIZE]> {
+        const KEYS_OFF: usize = 4;
+        const CHILDREN_OFF: usize = 4 + MAX_KEYS * (KEY_SIZE + VALUE_SIZE + 2);
+        let start_head = key_head(start_key);
+        let mut current_id = self.meta.root_page_id;
+        let mut candidate: Option<[u8; KEY_SIZE]> = None;
+
+        loop {
+            let guard = self.bpm.fetch_page(current_id as usize).expect("Failed to fetch node");
+            let data = guard.data();
+            let is_leaf = data[0] != 0;
+            let num_keys = (u16::from_le_bytes([data[1], data[2]]) as usize).min(MAX_KEYS);
+
+            let (mut lo, mut hi) = (0usize, num_keys);
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let k = &data[KEYS_OFF + mid * KEY_SIZE..KEYS_OFF + (mid + 1) * KEY_SIZE];
+                if key_lt_with_head(k, key_head(k), start_key, start_head) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            if lo < num_keys {
+                let k_slice = &data[KEYS_OFF + lo * KEY_SIZE..KEYS_OFF + (lo + 1) * KEY_SIZE];
+                if key_eq_with_head(start_key, start_head, k_slice) {
+                    return Some(*start_key);
+                }
+                let mut k = [0u8; KEY_SIZE];
+                k.copy_from_slice(k_slice);
+                candidate = Some(k);
+            }
+
+            if is_leaf {
+                return candidate;
+            }
+            let co = CHILDREN_OFF + lo * 4;
+            current_id = u32::from_le_bytes([data[co], data[co + 1], data[co + 2], data[co + 3]]);
+        }
+    }
+
+    pub fn insert(&mut self, key: [u8; KEY_SIZE], value: &[u8]) -> bool {
+        let t0 = crate::clint::mtime();
+        let is_new = self.insert_impl(key, value);
+        crate::storage::bpm::STORAGE_PROF[8].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        crate::storage::bpm::STORAGE_PROF[9].fetch_add(crate::clint::mtime() - t0, core::sync::atomic::Ordering::Relaxed);
+        is_new
+    }
+
+    /// In-place insert/update for the common case where no node on the search path is full, so no
+    /// split is required. Only the target page is modified (the generic path rewrites every page on
+    /// the path). Returns `Some(is_new)`, or `None` without having modified anything when a node on
+    /// the path is full; the caller then uses the splitting insert.
+    fn insert_fast(&mut self, key: &[u8; KEY_SIZE], value: &[u8]) -> Option<bool> {
+        const KEYS_OFF: usize = 4;
+        const VALUES_OFF: usize = 4 + MAX_KEYS * KEY_SIZE;
+        const LENGTHS_OFF: usize = VALUES_OFF + MAX_KEYS * VALUE_SIZE;
+        const CHILDREN_OFF: usize = 4 + MAX_KEYS * (KEY_SIZE + VALUE_SIZE + 2);
+        let len = value.len().min(VALUE_SIZE);
+        let target_head = key_head(key);
+        let mut cur = self.meta.root_page_id;
+        loop {
+            let mut guard = match self.bpm.fetch_page(cur as usize) {
+                Ok(g) => g,
+                Err(_) => return None,
+            };
+            let (is_leaf, nk, lb, equal, child) = {
+                let d = guard.data();
+                let nk = (u16::from_le_bytes([d[1], d[2]]) as usize).min(MAX_KEYS);
+                if nk >= MAX_KEYS {
+                    return None;
+                }
+                // lower bound: number of keys < key
+                let (mut lo, mut hi) = (0usize, nk);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let k = &d[KEYS_OFF + mid * KEY_SIZE..KEYS_OFF + (mid + 1) * KEY_SIZE];
+                    if key_lt_with_head(k, key_head(k), key, target_head) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let equal = lo < nk && key_eq_with_head(key, target_head, &d[KEYS_OFF + lo * KEY_SIZE..KEYS_OFF + (lo + 1) * KEY_SIZE]);
+                let co = CHILDREN_OFF + lo * 4;
+                let child = u32::from_le_bytes([d[co], d[co + 1], d[co + 2], d[co + 3]]);
+                (d[0] != 0, nk, lo, equal, child)
+            };
+
+            if equal || is_leaf {
+                let d = guard.data_mut();
+                let pos = lb;
+                if !equal {
+                    // Shift keys, values and lengths one slot right to open slot `pos`.
+                    d.copy_within(KEYS_OFF + pos * KEY_SIZE..KEYS_OFF + nk * KEY_SIZE, KEYS_OFF + (pos + 1) * KEY_SIZE);
+                    d.copy_within(VALUES_OFF + pos * VALUE_SIZE..VALUES_OFF + nk * VALUE_SIZE, VALUES_OFF + (pos + 1) * VALUE_SIZE);
+                    d.copy_within(LENGTHS_OFF + pos * 2..LENGTHS_OFF + nk * 2, LENGTHS_OFF + (pos + 1) * 2);
+                    d[KEYS_OFF + pos * KEY_SIZE..KEYS_OFF + (pos + 1) * KEY_SIZE].copy_from_slice(key);
+                    let n = (nk + 1) as u16;
+                    d[1..3].copy_from_slice(&n.to_le_bytes());
+                }
+                let vo = VALUES_OFF + pos * VALUE_SIZE;
+                d[vo..vo + VALUE_SIZE].fill(0);
+                d[vo..vo + len].copy_from_slice(&value[..len]);
+                d[LENGTHS_OFF + pos * 2..LENGTHS_OFF + pos * 2 + 2].copy_from_slice(&(len as u16).to_le_bytes());
+                return Some(!equal);
+            }
+            cur = child;
+        }
+    }
+
+    fn insert_impl(&mut self, key: [u8; KEY_SIZE], value: &[u8]) -> bool {
+        if let Some(is_new) = self.insert_fast(&key, value) {
+            return is_new;
+        }
         let root_id = self.meta.root_page_id;
         let mut root = self.read_node(root_id);
 
@@ -351,17 +517,17 @@ impl BTree {
             new_root.children[0] = root_id;
             
             // Split the old root and move the median key to the new root.
-            self.split_child(&mut new_root, 0, root_id, &mut root);
-            self.write_node(new_root_id, &new_root);
+            let _ = self.split_child(&mut new_root, 0, root_id, &mut root);
+            self.write_new_node(new_root_id, &new_root);
             
             self.meta.root_page_id = new_root_id;
             self.save_meta();
             
             // Insert into the now non-full root.
-            self.insert_non_full(new_root_id, &mut new_root, key, value);
+            self.insert_non_full(new_root_id, &mut new_root, key, value)
         } else {
             // Root is not full, insert directly.
-            self.insert_non_full(root_id, &mut root, key, value);
+            self.insert_non_full(root_id, &mut root, key, value)
         }
     }
 
@@ -369,7 +535,7 @@ impl BTree {
     ///
     /// The median key of the child is pushed up into the parent, and the 
     /// remaining keys are split between the old child and a newly allocated child.
-    fn split_child(&mut self, parent: &mut BTreeNode, i: usize, child_id: u32, child: &mut BTreeNode) {
+    fn split_child(&mut self, parent: &mut BTreeNode, i: usize, child_id: u32, child: &mut BTreeNode) -> (u32, BTreeNode) {
         let new_child_id = self.allocate_page();
         let mut new_child = BTreeNode::new(child.is_leaf);
         
@@ -413,12 +579,13 @@ impl BTree {
         parent.value_lengths[i] = mid_len;
         parent.num_keys += 1;
 
-        // Persist both children back to the Buffer Pool.
+        // Persist both children back to the Buffer Pool (using `write_new_node` for the newly allocated page).
         self.write_node(child_id, child);
-        self.write_node(new_child_id, &new_child);
+        self.write_new_node(new_child_id, &new_child);
+        (new_child_id, new_child)
     }
 
-    fn insert_non_full(&mut self, node_id: u32, node: &mut BTreeNode, key: [u8; KEY_SIZE], value: &[u8]) {
+    fn insert_non_full(&mut self, node_id: u32, node: &mut BTreeNode, key: [u8; KEY_SIZE], value: &[u8]) -> bool {
         let mut i = node.num_keys as isize - 1;
 
         if node.is_leaf {
@@ -431,7 +598,7 @@ impl BTree {
                     node.values[j][0..len].copy_from_slice(&value[..len]);
                     node.value_lengths[j] = len as u16;
                     self.write_node(node_id, node);
-                    return;
+                    return false;
                 }
             }
             // Binary search for insertion point
@@ -463,6 +630,7 @@ impl BTree {
             node.value_lengths[insert_pos] = len as u16;
             node.num_keys += 1;
             self.write_node(node_id, node);
+            true
         } else {
             while i >= 0 && node.keys[i as usize] > key {
                 i -= 1;
@@ -475,7 +643,7 @@ impl BTree {
                 node.values[i as usize][0..len].copy_from_slice(&value[..len]);
                 node.value_lengths[i as usize] = len as u16;
                 self.write_node(node_id, node);
-                return;
+                return false;
             }
             
             i += 1;
@@ -483,10 +651,12 @@ impl BTree {
             let mut child = self.read_node(child_id);
             
             if child.num_keys == MAX_KEYS {
-                self.split_child(node, i as usize, child_id, &mut child);
+                let (new_child_id, mut new_child) =
+                    self.split_child(node, i as usize, child_id, &mut child);
+                self.write_node(node_id, node);
                 
                 if key > node.keys[i as usize] {
-                    i += 1;
+                    self.insert_non_full(new_child_id, &mut new_child, key, value)
                 } else if key == node.keys[i as usize] {
                     // key became the parent key after split, update it
                     let len = value.len().min(VALUE_SIZE);
@@ -494,21 +664,83 @@ impl BTree {
                     node.values[i as usize][0..len].copy_from_slice(&value[..len]);
                     node.value_lengths[i as usize] = len as u16;
                     self.write_node(node_id, node);
-                    return;
+                    false
+                } else {
+                    self.insert_non_full(child_id, &mut child, key, value)
                 }
-                
-                let next_child_id = node.children[i as usize];
-                let mut next_child = self.read_node(next_child_id);
-                self.insert_non_full(next_child_id, &mut next_child, key, value);
             } else {
-                self.insert_non_full(child_id, &mut child, key, value);
+                self.insert_non_full(child_id, &mut child, key, value)
             }
-            
-            self.write_node(node_id, node);
+        }
+    }
+
+    /// In-place delete for the common case where the target key is in a leaf node and that leaf
+    /// has `> MIN_KEYS` keys (so removing one key requires no rebalance or ancestor updates).
+    /// Returns false without modifying anything if an internal node matches or the leaf might
+    /// underflow, allowing `delete()` to fall back to `delete_recursive`.
+    fn delete_fast(&mut self, key: &[u8; KEY_SIZE]) -> bool {
+        const KEYS_OFF: usize = 4;
+        const VALUES_OFF: usize = 4 + MAX_KEYS * KEY_SIZE;
+        const LENGTHS_OFF: usize = VALUES_OFF + MAX_KEYS * VALUE_SIZE;
+        const CHILDREN_OFF: usize = 4 + MAX_KEYS * (KEY_SIZE + VALUE_SIZE + 2);
+        let target_head = key_head(key);
+        let root_id = self.meta.root_page_id;
+        let mut cur = root_id;
+        loop {
+            let mut guard = match self.bpm.fetch_page(cur as usize) {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            let (is_leaf, nk, lb, equal, child) = {
+                let d = guard.data();
+                let is_leaf = d[0] != 0;
+                let nk = (u16::from_le_bytes([d[1], d[2]]) as usize).min(MAX_KEYS);
+                let (mut lo, mut hi) = (0usize, nk);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let k = &d[KEYS_OFF + mid * KEY_SIZE..KEYS_OFF + (mid + 1) * KEY_SIZE];
+                    if key_lt_with_head(k, key_head(k), key, target_head) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let equal = lo < nk && key_eq_with_head(key, target_head, &d[KEYS_OFF + lo * KEY_SIZE..KEYS_OFF + (lo + 1) * KEY_SIZE]);
+                if equal && !is_leaf {
+                    return false;
+                }
+                let co = CHILDREN_OFF + lo * 4;
+                let child = u32::from_le_bytes([d[co], d[co + 1], d[co + 2], d[co + 3]]);
+                (is_leaf, nk, lo, equal, child)
+            };
+
+            if is_leaf {
+                if !equal {
+                    // Key does not exist in the tree.
+                    return true;
+                }
+                if cur != root_id && nk <= 1 {
+                    return false;
+                }
+                let d = guard.data_mut();
+                let pos = lb;
+                if pos + 1 < nk {
+                    d.copy_within(KEYS_OFF + (pos + 1) * KEY_SIZE..KEYS_OFF + nk * KEY_SIZE, KEYS_OFF + pos * KEY_SIZE);
+                    d.copy_within(VALUES_OFF + (pos + 1) * VALUE_SIZE..VALUES_OFF + nk * VALUE_SIZE, VALUES_OFF + pos * VALUE_SIZE);
+                    d.copy_within(LENGTHS_OFF + (pos + 1) * 2..LENGTHS_OFF + nk * 2, LENGTHS_OFF + pos * 2);
+                }
+                let n = (nk - 1) as u16;
+                d[1..3].copy_from_slice(&n.to_le_bytes());
+                return true;
+            }
+            cur = child;
         }
     }
 
     pub fn delete(&mut self, key: [u8; KEY_SIZE]) {
+        if self.delete_fast(&key) {
+            return;
+        }
         let root_id = self.meta.root_page_id;
         self.delete_recursive(root_id, &key);
 
@@ -573,7 +805,7 @@ impl BTree {
             let child_id = node.children[i];
             let mut child = self.read_node(child_id);
 
-            if child.num_keys == MIN_KEYS {
+            if child.num_keys <= MIN_KEYS {
                 if i > 0 && self.read_node(node.children[i - 1]).num_keys > MIN_KEYS {
                     self.borrow_from_prev(node_id, &mut node, i);
                 } else if i < node.num_keys && self.read_node(node.children[i + 1]).num_keys > MIN_KEYS {
@@ -720,26 +952,47 @@ impl BTree {
     }
 
     pub fn iter(&mut self, start_key: [u8; KEY_SIZE]) -> RangeIterator<'_> {
-        let mut stack = Vec::new();
+        const KEYS_OFF: usize = 4;
+        const CHILDREN_OFF: usize = 4 + MAX_KEYS * (KEY_SIZE + VALUE_SIZE + 2);
+        let start_head = key_head(&start_key);
+        let mut stack = [(0u32, 0u16); 16];
+        let mut stack_len = 0usize;
         let mut current_id = self.meta.root_page_id;
         
         loop {
-            let node = self.read_node(current_id);
-            let mut i = 0;
-            while i < node.num_keys && start_key > node.keys[i] {
-                i += 1;
+            let (is_leaf, i, child_id) = {
+                let guard = self.bpm.fetch_page(current_id as usize).expect("Failed to fetch node");
+                let data = guard.data();
+                let is_leaf = data[0] != 0;
+                let num_keys = (u16::from_le_bytes([data[1], data[2]]) as usize).min(MAX_KEYS);
+                let (mut lo, mut hi) = (0usize, num_keys);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    let k = &data[KEYS_OFF + mid * KEY_SIZE..KEYS_OFF + (mid + 1) * KEY_SIZE];
+                    if key_lt_with_head(k, key_head(k), &start_key, start_head) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let co = CHILDREN_OFF + lo * 4;
+                let child_id = u32::from_le_bytes([data[co], data[co + 1], data[co + 2], data[co + 3]]);
+                (is_leaf, lo, child_id)
+            };
+
+            if stack_len < stack.len() {
+                stack[stack_len] = (current_id, i as u16);
+                stack_len += 1;
             }
 
-            stack.push((current_id, i));
-
-            if node.is_leaf {
+            if is_leaf {
                 break;
             } else {
-                current_id = node.children[i];
+                current_id = child_id;
             }
         }
 
-        RangeIterator { tree: self, stack, current_node: None }
+        RangeIterator { tree: self, stack, stack_len }
     }
 
     pub fn page_count(&self) -> usize {
@@ -767,72 +1020,150 @@ impl BTree {
 
 pub struct RangeIterator<'tree> {
     tree: &'tree mut BTree,
-    stack: Vec<(u32, usize)>,
-    current_node: Option<(u32, BTreeNode)>,
+    stack: [(u32, u16); 16],
+    stack_len: usize,
 }
 
 impl<'tree> RangeIterator<'tree> {
-    pub fn next_kv(&mut self) -> Option<([u8; KEY_SIZE], Vec<u8>)> {
-        while let Some((node_id, index)) = self.stack.pop() {
-            let node = if let Some((cached_id, cached_node)) = &self.current_node {
-                if *cached_id == node_id {
-                    cached_node
+    #[inline]
+    fn pop_stack(&mut self) -> Option<(u32, usize)> {
+        if self.stack_len == 0 {
+            None
+        } else {
+            self.stack_len -= 1;
+            let (node_id, idx) = self.stack[self.stack_len];
+            Some((node_id, idx as usize))
+        }
+    }
+
+    #[inline]
+    fn push_stack(&mut self, node_id: u32, idx: usize) {
+        if self.stack_len < self.stack.len() {
+            self.stack[self.stack_len] = (node_id, idx as u16);
+            self.stack_len += 1;
+        }
+    }
+
+    /// Zero-allocation iterator step: invokes `f(&key, value_slice)` directly on the pinned
+    /// 4KB page slice without allocating a `Vec<u8>` on the heap.
+    pub fn next_kv_with<R>(&mut self, mut f: impl FnMut(&[u8; KEY_SIZE], &[u8]) -> R) -> Option<R> {
+        const KEYS_OFF: usize = 4;
+        const VALUES_OFF: usize = 4 + MAX_KEYS * KEY_SIZE;
+        const LENGTHS_OFF: usize = VALUES_OFF + MAX_KEYS * VALUE_SIZE;
+        const CHILDREN_OFF: usize = 4 + MAX_KEYS * (KEY_SIZE + VALUE_SIZE + 2);
+
+        while let Some((node_id, index)) = self.pop_stack() {
+            let step = {
+                let guard = self.tree.bpm.fetch_page(node_id as usize).expect("Failed to fetch node");
+                let data = guard.data();
+                let is_leaf = data[0] != 0;
+                let num_keys = (u16::from_le_bytes([data[1], data[2]]) as usize).min(MAX_KEYS);
+                if index < num_keys {
+                    let ko = KEYS_OFF + index * KEY_SIZE;
+                    let mut key = [0u8; KEY_SIZE];
+                    key.copy_from_slice(&data[ko..ko + KEY_SIZE]);
+                    let lo = LENGTHS_OFF + index * 2;
+                    let len = (u16::from_le_bytes([data[lo], data[lo + 1]]) as usize).min(VALUE_SIZE);
+                    let vo = VALUES_OFF + index * VALUE_SIZE;
+                    let child = if !is_leaf {
+                        let co = CHILDREN_OFF + (index + 1) * 4;
+                        Some(u32::from_le_bytes([data[co], data[co + 1], data[co + 2], data[co + 3]]))
+                    } else {
+                        None
+                    };
+                    let out = f(&key, &data[vo..vo + len]);
+                    Some((out, child))
                 } else {
-                    let new_node = self.tree.read_node(node_id);
-                    self.current_node = Some((node_id, new_node));
-                    &self.current_node.as_ref().unwrap().1
+                    None
                 }
-            } else {
-                let new_node = self.tree.read_node(node_id);
-                self.current_node = Some((node_id, new_node));
-                &self.current_node.as_ref().unwrap().1
             };
-            
-            if index < node.num_keys {
-                let len = node.value_lengths[index] as usize;
-                let kv = (node.keys[index], node.values[index][0..len].to_vec());
-                
-                self.stack.push((node_id, index + 1));
-                
-                if !node.is_leaf {
-                    let mut curr_id = node.children[index + 1];
+
+            if let Some((out, next_child)) = step {
+                self.push_stack(node_id, index + 1);
+
+                if let Some(mut curr_id) = next_child {
                     loop {
-                        let curr_node = self.tree.read_node(curr_id);
-                        self.stack.push((curr_id, 0));
-                        if curr_node.is_leaf {
+                        let (is_leaf, first_child) = {
+                            let guard = self.tree.bpm.fetch_page(curr_id as usize).expect("Failed to fetch node");
+                            let data = guard.data();
+                            let is_leaf = data[0] != 0;
+                            let c0 = u32::from_le_bytes([
+                                data[CHILDREN_OFF],
+                                data[CHILDREN_OFF + 1],
+                                data[CHILDREN_OFF + 2],
+                                data[CHILDREN_OFF + 3],
+                            ]);
+                            (is_leaf, c0)
+                        };
+                        self.push_stack(curr_id, 0);
+                        if is_leaf {
                             break;
                         }
-                        curr_id = curr_node.children[0];
+                        curr_id = first_child;
                     }
                 }
-                
-                return Some(kv);
+
+                return Some(out);
             }
         }
         None
     }
 
+    pub fn next_kv(&mut self) -> Option<([u8; KEY_SIZE], Vec<u8>)> {
+        self.next_kv_with(|k, v| (*k, v.to_vec()))
+    }
+
     pub fn next_key(&mut self) -> Option<[u8; KEY_SIZE]> {
-        while let Some((node_id, index)) = self.stack.pop() {
-            let node = self.tree.read_node(node_id);
-            
-            if index < node.num_keys {
-                let key = node.keys[index];
-                
-                self.stack.push((node_id, index + 1));
-                
-                if !node.is_leaf {
-                    let mut curr_id = node.children[index + 1];
+        const KEYS_OFF: usize = 4;
+        const CHILDREN_OFF: usize = 4 + MAX_KEYS * (KEY_SIZE + VALUE_SIZE + 2);
+
+        while let Some((node_id, index)) = self.pop_stack() {
+            let (key_opt, next_child) = {
+                let guard = self.tree.bpm.fetch_page(node_id as usize).expect("Failed to fetch node");
+                let data = guard.data();
+                let is_leaf = data[0] != 0;
+                let num_keys = (u16::from_le_bytes([data[1], data[2]]) as usize).min(MAX_KEYS);
+                if index < num_keys {
+                    let ko = KEYS_OFF + index * KEY_SIZE;
+                    let mut key = [0u8; KEY_SIZE];
+                    key.copy_from_slice(&data[ko..ko + KEY_SIZE]);
+                    let child = if !is_leaf {
+                        let co = CHILDREN_OFF + (index + 1) * 4;
+                        Some(u32::from_le_bytes([data[co], data[co + 1], data[co + 2], data[co + 3]]))
+                    } else {
+                        None
+                    };
+                    (Some(key), child)
+                } else {
+                    (None, None)
+                }
+            };
+
+            if let Some(key) = key_opt {
+                self.push_stack(node_id, index + 1);
+
+                if let Some(mut curr_id) = next_child {
                     loop {
-                        let curr_node = self.tree.read_node(curr_id);
-                        self.stack.push((curr_id, 0));
-                        if curr_node.is_leaf {
+                        let (is_leaf, first_child) = {
+                            let guard = self.tree.bpm.fetch_page(curr_id as usize).expect("Failed to fetch node");
+                            let data = guard.data();
+                            let is_leaf = data[0] != 0;
+                            let c0 = u32::from_le_bytes([
+                                data[CHILDREN_OFF],
+                                data[CHILDREN_OFF + 1],
+                                data[CHILDREN_OFF + 2],
+                                data[CHILDREN_OFF + 3],
+                            ]);
+                            (is_leaf, c0)
+                        };
+                        self.push_stack(curr_id, 0);
+                        if is_leaf {
                             break;
                         }
-                        curr_id = curr_node.children[0];
+                        curr_id = first_child;
                     }
                 }
-                
+
                 return Some(key);
             }
         }

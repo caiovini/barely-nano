@@ -12,6 +12,14 @@ impl<'a> BlockValidator<'a> {
     }
 
     pub(crate) fn ensure_valid_signature(&self) -> Result<(), BlockError> {
+        if let rsnano_core::Block::State(state_block) = self.block {
+            if self.has_epoch_link(state_block) && !self.is_epoch_block() {
+                let pub_key: PublicKey = self.account.into();
+                return pub_key
+                    .verify(self.block.hash().as_bytes(), self.block.signature())
+                    .map_err(|_| BlockError::BadSignature);
+            }
+        }
         if self.signature_verified || self.block.is_signature_verified() {
             return Ok(());
         }

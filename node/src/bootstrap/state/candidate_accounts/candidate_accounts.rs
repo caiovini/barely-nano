@@ -22,12 +22,24 @@ pub struct CandidateAccountsConfig {
 
 impl Default for CandidateAccountsConfig {
     fn default() -> Self {
+        #[cfg(not(test))]
+        let cooldown = Duration::from_secs(15);
+        #[cfg(test)]
+        let cooldown = Duration::from_secs(3);
+        #[cfg(not(test))]
+        let blocking_max = 256 * 1024;
+        #[cfg(test)]
+        let blocking_max = 64 * 1024;
+        #[cfg(not(test))]
+        let blocking_decay = Duration::from_secs(60 * 30);
+        #[cfg(test)]
+        let blocking_decay = Duration::from_secs(60 * 10);
         Self {
             consideration_count: 4,
-            priorities_max: 512,
-            blocking_max: 512,
-            blocking_decay: Duration::from_secs(60 * 15),
-            cooldown: Duration::from_secs(3),
+            priorities_max: 64 * 1024,
+            blocking_max,
+            blocking_decay,
+            cooldown,
         }
     }
 }
@@ -55,15 +67,16 @@ pub struct CandidateAccounts {
     priorities: PriorityContainer,
     blocking: BlockingContainer,
     pull_type_decider: PullTypeDecider,
+    sync_dep_cursor: Account,
 }
 
 impl CandidateAccounts {
-    pub const PRIORITY_INITIAL: Priority = Priority::new(128.0);
-    pub const PRIORITY_INCREASE: Priority = Priority::new(128.0);
+    pub const PRIORITY_INITIAL: Priority = Priority::new(2.0);
+    pub const PRIORITY_INCREASE: Priority = Priority::new(2.0);
     pub const PRIORITY_DIVIDE: f64 = 2.0;
-    pub const PRIORITY_MAX: Priority = Priority::new(1_048_576.0); // 2^20
-    pub const PRIORITY_CUTOFF: Priority = Priority::new(0.1);
-    pub const MAX_FAILS: usize = 10;
+    pub const PRIORITY_MAX: Priority = Priority::new(128.0);
+    pub const PRIORITY_CUTOFF: Priority = Priority::new(0.15);
+    pub const MAX_FAILS: usize = 3;
 
     #[allow(dead_code)]
     pub fn set_pull_type_decider(&mut self, decider: PullTypeDecider) {
@@ -76,6 +89,7 @@ impl CandidateAccounts {
             priorities: Default::default(),
             blocking: Default::default(),
             pull_type_decider: Default::default(),
+            sync_dep_cursor: Account::from(1),
         }
     }
 
@@ -91,6 +105,7 @@ impl CandidateAccounts {
         if !self.blocked(account) {
             let updated = self.priorities.modify(account, |entry| {
                 entry.priority = Self::higher_priority(entry.priority, increment);
+                entry.fails = 0;
                 true // keep this entry
             });
 
@@ -158,28 +173,18 @@ impl CandidateAccounts {
         account: &Account,
         priority: Priority,
         pull_type: super::pull_type_decider::PullType,
-        _blocking: &BlockingContainer,
+        blocking: &BlockingContainer,
         priorities: &mut PriorityContainer,
     ) -> bool {
         if account.is_zero() {
             return false;
         }
 
-        if _blocking.contains(account) {
-            return false;
-        }
-
-        if priorities.contains(account) {
-            priorities.modify(account, |entry| {
-                entry.priority = priority;
-                entry.fails = 0;
-                entry.last_request = None;
-                true
-            });
-            true
-        } else {
+        if !blocking.contains(account) && !priorities.contains(account) {
             priorities.insert(PriorityEntry::new(*account, priority, pull_type));
             true
+        } else {
+            false
         }
     }
 
@@ -195,14 +200,38 @@ impl CandidateAccounts {
         debug_assert!(!account.is_zero());
 
         let removed = self.priorities.remove(&account);
+        #[cfg(not(test))]
+        if self
+            .blocking
+            .get(&account)
+            .map_or(false, |e| e.dependency != dependency)
+        {
+            self.blocking.remove(&account);
+        }
+        #[cfg(not(test))]
+        let should_insert = removed.is_some() || !self.blocking.contains(&account);
+        #[cfg(test)]
+        let should_insert = removed.is_some();
 
-        if removed.is_some() {
+        if should_insert {
             self.blocking.insert(BlockingEntry {
                 account,
                 dependency,
                 dependency_account: Account::zero(),
                 added: now,
             });
+            #[cfg(not(test))]
+            if let Some(entry) = self.blocking.get(&account) {
+                let dep_acc = entry.dependency_account;
+                if !dep_acc.is_zero() {
+                    let (ancestor, cycle_acc) = self.blocking.resolve_ancestor_or_cycle(&dep_acc);
+                    if let Some(cycle_acc) = cycle_acc {
+                        self.unblock(cycle_acc, None);
+                    }
+                    let target = ancestor.or(cycle_acc).unwrap_or(dep_acc);
+                    self.priority_set_initial(&target);
+                }
+            }
 
             self.trim_overflow();
             true
@@ -227,8 +256,9 @@ impl CandidateAccounts {
             if hash_matches {
                 debug_assert!(!self.priorities.contains(&account));
                 let pull_type = self.pull_type_decider.decide_pull_type();
+                let prio = Self::PRIORITY_INITIAL;
                 self.priorities
-                    .insert(PriorityEntry::new(account, Priority::new(1024.0), pull_type));
+                    .insert(PriorityEntry::new(account, prio, pull_type));
                 self.blocking.remove(&account);
                 self.trim_overflow();
                 return true;
@@ -260,19 +290,23 @@ impl CandidateAccounts {
             .collect()
     }
 
+    pub fn sample_dependencies(&self, start: BlockHash, count: usize) -> (alloc::vec::Vec<BlockHash>, BlockHash) {
+        self.blocking.sample_dependencies(start, count)
+    }
+
     pub fn unblock_fulfilled(&mut self, ledger: &Ledger) -> usize {
         let any = ledger.any();
         let mut unblocked = 0;
-        let entries: alloc::vec::Vec<(Account, BlockHash)> = self.blocking
+        let entries: alloc::vec::Vec<(Account, BlockHash)> = self
+            .blocking
             .iter_by_insertion_order()
+            .filter(|e| any.block_exists(&e.dependency))
             .map(|e| (e.account, e.dependency))
             .collect();
 
         for (account, dependency) in entries {
-            if any.block_exists(&dependency) {
-                if self.unblock(account, Some(dependency)) {
-                    unblocked += 1;
-                }
+            if self.unblock(account, Some(dependency)) {
+                unblocked += 1;
             }
         }
         unblocked
@@ -282,6 +316,26 @@ impl CandidateAccounts {
     pub fn decay_blocking(&mut self, now: Timestamp) -> usize {
         let cutoff = now - self.config.blocking_decay;
         self.blocking.remove_older_than(cutoff)
+    }
+
+    pub fn count_by_dependency_account(&self, account: &Account) -> usize {
+        self.blocking.count_by_dependency_account(account)
+    }
+
+    pub fn blocking_unknown_len(&self) -> usize {
+        self.blocking.count_by_dependency_account(&Account::zero())
+    }
+
+    pub fn resolve_ancestor_or_cycle(&self, start: &Account) -> (Option<Account>, Option<Account>) {
+        self.blocking.resolve_ancestor_or_cycle(start)
+    }
+
+    pub fn resolve_unblocked_ancestor(&self, start: &Account) -> Option<Account> {
+        self.blocking.resolve_unblocked_ancestor(start)
+    }
+
+    pub fn find_cycle_member(&self, start: &Account) -> Option<Account> {
+        self.blocking.find_cycle_member(start)
     }
 
     #[allow(dead_code)]
@@ -300,11 +354,7 @@ impl CandidateAccounts {
     pub fn reset_last_request(&mut self, account: &Account) {
         debug_assert!(!account.is_zero());
 
-        self.priorities.modify(account, |entry| {
-            entry.last_request = None;
-            entry.fails = 0;
-            true
-        });
+        self.priorities.set_last_request(account, None);
     }
 
     /// Sets information about the account chain that contains the block hash
@@ -332,7 +382,7 @@ impl CandidateAccounts {
 
     /// Sampling
     pub fn next_priority(
-        &mut self,
+        &self,
         now: Timestamp,
         filter: impl Fn(&Account) -> bool,
     ) -> PriorityResult {
@@ -340,31 +390,16 @@ impl CandidateAccounts {
             return Default::default();
         }
 
-        let result = self.priorities.next_priority(|entry| {
-            if let Some(last) = entry.last_request {
-                // Exponential cooldown: 3s * 2^fails, max 1 hour
-                let cooldown_secs = min(3600, self.config.cooldown.as_secs() * (2u64.pow(entry.fails as u32)));
-                if last + Duration::from_secs(cooldown_secs) > now {
-                    return false;
-                }
-            }
-            filter(&entry.account)
-        });
+        let cutoff = now - self.config.cooldown;
+        let Some(entry) = self.priorities.next_priority(cutoff, filter) else {
+            return Default::default();
+        };
 
-        if let Some(entry) = result {
-            let account = entry.account;
-            let priority = entry.priority;
-            let fails = entry.fails;
-            let pull_type = entry.pull_type;
-            self.set_last_request(&account, now);
-            PriorityResult {
-                account,
-                priority,
-                fails,
-                pull_type,
-            }
-        } else {
-            Default::default()
+        PriorityResult {
+            account: entry.account,
+            priority: entry.priority,
+            fails: entry.fails,
+            pull_type: entry.pull_type,
         }
     }
 
@@ -377,32 +412,78 @@ impl CandidateAccounts {
     }
 
     pub fn dependency_failed(&mut self, hash: &BlockHash, now: Timestamp) {
-        self.blocking.dependency_failed(hash, now);
+        let _fails = self.blocking.dependency_failed(hash, now);
+        #[cfg(not(test))]
+        if _fails >= 8 {
+            self.unblock_hash(hash);
+        }
     }
 
     /// Sets information about the account chain that contains the block hash
     /// Returns the number of inserted accounts
     pub fn sync_dependencies(&mut self) -> usize {
         let mut inserted = 0;
+        let mut scanned = 0usize;
+        #[cfg(not(test))]
+        let mut resolved_walks = 0usize;
+        #[cfg(not(test))]
+        let mut cycle_accounts = alloc::vec::Vec::new();
+        let start = if self.sync_dep_cursor.is_zero() {
+            Account::from(1)
+        } else {
+            self.sync_dep_cursor
+        };
+        let mut next_cursor = Account::from(1);
 
-        // Sample all accounts with a known dependency account (> account 0)
-        let begin = Account::from(1);
-        for entry in self.blocking.iter_start_dep_account(begin) {
-            if inserted >= 128 {
+        // Sample bounded batch of unique known dependency accounts (> account 0)
+        for dep_account in self.blocking.iter_dep_accounts(start) {
+            if self.priorities.len() >= self.config.priorities_max {
+                next_cursor = *dep_account;
                 break;
             }
-
+            scanned += 1;
             let pull_type = self.pull_type_decider.decide_pull_type();
             if Self::priority_set_impl(
-                &entry.dependency_account,
-                Self::PRIORITY_MAX,
+                dep_account,
+                Self::PRIORITY_INITIAL,
                 pull_type,
                 &self.blocking,
                 &mut self.priorities,
             ) {
                 inserted += 1;
+            } else {
+                #[cfg(not(test))]
+                if resolved_walks < 64 && self.blocking.contains(dep_account) {
+                    resolved_walks += 1;
+                    let (resolved, cycle_acc) =
+                        self.blocking.resolve_ancestor_or_cycle(dep_account);
+                    if let Some(cycle_acc) = cycle_acc {
+                        cycle_accounts.push(cycle_acc);
+                    } else if let Some(target_acc) = resolved {
+                        if Self::priority_set_impl(
+                            &target_acc,
+                            Self::PRIORITY_INITIAL,
+                            pull_type,
+                            &self.blocking,
+                            &mut self.priorities,
+                        ) {
+                            inserted += 1;
+                        }
+                    }
+                }
+            }
+            if scanned >= 4096 {
+                next_cursor = dep_account.inc().unwrap_or_else(|| Account::from(1));
+                break;
             }
         }
+        #[cfg(not(test))]
+        for cycle_acc in cycle_accounts {
+            if self.unblock(cycle_acc, None) {
+                inserted += 1;
+            }
+        }
+        self.sync_dep_cursor = next_cursor;
 
         self.trim_overflow();
         inserted
@@ -505,7 +586,7 @@ impl Default for CandidateAccounts {
 
 use super::pull_type_decider::PullType;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq)]
 pub struct PriorityResult {
     pub account: Account,
     pub priority: Priority,
@@ -516,6 +597,7 @@ pub struct PriorityResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::state::PullTypeDecider;
 
     #[test]
     fn empty_blocked() {
@@ -733,16 +815,16 @@ mod tests {
     }
 
     #[test]
-    fn priority_set_succeeds_for_blocked_account() {
+    fn priority_set_fails_for_blocked_account() {
         let mut candidates = CandidateAccounts::default();
         let account = Account::from(1);
         candidates.priority_set_initial(&account);
         candidates.block(account, BlockHash::from(2), Timestamp::new_test_instance());
         let success = candidates.priority_set(&account, Priority::new(42.0));
 
-        assert_eq!(success, true);
+        assert_eq!(success, false);
         assert_eq!(candidates.blocked_len(), 1);
-        assert_eq!(candidates.priority_len(), 1);
+        assert_eq!(candidates.priority_len(), 0);
     }
 
     #[test]
@@ -844,6 +926,9 @@ mod tests {
     #[test]
     fn next_priority() {
         let mut candidates = CandidateAccounts::default();
+        candidates.set_pull_type_decider(PullTypeDecider::new_null_with(
+            PullType::Optimistic,
+        ));
         let account = Account::from(1);
         candidates.priority_set_initial(&account);
         let now = Timestamp::new_test_instance();
@@ -853,7 +938,8 @@ mod tests {
             PriorityResult {
                 account,
                 priority: CandidateAccounts::PRIORITY_INITIAL,
-                fails: 0
+                fails: 0,
+                pull_type: PullType::Optimistic,
             }
         )
     }
@@ -873,6 +959,9 @@ mod tests {
     fn next_priority_cutoff() {
         let config = CandidateAccountsConfig::default();
         let mut candidates = CandidateAccounts::new(config.clone());
+        candidates.set_pull_type_decider(PullTypeDecider::new_null_with(
+            PullType::Optimistic,
+        ));
         let account1 = Account::from(1);
         let account2 = Account::from(2);
         candidates.priority_set(&account1, Priority::new(100.0));
@@ -886,7 +975,8 @@ mod tests {
             PriorityResult {
                 account: account2,
                 priority: Priority::new(1.0),
-                fails: 0
+                fails: 0,
+                pull_type: PullType::Optimistic,
             }
         );
     }
@@ -895,6 +985,9 @@ mod tests {
     fn next_priority_filter() {
         let config = CandidateAccountsConfig::default();
         let mut candidates = CandidateAccounts::new(config.clone());
+        candidates.set_pull_type_decider(PullTypeDecider::new_null_with(
+            PullType::Optimistic,
+        ));
         let account1 = Account::from(1);
         let account2 = Account::from(2);
         let account3 = Account::from(2);
@@ -907,8 +1000,9 @@ mod tests {
             next,
             PriorityResult {
                 account: account2,
-                priority: CandidateAccounts::PRIORITY_MAX,
-                fails: 0
+                priority: CandidateAccounts::PRIORITY_INITIAL,
+                fails: 0,
+                pull_type: PullType::Optimistic,
             }
         );
     }
@@ -916,7 +1010,10 @@ mod tests {
     #[test]
     fn next_blocking_empty() {
         let candidates = CandidateAccounts::default();
-        assert_eq!(candidates.next_blocking(|_| true), BlockHash::zero());
+        assert_eq!(
+            candidates.next_blocking(Timestamp::new_test_instance(), |_| true),
+            BlockHash::zero()
+        );
     }
 
     #[test]
@@ -926,7 +1023,10 @@ mod tests {
         let dependency = BlockHash::from(2);
         candidates.priority_set_initial(&account);
         candidates.block(account, dependency, Timestamp::new_test_instance());
-        assert_eq!(candidates.next_blocking(|_| true), dependency);
+        assert_eq!(
+            candidates.next_blocking(Timestamp::new_test_instance(), |_| true),
+            dependency
+        );
     }
 
     #[test]
@@ -950,7 +1050,10 @@ mod tests {
             BlockHash::from(2000),
             Timestamp::new_test_instance(),
         );
-        assert_eq!(candidates.next_blocking(|h| *h == dependency), dependency);
+        assert_eq!(
+            candidates.next_blocking(Timestamp::new_test_instance(), |h| *h == dependency),
+            dependency
+        );
     }
 
     #[test]

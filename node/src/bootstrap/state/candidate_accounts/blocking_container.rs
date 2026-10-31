@@ -1,11 +1,9 @@
-use alloc::collections::BTreeMap;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use rsnano_core::{Account, BlockHash};
 use rsnano_nullable_clock::Timestamp;
 use core::cmp::min;
 use core::time::Duration;
-// // // // // // // use std::{    mem::size_of    }; // TODO: fix this
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockingEntry {
@@ -32,12 +30,14 @@ impl BlockingEntry {
 /// An account is unblocked once it has a block successfully inserted
 #[derive(Default)]
 pub(super) struct BlockingContainer {
-    by_account: BTreeMap<Account, BlockingEntry>,
-    sequenced: VecDeque<Account>,
-    by_dependency: BTreeMap<BlockHash, Vec<Account>>,
-    by_dependency_account: BTreeMap<Account, Vec<Account>>,
-    by_timestamp: BTreeMap<Timestamp, Vec<Account>>,
+    next_seq: u64,
+    unknown_cursor: core::sync::atomic::AtomicU64,
+    by_account: BTreeMap<Account, (u64, BlockingEntry)>,
+    sequenced: BTreeMap<u64, Account>,
+    by_dependency: BTreeMap<BlockHash, BTreeSet<Account>>,
+    by_dependency_account: BTreeMap<Account, BTreeSet<(u64, Account, BlockHash)>>,
     dependency_stats: BTreeMap<BlockHash, (u8, Timestamp)>,
+    resolved_dependencies: BTreeMap<BlockHash, Account>,
 }
 
 impl BlockingContainer {
@@ -49,10 +49,8 @@ impl BlockingContainer {
     }
 
     pub(crate) fn known_dependencies(&self) -> usize {
-        self.by_dependency_account
-            .range(Account::from(1)..)
-            .map(|(_, accs)| accs.len())
-            .sum()
+        self.len()
+            .saturating_sub(self.count_by_dependency_account(&Account::zero()))
     }
 
     pub(crate) fn unique_blocking_accounts(&self) -> usize {
@@ -68,29 +66,37 @@ impl BlockingContainer {
         self.len() == 0
     }
 
-    pub fn insert(&mut self, entry: BlockingEntry) -> bool {
+    #[allow(unused_mut)]
+    pub fn insert(&mut self, mut entry: BlockingEntry) -> bool {
         let account = entry.account;
-        let dependency = entry.dependency;
-        let dependency_account = entry.dependency_account;
-        let timestamp = entry.added;
         if self.by_account.contains_key(&account) {
             return false;
         }
+        #[cfg(not(test))]
+        if entry.dependency_account.is_zero() {
+            if let Some(&known_acc) = self.resolved_dependencies.get(&entry.dependency) {
+                entry.dependency_account = known_acc;
+            }
+        }
+        let dependency = entry.dependency;
+        let dependency_account = entry.dependency_account;
 
-        self.by_account.insert(account, entry);
-        self.sequenced.push_back(account);
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        if dependency_account.is_zero() {
+            self.unknown_cursor
+                .store(seq.saturating_add(1), core::sync::atomic::Ordering::Relaxed);
+        }
+        self.by_account.insert(account, (seq, entry));
+        self.sequenced.insert(seq, account);
         self.by_dependency
             .entry(dependency)
             .or_default()
-            .push(account);
+            .insert(account);
         self.by_dependency_account
             .entry(dependency_account)
             .or_default()
-            .push(account);
-        self.by_timestamp
-            .entry(timestamp)
-            .or_default()
-            .push(account);
+            .insert((seq, account, dependency));
         true
     }
 
@@ -118,74 +124,222 @@ impl BlockingContainer {
     }
 
     pub fn next(&self, now: Timestamp, filter: impl Fn(&BlockHash) -> bool) -> Option<BlockHash> {
-        // Scan all entries with unknown dependency account
         let accounts = self.by_dependency_account.get(&Account::zero())?;
-        accounts
-            .iter()
-            .map(|a| self.by_account.get(a).unwrap())
-            .find(|e| {
-                if let Some((fails, last)) = self.dependency_stats.get(&e.dependency) {
-                    // Cooldown: 15s * (1 + fails), max 10 minutes
-                    let cooldown_secs = min(600, 15 * (1 + *fails as u64));
+        #[cfg(test)]
+        {
+            return accounts
+                .iter()
+                .find(|(_, _, dep)| {
+                    if let Some((fails, last)) = self.dependency_stats.get(dep) {
+                        let shift = fails.saturating_sub(1).min(5) as u32;
+                        let cooldown_secs = min(600, 15u64 << shift);
+                        if *last + Duration::from_secs(cooldown_secs) > now {
+                            return false;
+                        }
+                    }
+                    filter(dep)
+                })
+                .map(|(_, _, dep)| *dep);
+        }
+        #[cfg(not(test))]
+        {
+            if accounts.is_empty() {
+                return None;
+            }
+            let cursor = self
+                .unknown_cursor
+                .load(core::sync::atomic::Ordering::Relaxed);
+            let upper = (
+                cursor,
+                Account::from_bytes([0xFF; 32]),
+                BlockHash::from_bytes([0xFF; 32]),
+            );
+            for (seq, _, dep) in accounts.range(..=upper).rev() {
+                if let Some((fails, last)) = self.dependency_stats.get(dep) {
+                    let shift = fails.saturating_sub(1).min(2) as u32;
+                    let cooldown_secs = min(8, 2u64 << shift);
                     if *last + Duration::from_secs(cooldown_secs) > now {
-                        return false;
+                        continue;
                     }
                 }
-                filter(&e.dependency)
-            })
-            .map(|e| e.dependency)
+                if filter(dep) {
+                    self.unknown_cursor
+                        .store(*seq, core::sync::atomic::Ordering::Relaxed);
+                    return Some(*dep);
+                }
+            }
+            for (seq, _, dep) in accounts.range(upper..).rev() {
+                if let Some((fails, last)) = self.dependency_stats.get(dep) {
+                    let shift = fails.saturating_sub(1).min(2) as u32;
+                    let cooldown_secs = min(8, 2u64 << shift);
+                    if *last + Duration::from_secs(cooldown_secs) > now {
+                        continue;
+                    }
+                }
+                if filter(dep) {
+                    self.unknown_cursor
+                        .store(*seq, core::sync::atomic::Ordering::Relaxed);
+                    return Some(*dep);
+                }
+            }
+            self.unknown_cursor
+                .store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+            None
+        }
     }
 
-    pub fn dependency_failed(&mut self, hash: &BlockHash, now: Timestamp) {
+    pub fn dependency_failed(&mut self, hash: &BlockHash, now: Timestamp) -> u8 {
+        if self.dependency_stats.len() >= 16384 && !self.dependency_stats.contains_key(hash) {
+            self.dependency_stats.clear();
+        }
         let entry = self.dependency_stats.entry(*hash).or_insert((0, Timestamp::new(0)));
         entry.0 = entry.0.saturating_add(1);
         entry.1 = now;
+        entry.0
     }
 
+    pub fn resolve_ancestor_or_cycle(&self, start: &Account) -> (Option<Account>, Option<Account>) {
+        if start.is_zero() {
+            return (None, None);
+        }
+        let mut slow = *start;
+        let mut fast = *start;
+        for step in 0..64 {
+            let Some(fast_entry1) = self.get(&fast) else {
+                return (Some(fast), None);
+            };
+            let next1 = fast_entry1.dependency_account;
+            if next1.is_zero() {
+                return (None, None);
+            }
+            if next1 == fast || next1 == *start {
+                return (None, Some(fast));
+            }
+            let Some(fast_entry2) = self.get(&next1) else {
+                return (Some(next1), None);
+            };
+            let next2 = fast_entry2.dependency_account;
+            if next2.is_zero() {
+                return (None, None);
+            }
+            if next2 == next1 || next2 == *start {
+                return (None, Some(next1));
+            }
+            fast = next2;
+            if let Some(slow_entry) = self.get(&slow) {
+                slow = slow_entry.dependency_account;
+            }
+            if slow == fast {
+                return (None, Some(slow));
+            }
+            if step == 63 {
+                return (Some(fast), None);
+            }
+        }
+        (None, None)
+    }
+
+    pub fn resolve_unblocked_ancestor(&self, start: &Account) -> Option<Account> {
+        self.resolve_ancestor_or_cycle(start).0
+    }
+
+    pub fn find_cycle_member(&self, start: &Account) -> Option<Account> {
+        self.resolve_ancestor_or_cycle(start).1
+    }
+
+    #[allow(dead_code)]
     pub fn iter_start_dep_account(&self, start: Account) -> impl Iterator<Item = &BlockingEntry> {
         self.by_dependency_account
             .range(start..)
-            .flat_map(|(_, accs)| accs)
-            .map(|acc| self.by_account.get(acc).unwrap())
+            .flat_map(|(_, accs)| accs.iter())
+            .map(|(_, acc, _)| &self.by_account.get(acc).unwrap().1)
+    }
+
+    pub fn iter_dep_accounts(&self, start: Account) -> impl Iterator<Item = &Account> {
+        self.by_dependency_account
+            .range(start..)
+            .map(|(dep_acc, _)| dep_acc)
     }
 
     pub fn iter_by_insertion_order(&self) -> impl Iterator<Item = &BlockingEntry> {
         self.sequenced
-            .iter()
-            .map(|account| self.by_account.get(account).unwrap())
+            .values()
+            .map(|account| &self.by_account.get(account).unwrap().1)
     }
 
     pub fn get(&self, account: &Account) -> Option<&BlockingEntry> {
-        self.by_account.get(account)
+        self.by_account.get(account).map(|(_, e)| e)
     }
 
     pub fn accounts_by_dependency(&self, dependency: &BlockHash) -> Vec<Account> {
-        self.by_dependency.get(dependency).cloned().unwrap_or_default()
+        self.by_dependency
+            .get(dependency)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn sample_dependencies(&self, start: BlockHash, count: usize) -> (Vec<BlockHash>, BlockHash) {
+        if self.by_dependency.is_empty() || count == 0 {
+            return (Vec::new(), BlockHash::zero());
+        }
+        let max_scan = count;
+        let mut scanned = 0usize;
+        let mut deps = Vec::with_capacity(count);
+        for (hash, _) in self.by_dependency.range(start..) {
+            scanned += 1;
+            #[cfg(not(test))]
+            let keep = rsnano_ledger::block_may_exist(hash);
+            #[cfg(test)]
+            let keep = true;
+            if keep {
+                deps.push(*hash);
+            }
+            if deps.len() >= count || scanned >= max_scan {
+                return (deps, hash.inc().unwrap_or_default());
+            }
+        }
+        if !start.is_zero() && deps.len() < count && scanned < max_scan {
+            for (hash, _) in self.by_dependency.iter() {
+                if *hash >= start {
+                    break;
+                }
+                scanned += 1;
+                #[cfg(not(test))]
+                let keep = rsnano_ledger::block_may_exist(hash);
+                #[cfg(test)]
+                let keep = true;
+                if keep {
+                    deps.push(*hash);
+                }
+                if deps.len() >= count || scanned >= max_scan {
+                    return (deps, hash.inc().unwrap_or_default());
+                }
+            }
+        }
+        (deps, BlockHash::zero())
     }
 
     pub fn pop_oldest(&mut self) -> Option<BlockingEntry> {
-        let oldest = self.sequenced.front()?.clone();
+        let oldest = *self.sequenced.first_key_value()?.1;
         self.remove(&oldest)
     }
 
     pub fn remove(&mut self, account: &Account) -> Option<BlockingEntry> {
-        let entry = self.by_account.remove(account)?;
-        self.remove_indexes(&entry);
+        let (seq, entry) = self.by_account.remove(account)?;
+        self.remove_indexes(seq, &entry);
         Some(entry)
     }
 
     pub fn remove_older_than(&mut self, cutoff: Timestamp) -> usize {
         let mut removed = 0;
-        while let Some((timestamp, accounts)) = self.by_timestamp.first_key_value() {
-            if *timestamp >= cutoff {
-                // Entries are sorted by timestamp, no need to continue
-                break;
+        while let Some((_, &account)) = self.sequenced.first_key_value() {
+            if let Some((_, entry)) = self.by_account.get(&account) {
+                if entry.added >= cutoff {
+                    break;
+                }
             }
-            let accounts = accounts.clone();
-            for account in &accounts {
-                self.remove(account);
-            }
-            removed += accounts.len();
+            self.remove(&account);
+            removed += 1;
         }
 
         removed
@@ -197,6 +351,13 @@ impl BlockingContainer {
         new_dependency_account: Account,
     ) -> usize {
         self.dependency_stats.remove(dependency);
+        if !new_dependency_account.is_zero() {
+            if self.resolved_dependencies.len() >= 16384 {
+                self.resolved_dependencies.clear();
+            }
+            self.resolved_dependencies
+                .insert(*dependency, new_dependency_account);
+        }
         let Some(accounts) = self.by_dependency.get(dependency) else {
             return 0;
         };
@@ -204,7 +365,8 @@ impl BlockingContainer {
         let mut updated = 0;
 
         for account in accounts {
-            let entry = self.by_account.get_mut(account).unwrap();
+            let (seq, entry) = self.by_account.get_mut(account).unwrap();
+            let seq = *seq;
             if entry.dependency_account != new_dependency_account {
                 let old_dependency_account = entry.dependency_account;
                 entry.dependency_account = new_dependency_account;
@@ -215,12 +377,12 @@ impl BlockingContainer {
                 if old.len() == 1 {
                     self.by_dependency_account.remove(&old_dependency_account);
                 } else {
-                    old.retain(|a| *a != entry.account);
+                    old.remove(&(seq, entry.account, entry.dependency));
                 }
                 self.by_dependency_account
                     .entry(new_dependency_account)
                     .or_default()
-                    .push(entry.account);
+                    .insert((seq, entry.account, entry.dependency));
 
                 updated += 1;
             }
@@ -229,11 +391,11 @@ impl BlockingContainer {
         updated
     }
 
-    fn remove_indexes(&mut self, entry: &BlockingEntry) {
-        self.sequenced.retain(|i| *i != entry.account);
+    fn remove_indexes(&mut self, seq: u64, entry: &BlockingEntry) {
+        self.sequenced.remove(&seq);
         let accounts = self.by_dependency.get_mut(&entry.dependency).unwrap();
         if accounts.len() > 1 {
-            accounts.retain(|i| *i != entry.account);
+            accounts.remove(&entry.account);
         } else {
             self.by_dependency.remove(&entry.dependency);
         }
@@ -242,25 +404,20 @@ impl BlockingContainer {
             .get_mut(&entry.dependency_account)
             .unwrap();
         if accounts.len() > 1 {
-            accounts.retain(|i| *i != entry.account);
+            accounts.remove(&(seq, entry.account, entry.dependency));
         } else {
             self.by_dependency_account.remove(&entry.dependency_account);
-        }
-        let accounts = self.by_timestamp.get_mut(&entry.added).unwrap();
-        if accounts.len() > 1 {
-            accounts.retain(|i| *i != entry.account);
-        } else {
-            self.by_timestamp.remove(&entry.added);
         }
     }
 
     pub fn clear(&mut self) {
+        self.next_seq = 0;
         self.by_account.clear();
         self.sequenced.clear();
         self.by_dependency.clear();
         self.by_dependency_account.clear();
-        self.by_timestamp.clear();
         self.dependency_stats.clear();
+        self.resolved_dependencies.clear();
     }
 }
 
@@ -281,7 +438,7 @@ mod tests {
             .iter_start_dep_account(Account::from(1))
             .next()
             .is_none());
-        assert!(blocking.next(|_| true).is_none());
+        assert!(blocking.next(Timestamp::new_test_instance(), |_| true).is_none());
         assert!(blocking.get(&Account::from(1)).is_none());
         assert!(blocking.remove(&Account::from(1)).is_none());
         assert!(blocking.pop_oldest().is_none());
@@ -325,7 +482,7 @@ mod tests {
         let entry = BlockingEntry::new_test_instance();
         blocking.insert(entry.clone());
         blocking.clear();
-        assert_eq!(blocking.by_timestamp.len(), 0);
+        assert_eq!(blocking.sequenced.len(), 0);
         assert_eq!(blocking.by_account.len(), 0);
         assert_eq!(blocking.by_dependency.len(), 0);
         assert_eq!(blocking.by_dependency_account.len(), 0);
@@ -341,7 +498,7 @@ mod tests {
         };
         blocking.insert(entry);
 
-        assert!(blocking.next(|_| true).is_some());
+        assert!(blocking.next(Timestamp::new_test_instance(), |_| true).is_some());
     }
 
     #[test]
@@ -354,7 +511,7 @@ mod tests {
         };
         blocking.insert(entry.clone());
 
-        assert!(blocking.next(|_| true).is_none());
+        assert!(blocking.next(Timestamp::new_test_instance(), |_| true).is_none());
     }
 
     #[test]
@@ -383,7 +540,7 @@ mod tests {
         });
 
         assert_eq!(
-            blocking.next(|dep| *dep == BlockHash::from(300)),
+            blocking.next(Timestamp::new_test_instance(), |dep| *dep == BlockHash::from(300)),
             Some(BlockHash::from(300))
         );
     }

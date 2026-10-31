@@ -5,7 +5,7 @@ mod priority_container;
 mod pull_type_decider;
 
 pub(crate) use candidate_accounts::{
-    CandidateAccounts, CandidateAccountsConfig, PriorityDownResult, PriorityResult,
+    CandidateAccounts, CandidateAccountsConfig, PriorityDownResult, PriorityResult, PriorityUpResult,
 };
 
 pub use blocking_container::BlockingEntry;

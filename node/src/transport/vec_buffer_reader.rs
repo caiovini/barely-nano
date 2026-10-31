@@ -31,39 +31,59 @@ impl AsyncBufferReader for VecBufferReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    };
 
-    #[tokio::test]
-    async fn empty_vec() {
+    fn block_on<F: Future>(mut fut: F) -> F::Output {
+        fn noop(_: *const ()) {}
+        fn clone(p: *const ()) -> RawWaker {
+            RawWaker::new(p, &VTABLE)
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = unsafe { Pin::new_unchecked(&mut fut) };
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(out) => out,
+            Poll::Pending => panic!("unexpected Poll::Pending in VecBufferReader"),
+        }
+    }
+
+    #[test]
+    fn empty_vec() {
         let reader = VecBufferReader::new(Vec::new());
         let mut buffer = vec![0u8; 3];
-        let result = reader.read(&mut buffer, 1).await;
+        let result = block_on(reader.read(&mut buffer, 1));
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn read_one_byte() {
+    #[test]
+    fn read_one_byte() {
         let reader = VecBufferReader::new(vec![42]);
         let mut buffer = vec![0u8; 1];
-        let result = reader.read(&mut buffer, 1).await;
+        let result = block_on(reader.read(&mut buffer, 1));
         assert!(result.is_ok());
         assert_eq!(buffer[0], 42);
     }
 
-    #[tokio::test]
-    async fn multiple_reads() {
+    #[test]
+    fn multiple_reads() {
         let reader = VecBufferReader::new(vec![1, 2, 3, 4, 5]);
         let mut buffer = vec![0u8; 2];
-        reader.read(&mut buffer, 1).await.unwrap();
+        block_on(reader.read(&mut buffer, 1)).unwrap();
         assert_eq!(buffer[0], 1);
 
-        reader.read(&mut buffer, 2).await.unwrap();
+        block_on(reader.read(&mut buffer, 2)).unwrap();
         assert_eq!(buffer[0], 2);
         assert_eq!(buffer[1], 3);
 
-        reader.read(&mut buffer, 2).await.unwrap();
+        block_on(reader.read(&mut buffer, 2)).unwrap();
         assert_eq!(buffer[0], 4);
         assert_eq!(buffer[1], 5);
 
-        assert!(reader.read(&mut buffer, 1).await.is_err());
+        assert!(block_on(reader.read(&mut buffer, 1)).is_err());
     }
 }

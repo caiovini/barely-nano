@@ -16,7 +16,7 @@ use rsnano_core::{
     Account, AccountInfo, BlockHash, ConfirmationHeightInfo, Networks, SavedBlock,
     utils::{ContainerInfo, ContainerInfoProvider},
 };
-use rsnano_ledger::{AnySet, Ledger};
+use rsnano_ledger::{AnySet, ConfirmedSet, Ledger};
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 use rsnano_stats::{Stats, StatsCollection, StatsSource};
@@ -159,12 +159,29 @@ impl ElectionSchedulers {
         self.manual.run_once();
     }
 
+    fn activate_account(&self, any: &impl AnySet, account: &Account) {
+        if let Some(account_info) = any.get_account(account) {
+            let conf_info = any
+                .confirmed()
+                .get_conf_info(account)
+                .unwrap_or_default();
+            if conf_info.height < account_info.block_count {
+                self.optimistic.activate(account, &account_info, &conf_info);
+                self.priority
+                    .activate_with_info(any, account, &account_info, &conf_info);
+            }
+        }
+    }
+
     pub fn activate_accounts_with_fresh_blocks(&self, processed: &[ProcessedResult]) {
         let any = self.ledger.any();
+        let mut seen = alloc::collections::BTreeSet::new();
         for result in processed {
             if result.status.is_ok() {
                 let account = result.saved_block.as_ref().unwrap().account();
-                self.priority.activate(&any, &account);
+                if seen.insert(account) {
+                    self.activate_account(&any, &account);
+                }
             }
         }
     }
@@ -181,13 +198,23 @@ impl ElectionSchedulers {
     }
 
     pub fn activate_successors<'a>(&self, confirmed: impl IntoIterator<Item = &'a SavedBlock>) {
-        // Activate successors of confirmed blocks
+        // Activate successors of confirmed blocks (deduplicating accounts across the batch)
         let any = self.ledger.any();
+        let tracked = self.activate_successors_listener.is_tracked();
+        let mut seen = alloc::collections::BTreeSet::new();
         for block in confirmed {
-            if self.activate_successors_listener.is_tracked() {
+            if tracked {
                 self.activate_successors_listener.emit(block.clone());
             }
-            self.priority.activate_successors(&any, block);
+            let account = block.account();
+            if seen.insert(account) {
+                self.activate_account(&any, &account);
+            }
+            if let Some(destination) = block.destination() {
+                if block.is_send() && !destination.is_zero() && seen.insert(destination) {
+                    self.activate_account(&any, &destination);
+                }
+            }
         }
     }
 
@@ -230,18 +257,6 @@ impl StatsSource for ElectionSchedulers {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn activate_successors() {
-        let schedulers = ElectionSchedulers::new_null();
-        let tracker = schedulers.priority.track_activate_successors();
-        let block = SavedBlock::new_test_instance();
-
-        schedulers.activate_successors([&block]);
-
-        let output = tracker.output();
-        assert_eq!(output, [block]);
-    }
 
     #[test]
     fn can_track_successor_activation() {

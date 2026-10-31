@@ -265,33 +265,35 @@ impl Block {
     }
 
     pub fn verify_with_key(&self, pub_key: &PublicKey) -> anyhow::Result<()> {
-        match self {
-            Block::State(b) => {
-                if b.is_signature_verified() {
-                    return Ok(());
-                }
-                let res = pub_key.verify(b.hash().as_bytes(), b.signature());
-                if res.is_ok() {
-                    b.set_signature_verified(true);
-                }
-                res
-            }
-            _ => self.as_block().verify_signature(pub_key),
+        if self.is_signature_verified() {
+            return Ok(());
         }
+        let res = pub_key.verify(self.hash().as_bytes(), self.signature());
+        if res.is_ok() {
+            self.set_signature_verified(true);
+        }
+        res
     }
 
     #[inline(always)]
     pub fn is_signature_verified(&self) -> bool {
         match self {
             Block::State(b) => b.is_signature_verified(),
-            _ => false,
+            Block::LegacySend(b) => b.is_signature_verified(),
+            Block::LegacyReceive(b) => b.is_signature_verified(),
+            Block::LegacyOpen(b) => b.is_signature_verified(),
+            Block::LegacyChange(b) => b.is_signature_verified(),
         }
     }
 
     #[inline(always)]
     pub fn set_signature_verified(&self, verified: bool) {
-        if let Block::State(b) = self {
-            b.set_signature_verified(verified);
+        match self {
+            Block::State(b) => b.set_signature_verified(verified),
+            Block::LegacySend(b) => b.set_signature_verified(verified),
+            Block::LegacyReceive(b) => b.set_signature_verified(verified),
+            Block::LegacyOpen(b) => b.set_signature_verified(verified),
+            Block::LegacyChange(b) => b.set_signature_verified(verified),
         }
     }
 
@@ -700,7 +702,7 @@ static DEV_GENESIS_DATA: &str = r###"{
 pub static DEV_GENESIS_BLOCK: Lazy<Block> =
     Lazy::new(|| serde_json::from_str(DEV_GENESIS_DATA).unwrap());
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq, Debug, Clone)]
 pub struct DependentBlocks {
     dependents: [BlockHash; 2],
 }

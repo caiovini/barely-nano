@@ -126,7 +126,7 @@ struct BroadcastTracker {
 impl BroadcastTracker {
     pub fn new(network: Networks) -> Self {
         Self {
-            last_broadcasts: BoundedHashMap::new(1024 * 32),
+            last_broadcasts: BoundedHashMap::new(4096),
             broadcast_interval: match network {
                 Networks::NanoDevNetwork => Duration::from_millis(500),
                 _ => Duration::from_secs(150),

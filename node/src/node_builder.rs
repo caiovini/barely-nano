@@ -1,4 +1,3 @@
-use alloc::string::String;
 use alloc::sync::Arc;
 
 use rsnano_core::{utils::get_cpu_count, Networks};
@@ -10,7 +9,7 @@ use crate::{
     config::{
         DaemonConfig, NetworkParams, NodeConfig, NodeFlags,
     },
-    working_path_for, Node, NodeArgs,
+    Node, NodeArgs,
 };
 
 #[derive(Default)]
@@ -64,7 +63,6 @@ impl NodeCallbacksBuilder {
 
 pub struct NodeBuilder {
     network: Networks,
-    data_path: Option<String>,
     config: Option<NodeConfig>,
     network_params: Option<NetworkParams>,
     flags: Option<NodeFlags>,
@@ -77,19 +75,12 @@ impl NodeBuilder {
     pub fn new(network: Networks) -> Self {
         Self {
             network,
-            data_path: None,
             config: None,
             network_params: None,
             flags: None,
             callbacks: None,
             resolver: None,
-            // event_sink: None,
         }
-    }
-
-    pub fn data_path(mut self, path: impl Into<String>) -> Self {
-        self.data_path = Some(path.into());
-        self
     }
 
     pub fn config(mut self, config: NodeConfig) -> Self {
@@ -122,16 +113,7 @@ impl NodeBuilder {
     //     self
     // }
 
-    pub fn get_data_path(&self) -> anyhow::Result<String> {
-        match &self.data_path {
-            Some(path) => Ok(path.clone()),
-            None => working_path_for(self.network).ok_or_else(|| anyhow::anyhow!("working path not found")),
-        }
-    }
-
     pub fn finish(self) -> anyhow::Result<Node> {
-        let data_path = self.get_data_path()?;
-
         let network_params = self
             .network_params
             .unwrap_or_else(|| NetworkParams::new(self.network));
@@ -156,7 +138,6 @@ impl NodeBuilder {
 
         let resolver = self.resolver.unwrap_or_else(|| Arc::new(rsnano_network::NullDnsResolver));
         let args = NodeArgs {
-            data_path,
             config,
             network_params,
             flags,

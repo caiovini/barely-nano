@@ -3,27 +3,19 @@ use crate::utils::ThreadPool;
 use alloc::sync::Arc;
 use core::time::Duration;
 use alloc::boxed::Box;
-use alloc::string::String;
 
 pub(crate) struct WalletBackup {
-    pub data_path: String,
     pub workers: Arc<dyn ThreadPool>,
     pub wallets: Arc<Wallets>,
 }
 
 impl WalletBackup {
     pub fn start(&self) {
-        let backup_path = self.data_path.clone() + "/backup";
-        ongoing_backup(backup_path, self.workers.clone(), self.wallets.clone());
+        ongoing_backup(self.workers.clone(), self.wallets.clone());
     }
 }
 
-fn ongoing_backup(backup_path: String, workers: Arc<dyn ThreadPool>, wallets: Arc<Wallets>) {
-    // Stub for no_std
-    // if let Err(e) = wallets.backup(&backup_path) {
-    //     error!(error = ?e, "Could not create backup of wallets");
-    // }
-
+fn ongoing_backup(workers: Arc<dyn ThreadPool>, wallets: Arc<Wallets>) {
     let workers_w = Arc::downgrade(&workers);
     let wallets_w = Arc::downgrade(&wallets);
 
@@ -36,7 +28,7 @@ fn ongoing_backup(backup_path: String, workers: Arc<dyn ThreadPool>, wallets: Ar
             let Some(wallets) = wallets_w.upgrade() else {
                 return;
             };
-            ongoing_backup(backup_path, workers, wallets);
+            ongoing_backup(workers, wallets);
         }),
     )
 }

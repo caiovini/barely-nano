@@ -5,16 +5,40 @@ use crate::{
     PublicKey, Root, Signature, WorkNonce,
 };
 use anyhow::Result;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct OpenBlock {
     work: WorkNonce,
     signature: Signature,
     hashables: OpenHashables,
     hash: BlockHash,
+    pub signature_verified: AtomicBool,
+}
+
+impl Clone for OpenBlock {
+    fn clone(&self) -> Self {
+        Self {
+            work: self.work,
+            signature: self.signature.clone(),
+            hashables: self.hashables.clone(),
+            hash: self.hash,
+            signature_verified: AtomicBool::new(self.signature_verified.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl OpenBlock {
+    #[inline(always)]
+    pub fn is_signature_verified(&self) -> bool {
+        self.signature_verified.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn set_signature_verified(&self, verified: bool) {
+        self.signature_verified.store(verified, Ordering::Relaxed);
+    }
+
     pub fn account(&self) -> Account {
         self.hashables.account
     }
@@ -58,6 +82,7 @@ impl OpenBlock {
             signature,
             hashables,
             hash,
+            signature_verified: AtomicBool::new(false),
         })
     }
 
@@ -103,6 +128,7 @@ impl BlockBase for OpenBlock {
 
     fn set_signature(&mut self, signature: Signature) {
         self.signature = signature;
+        self.signature_verified.store(false, Ordering::Relaxed);
     }
 
     fn set_work(&mut self, work: WorkNonce) {
@@ -209,6 +235,7 @@ impl<'a> From<OpenBlockArgs<'a>> for OpenBlock {
             hashables,
             hash,
             work: value.work,
+            signature_verified: AtomicBool::new(false),
         }
     }
 }
@@ -243,6 +270,7 @@ impl From<JsonOpenBlock> for OpenBlock {
             signature: value.signature,
             hashables,
             hash,
+            signature_verified: AtomicBool::new(false),
         }
     }
 }

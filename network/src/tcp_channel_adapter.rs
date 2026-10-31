@@ -70,7 +70,6 @@ impl TcpChannelAdapter {
                 }
 
                 if let Some(entry) = channel_w.pop().await {
-                    kernel_common::uart::putchar(b'|');
                     let mut written = 0;
                     let buffer = &entry.buffer;
                     loop {
@@ -78,12 +77,12 @@ impl TcpChannelAdapter {
                             return;
                         }
                         
-                        // Wait for writable or cancellation
-                        let mut writable_fut = core::pin::pin!(stream_w.writable());
+                        // Wait for write_chunk or cancellation in a single NET.lock() acquisition
+                        let mut write_fut = core::pin::pin!(stream_w.write_chunk(&buffer[written..]));
                         let mut cancel_fut = core::pin::pin!(channel_w.cancelled());
                         
                         let ready = core::future::poll_fn(|cx| {
-                            if let core::task::Poll::Ready(r) = writable_fut.as_mut().poll(cx) {
+                            if let core::task::Poll::Ready(r) = write_fut.as_mut().poll(cx) {
                                 return core::task::Poll::Ready(Some(r));
                             }
                             if let core::task::Poll::Ready(_) = cancel_fut.as_mut().poll(cx) {
@@ -92,28 +91,17 @@ impl TcpChannelAdapter {
                             core::task::Poll::Pending
                         }).await;
 
-                        let Some(writable_res) = ready else { return; };
-                        kernel_common::uart::putchar(b'>');
+                        let Some(write_res) = ready else { return; };
                         
-                        match writable_res {
-                            Ok(()) => match stream_w.try_write(&buffer[written..]) {
-                                Ok(n) => {
-                                    written += n;
-                                    kernel_common::uart::putchar(b'.');
-                                    if written >= buffer.len() {
-                                        channel_w.set_last_activity(clock_w.now());
-                                        break;
-                                    }
+                        match write_res {
+                            Ok(n) => {
+                                written += n;
+                                if written >= buffer.len() {
+                                    channel_w.set_last_activity(clock_w.now());
+                                    break;
                                 }
-                                Err(_) => {
-                                    kernel_common::uart::putchar(b'!');
-                                    channel_w.write_error();
-                                    channel_w.close();
-                                    return;
-                                }
-                            },
+                            }
                             Err(_) => {
-                                kernel_common::uart::putchar(b'!');
                                 channel_w.write_error();
                                 channel_w.close();
                                 return;
@@ -130,6 +118,31 @@ impl TcpChannelAdapter {
         let channel_l = channel_adapter.clone();
         async_rt::spawn_named(async move { channel_l.ongoing_checkup().await }, Some("TcpChannel Checkup"));
         channel_adapter
+    }
+
+    pub async fn read_chunk(&self, buffer: &mut [u8]) -> anyhow::Result<usize> {
+        if self.channel.is_closed() {
+            return Err(anyhow::anyhow!("Tried to read from a closed TcpStream"));
+        }
+
+        let Some(stream) = self.stream.upgrade() else {
+            return Err(anyhow::anyhow!("TCP stream dropped"));
+        };
+
+        match stream.read_chunk(buffer).await {
+            Ok(0) => {
+                self.channel.read_failed();
+                Err(anyhow::anyhow!("remote side closed the channel"))
+            }
+            Ok(n) => {
+                self.channel.read_succeeded(n, self.clock.now());
+                Ok(n)
+            }
+            Err(e) => {
+                self.channel.read_failed();
+                Err(e)
+            }
+        }
     }
 
     pub async fn readable(&self) -> anyhow::Result<()> {

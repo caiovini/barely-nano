@@ -43,6 +43,21 @@ impl KeepalivePublisher {
         self.keepalive_listener.track()
     }
 
+    pub fn keepalive_or_connect_background(self: &Arc<Self>, address: String, port: u16) {
+        let publisher = Arc::clone(self);
+        let fut = async move {
+            publisher.keepalive_or_connect(address, port).await;
+        };
+        if kernel_common::async_rt::EXECUTOR.lock().is_some() {
+            kernel_common::async_rt::spawn(fut);
+        } else {
+            let waker = core::task::Waker::noop();
+            let mut cx = core::task::Context::from_waker(&waker);
+            let mut fut = core::pin::pin!(fut);
+            let _ = core::future::Future::poll(fut.as_mut(), &mut cx);
+        }
+    }
+
     pub async fn keepalive_or_connect(&self, address: String, port: u16) {
         self.keepalive_listener
             .emit(Peer::new(address.clone(), port));

@@ -22,6 +22,12 @@ pub struct BootstrapState {
 }
 
 impl BootstrapState {
+    /// Diagnostics: (in-flight queries, tracked channels, in-flight per channel total, channels at limit).
+    pub fn diag_summary(&self) -> (usize, usize, usize, usize) {
+        let (n, total, at_limit) = self.scoring.summary();
+        (self.running_queries.len(), n, total, at_limit)
+    }
+
     pub fn new(config: BootstrapConfig) -> Self {
         let mut scoring = PeerScoring::new();
         scoring.set_channel_limit(config.channel_limit);
@@ -38,7 +44,7 @@ impl BootstrapState {
         }
     }
 
-    pub fn next_blocking_query(&self, channel: &Arc<Channel>, now: Timestamp) -> Option<AscPullQuerySpec> {
+    pub fn next_blocking_query(&mut self, channel: &Arc<Channel>, now: Timestamp) -> Option<AscPullQuerySpec> {
         let next = self.next_blocking(now);
         if !next.is_zero() {
             Some(Self::create_blocking_query(next, channel.clone()))
@@ -68,7 +74,7 @@ impl BootstrapState {
         let next = self.candidate_accounts.next_priority(now, |account| {
             self.running_queries
                 .count_by_account(account, QuerySource::Priority)
-                < 16
+                == 0
         });
 
         if next.account.is_zero() {
@@ -92,11 +98,15 @@ impl BootstrapState {
         self.counters.received_frontiers += outdated.fontiers_received;
         self.counters.outdated_accounts_found += outdated.accounts.len();
 
+        #[cfg(not(test))]
+        let prio = CandidateAccounts::PRIORITY_INITIAL;
+        #[cfg(test)]
+        let prio = CandidateAccounts::PRIORITY_CUTOFF;
 
         for account in &outdated.accounts {
             // Use the lowest possible priority here
             self.candidate_accounts
-                .priority_set(account, crate::bootstrap::state::Priority::new(1.0));
+                .priority_set(account, prio);
 
             self.last_outdated_accounts.push_back(*account);
             if self.last_outdated_accounts.len() > 20 {

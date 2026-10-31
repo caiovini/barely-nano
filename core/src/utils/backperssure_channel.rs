@@ -7,6 +7,7 @@ use spin::Mutex;
 pub struct BackpressureSender<T> {
     queue: Arc<Mutex<VecDeque<T>>>,
     queue_size: Arc<AtomicI32>,
+    hard_limit: usize,
 }
  
 pub struct BackpressureReceiver<T> {
@@ -31,12 +32,15 @@ pub enum TryRecvError {
 pub fn backpressure_channel<T>(
     soft_limit: usize,
 ) -> (BackpressureSender<T>, BackpressureReceiver<T>) {
-    let queue = Arc::new(Mutex::new(VecDeque::new()));
+    let cap = if soft_limit > 0 { soft_limit.max(1024) } else { 0 };
+    let hard_limit = if cap > 0 { cap * 2 } else { 0 };
+    let queue = Arc::new(Mutex::new(VecDeque::with_capacity(hard_limit)));
     let queue_size = Arc::new(AtomicI32::new(0));
  
     let tx = BackpressureSender {
         queue: Arc::clone(&queue),
         queue_size: Arc::clone(&queue_size),
+        hard_limit,
     };
  
     let rx = BackpressureReceiver {
@@ -51,20 +55,18 @@ pub fn backpressure_channel<T>(
 
 impl<T> BackpressureSender<T> {
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        self.queue.lock().push_back(t);
-        self.queue_size.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    pub fn try_send(&self, t: T) -> Result<(), SendError<T>> {
         let mut q = self.queue.lock();
-        if q.len() < 1024 { // Hard limit to prevent memory exhaustion
+        if self.hard_limit == 0 || q.len() < self.hard_limit {
             q.push_back(t);
             self.queue_size.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
             Err(SendError(t))
         }
+    }
+
+    pub fn try_send(&self, t: T) -> Result<(), SendError<T>> {
+        self.send(t)
     }
 
     pub fn len(&self) -> usize {
@@ -133,6 +135,7 @@ impl<T> Clone for BackpressureSender<T> {
         BackpressureSender {
             queue: Arc::clone(&self.queue),
             queue_size: Arc::clone(&self.queue_size),
+            hard_limit: self.hard_limit,
         }
     }
 }

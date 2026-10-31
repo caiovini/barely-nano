@@ -47,13 +47,18 @@ impl BtreeOnlineWeightStore {
             let mut lock = SHARDS[i].lock();
             if let Some(db) = lock.as_mut() {
                 let mut it = db.iter(start_key);
-                while let Some((k, v)) = it.next_kv() {
-                    if k[0] != Self::TABLE_ID {
-                        break;
+                while let Some(step) = it.next_kv_with(|k, v| {
+                    if k[0] != Self::TABLE_ID || v.len() < 16 {
+                        return Err(());
                     }
                     let timestamp = u64::from_be_bytes(k[1..9].try_into().unwrap());
                     let amount = Amount::from_be_bytes(v[0..16].try_into().unwrap());
-                    f(timestamp, amount);
+                    Ok((timestamp, amount))
+                }) {
+                    match step {
+                        Ok((timestamp, amount)) => f(timestamp, amount),
+                        Err(()) => break,
+                    }
                 }
             }
         }

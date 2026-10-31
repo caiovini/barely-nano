@@ -7,8 +7,6 @@ use spin::Lazy;
 use rsnano_core::{Account, Amount, PublicKey, utils::Peer};
 use rsnano_network::NetworkConfig;
 use rsnano_nullable_http_client::Url;
-// // use rsnano_store_lmdb::LmdbConfig;
-use rsnano_work::OpenClConfig;
 
 use super::{DEV_NETWORK_PARAMS, NetworkParams, Networks, websocket_config::WebsocketConfig};
 use crate::{
@@ -30,7 +28,6 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeConfig {
     pub default_peering_port: u16,
-    pub enable_opencl: bool,
     pub enable_voting: bool,
     pub enable_vote_processor: bool,
     pub enable_priority_scheduler: bool,
@@ -47,15 +44,6 @@ pub struct NodeConfig {
     pub receive_minimum: Amount,
     pub online_weight_minimum: Amount,
     pub representative_vote_weight_minimum: Amount,
-    pub password_fanout: u32,
-    pub io_threads: usize,
-    pub network_threads: u32,
-    pub work_threads: u32,
-    pub opencl: OpenClConfig,
-    pub background_threads: u32,
-    pub signature_checker_threads: u32,
-    pub bootstrap_initiator_threads: u32,
-    pub bootstrap_serving_threads: u32,
     pub allow_local_peers: bool,
     pub vote_minimum: Amount,
     pub vote_generator_delay: Duration,
@@ -63,14 +51,11 @@ pub struct NodeConfig {
     pub pow_sleep_interval_ns: i64,
     pub external_address: String,
     pub external_port: u16,
-    pub use_memory_pools: bool,
     pub bootstrap: BootstrapConfig,
     pub bootstrap_server: BootstrapServerConfig,
     pub confirming_set_batch_time: Duration,
-    pub backup_before_upgrade: bool,
     pub max_work_generate_multiplier: f64,
     pub max_queued_requests: u32,
-    pub request_aggregator_threads: u32,
     pub max_unchecked_blocks: u32,
     pub rep_crawler_weight_minimum: Amount,
     pub work_peers: Vec<Peer>,
@@ -83,11 +68,9 @@ pub struct NodeConfig {
     pub callback_port: u16,
     pub callback_target: String,
     pub websocket_config: WebsocketConfig,
-    pub lmdb_config: LmdbConfig,
     pub vote_cache: VoteCacheConfig,
     pub rep_crawler_query_timeout: Duration,
     pub block_processor: ProcessQueueConfig,
-    pub block_processor_threads: usize,
     pub active_elections: ActiveElectionsConfig,
     pub vote_processor: VoteProcessorConfig,
     pub tcp: TcpConfig,
@@ -218,30 +201,20 @@ impl NodeConfig {
         let block_processor_cfg = ProcessQueueConfig::default();
 
         Self {
-            enable_opencl: false,
             enable_voting,
             enable_vote_processor: true,
             enable_priority_scheduler: true,
             enable_optimistic_scheduler: true,
             enable_hinted_scheduler: true,
             enable_monitor: true,
-            enable_bounded_backlog: true,
+            enable_bounded_backlog: false,
             enable_vote_rebroadcast: true,
             enable_bootstrap_responder: true,
             default_peering_port: network_params.network.default_node_port,
             bootstrap_fraction_numerator: 1,
             receive_minimum: Amount::micronano(1),
             online_weight_minimum: Amount::nano(60_000_000),
-            representative_vote_weight_minimum: Amount::nano(10 * 1000 * 1000 * 1000),
-            password_fanout: 1024,
-            io_threads: core::cmp::max(parallelism, 4),
-            network_threads: core::cmp::max(parallelism, 4) as u32,
-            work_threads: core::cmp::max(parallelism, 4) as u32,
-            opencl: Default::default(),
-            background_threads: core::cmp::max(parallelism, 4) as u32,
-            signature_checker_threads: (parallelism / 2) as u32,
-            bootstrap_initiator_threads: 1,
-            bootstrap_serving_threads: 1,
+            representative_vote_weight_minimum: Amount::nano(10),
             allow_local_peers: !(network_params.network.is_live_network()
                 || network_params.network.is_test_network()),
             vote_minimum: Amount::nano(1000),
@@ -250,15 +223,12 @@ impl NodeConfig {
             pow_sleep_interval_ns: 0,
             external_address: String::from("::"),
             external_port: 0,
-            use_memory_pools: true,
             bootstrap: Default::default(),
             bootstrap_server: Default::default(),
             confirming_set_batch_time: Duration::from_millis(250),
-            backup_before_upgrade: false,
             max_work_generate_multiplier: 64_f64,
             max_queued_requests: 1024,
-            request_aggregator_threads: core::cmp::max(parallelism, 4) as u32,
-            max_unchecked_blocks: 65536,
+            max_unchecked_blocks: 131072,
             rep_crawler_weight_minimum: Amount::zero(),
             work_peers: Vec::new(),
             secondary_work_peers: vec![Peer::new("127.0.0.1", 8076)],
@@ -274,7 +244,6 @@ impl NodeConfig {
             callback_port: 0,
             callback_target: String::new(),
             websocket_config: WebsocketConfig::new(&network_params.network),
-            lmdb_config: LmdbConfig::new(),
             optimistic_scheduler: OptimisticSchedulerConfig::new(),
             hinted_scheduler: if network_params.network.is_dev_network() {
                 HintedSchedulerConfig::default_for_dev_network()
@@ -290,7 +259,6 @@ impl NodeConfig {
                 Duration::from_secs(60)
             },
             block_processor: block_processor_cfg,
-            block_processor_threads: core::cmp::max(2, parallelism / 2),
             vote_processor: VoteProcessorConfig::new(parallelism),
             tcp: if network_params.network.is_dev_network() {
                 TcpConfig::for_dev_network()
@@ -380,37 +348,6 @@ impl Default for TcpConfig {
             max_attempts_per_ip: 1,
             connect_timeout: Duration::from_secs(60),
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum SyncStrategy {
-    Always,
-    NosyncSafe,
-    NosyncUnsafe,
-    NosyncUnsafeLargeMemory,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LmdbConfig {
-    pub sync: SyncStrategy,
-    pub max_databases: u32,
-    pub map_size: usize,
-}
-
-impl Default for LmdbConfig {
-    fn default() -> Self {
-        Self {
-            sync: SyncStrategy::Always,
-            max_databases: 128,
-            map_size: 1024 * 1024 * 1024,
-        }
-    }
-}
-
-impl LmdbConfig {
-    pub fn new() -> Self {
-        Self::default()
     }
 }
 

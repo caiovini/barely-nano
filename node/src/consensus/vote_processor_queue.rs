@@ -17,6 +17,7 @@ use super::{RepTier, RepTiers, RepTiersConsumer, VoteProcessorConfig};
 
 pub struct VoteProcessorQueue {
     pub(crate) data: Mutex<VoteProcessorQueueData>,
+    pub(crate) pending_count: core::sync::atomic::AtomicUsize,
     condition: Condvar,
     pub config: VoteProcessorConfig,
     stats: Arc<Stats>,
@@ -50,10 +51,16 @@ impl VoteProcessorQueue {
                     },
                 ),
             }),
+            pending_count: core::sync::atomic::AtomicUsize::new(0),
             condition: Condvar::new(),
             config,
             stats,
         }
+    }
+
+    #[inline]
+    pub fn is_empty_relaxed(&self) -> bool {
+        self.pending_count.load(core::sync::atomic::Ordering::Relaxed) == 0
     }
 
     pub fn len(&self) -> usize {
@@ -81,9 +88,13 @@ impl VoteProcessorQueue {
         let added = {
             let mut guard = self.data.lock();
             tier = guard.rep_tiers.tier(&vote.voter);
-            guard
+            let res = guard
                 .queue
-                .push((tier, channel_id), (vote, source, channel, filter))
+                .push((tier, channel_id), (vote, source, channel, filter));
+            if res {
+                self.pending_count.store(guard.queue.len(), core::sync::atomic::Ordering::Release);
+            }
+            res
         };
 
         if added {
@@ -118,7 +129,9 @@ impl VoteProcessorQueue {
             }
 
             if !guard.queue.is_empty() {
-                return guard.queue.next_batch(max_batch_size);
+                let b = guard.queue.next_batch(max_batch_size);
+                self.pending_count.store(guard.queue.len(), core::sync::atomic::Ordering::Relaxed);
+                return b;
             } else {
                 guard = self.condition.wait(guard).unwrap();
             }
@@ -129,6 +142,7 @@ impl VoteProcessorQueue {
         {
             let mut guard = self.data.lock();
             guard.queue.clear();
+            self.pending_count.store(0, core::sync::atomic::Ordering::Relaxed);
         }
         self.condition.notify_all();
     }

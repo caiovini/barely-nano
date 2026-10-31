@@ -260,39 +260,62 @@ impl UncheckedMapThread {
     }
 
     pub fn process_queries(&self, back_buffer: &VecDeque<HashOrAccount>) {
-        for item in back_buffer {
-            self.query_impl(item);
+        let total = back_buffer.len();
+        let mut idx = 0;
+        while idx < total {
+            let end = (idx + 64).min(total);
+            self.query_batch(back_buffer.iter().skip(idx).take(end - idx));
+            idx = end;
         }
     }
 
     pub fn query_impl(&self, hash: &HashOrAccount) {
+        self.query_batch(core::iter::once(hash));
+    }
+
+    fn query_batch<'a>(&self, hashes: impl Iterator<Item = &'a HashOrAccount>) {
         let mut satisfied = Vec::new();
-        {
+        let callback = {
             let mut lock = self.mutable.lock();
-            lock.entries_container.for_each_with_dependency(
-                hash,
-                |key, info| {
-                    satisfied.push((key.clone(), info.clone()));
-                },
-                || true,
-            );
-            
-            if !self.disable_delete {
-                for (key, _) in &satisfied {
-                    lock.entries_container.remove(key);
+            let mut queue = VecDeque::new();
+            for hash in hashes {
+                queue.push_back(*hash);
+            }
+
+            while let Some(dep) = queue.pop_front() {
+                if satisfied.len() >= 512 {
+                    break;
+                }
+                let start_idx = satisfied.len();
+                lock.entries_container.for_each_with_dependency(
+                    &dep,
+                    |key, info| {
+                        if satisfied.len() < 512 {
+                            satisfied.push((key.clone(), info.clone()));
+                        }
+                    },
+                    || true,
+                );
+
+                if !self.disable_delete {
+                    for (key, _) in &satisfied[start_idx..] {
+                        lock.entries_container.remove(key);
+                    }
                 }
             }
-        }
+            lock.satisfied_callback.as_ref().map(Arc::clone)
+        };
 
-        for (_, info) in satisfied {
-            self.stats.inc(StatType::Unchecked, DetailType::Satisfied);
-            let callback = {
-                let lock = self.mutable.lock();
-                lock.satisfied_callback.as_ref().map(|cb| Arc::clone(&cb))
-            };
-            
+        if !satisfied.is_empty() {
+            self.stats.add(
+                StatType::Unchecked,
+                DetailType::Satisfied,
+                satisfied.len() as u64,
+            );
             if let Some(callback) = callback {
-                callback(&info);
+                for (_, info) in &satisfied {
+                    callback(info);
+                }
             }
         }
     }

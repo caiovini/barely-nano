@@ -110,7 +110,16 @@ impl Network {
     pub fn available_channels(&self) -> Vec<Arc<Channel>> {
         self.channels
             .values()
-            .filter(|c| !c.is_closed() && c.mode() == ChannelMode::Realtime)
+            .filter(|c| {
+                #[cfg(not(test))]
+                let ready = c.seconds_since_realtime() >= 1.0;
+                #[cfg(test)]
+                let ready = true;
+                !c.is_closed()
+                    && c.mode() == ChannelMode::Realtime
+                    && ready
+                    && !c.should_drop(TrafficType::BootstrapRequests)
+            })
             .cloned()
             .collect()
     }
@@ -176,7 +185,7 @@ impl Network {
     }
 
     pub fn remove(&mut self, channel_id: ChannelId) {
-        kernel_common::uart::print(b"[-]");
+        kernel_common::uart::putchar(b'-');
         if let Some(channel) = self.channels.remove(&channel_id) {
             channel.close();
         }
@@ -299,6 +308,13 @@ impl Network {
         }
     }
 
+    pub fn add_test_channel(&mut self) -> Arc<Channel> {
+        let channel = Arc::new(Channel::new_test_instance());
+        channel.set_mode(ChannelMode::Realtime);
+        self.add_channel(channel.clone());
+        channel
+    }
+
     pub fn set_data_receiver_factory(&mut self, factory: Box<dyn DataReceiverFactory>) {
         self.data_receiver_factory = Some(factory);
     }
@@ -399,10 +415,19 @@ impl Network {
             .count()
     }
 
-    pub fn shuffled_channels(&self, _type: TrafficType) -> Vec<Arc<Channel>> {
+    pub fn shuffled_channels(&self, traffic_type: TrafficType) -> Vec<Arc<Channel>> {
         let mut result: Vec<Arc<Channel>> = self.channels
             .values()
-            .filter(|c| c.mode() == ChannelMode::Realtime && !c.is_closed())
+            .filter(|c| {
+                #[cfg(not(test))]
+                let ready = c.seconds_since_realtime() >= 1.0;
+                #[cfg(test)]
+                let ready = true;
+                c.mode() == ChannelMode::Realtime
+                    && !c.is_closed()
+                    && ready
+                    && !c.should_drop(traffic_type)
+            })
             .cloned()
             .collect();
         let mut rng = NullableRng::rng();

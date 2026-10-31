@@ -3,6 +3,7 @@ mod backlog_index;
 mod backlog_scan;
 mod backlog_waiter;
 mod block_batch_processor;
+pub use block_batch_processor::PROF as BLOCK_PROF;
 mod block_context;
 mod block_processor;
 mod block_processor_queue;
@@ -42,6 +43,7 @@ pub enum LedgerEvent {
 #[derive(Clone, Debug)]
 pub struct ProcessedResult {
     pub block: Block,
+    pub account: Option<rsnano_core::Account>,
     pub source: BlockSource,
     pub status: Result<(), BlockError>,
     pub saved_block: Option<SavedBlock>,

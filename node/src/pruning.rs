@@ -118,14 +118,8 @@ impl LedgerPruning {
                     hash = BlockHash::zero();
                 }
                 depth += 1;
-                if depth % batch_read_size == 0 {
-                    drop(it);
-                    // tx.refresh();
-                    it = self
-                        .ledger
-                        .store
-                        .confirmation_height
-                        .iter_range(&tx, account..);
+                if depth % 256 == 0 {
+                    kernel_common::watchdog::kick();
                 }
             }
             if !hash.is_zero() {

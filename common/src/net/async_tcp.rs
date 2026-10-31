@@ -4,7 +4,7 @@ use smoltcp::wire::IpEndpoint;
 use core::future::poll_fn;
 use core::task::Poll;
 use embedded_io_async::{ErrorType, Error, Read, Write};
-use crate::net::NET;
+use crate::net::lock_net_worker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpError {
@@ -37,7 +37,7 @@ impl AsyncTcpStream {
         let _port = endpoint.port;
         
         let mut success = false;
-        if let Some(ref mut ctx) = *NET.lock() {
+        if let Some(ref mut ctx) = *lock_net_worker() {
             let socket = ctx.sockets.get_mut::<TcpSocket>(handle);
             
             let mut local_port = NEXT_PORT.load(core::sync::atomic::Ordering::SeqCst);
@@ -59,7 +59,7 @@ impl AsyncTcpStream {
         }
 
         poll_fn(|cx| {
-            if let Some(ref mut ctx) = *NET.lock() {
+            if let Some(ref mut ctx) = *lock_net_worker() {
                 let socket = ctx.sockets.get_mut::<TcpSocket>(handle);
                 match socket.state() {
                     smoltcp::socket::tcp::State::Established => {
@@ -87,7 +87,7 @@ impl AsyncTcpStream {
 
 impl Drop for AsyncTcpStream {
     fn drop(&mut self) {
-        if let Some(ref mut ctx) = *NET.lock() {
+        if let Some(ref mut ctx) = *lock_net_worker() {
             let socket = ctx.sockets.get_mut::<TcpSocket>(self.handle);
             socket.abort();
             ctx.sockets_to_drop.push(self.handle);
@@ -102,7 +102,7 @@ impl ErrorType for AsyncTcpStream {
 impl Read for AsyncTcpStream {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         poll_fn(|cx| {
-            if let Some(ref mut ctx) = *NET.lock() {
+            if let Some(ref mut ctx) = *lock_net_worker() {
                 let socket = ctx.sockets.get_mut::<TcpSocket>(self.handle);
                 if !socket.is_open() {
                     return Poll::Ready(Ok(0)); // EOF
@@ -126,7 +126,7 @@ impl Read for AsyncTcpStream {
 impl Write for AsyncTcpStream {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         poll_fn(|cx| {
-            if let Some(ref mut ctx) = *NET.lock() {
+            if let Some(ref mut ctx) = *lock_net_worker() {
                 let socket = ctx.sockets.get_mut::<TcpSocket>(self.handle);
                 match socket.state() {
                     smoltcp::socket::tcp::State::Established => {

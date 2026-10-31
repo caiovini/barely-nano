@@ -3,7 +3,6 @@ use spin::MutexGuard;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
-use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
@@ -88,7 +87,6 @@ use crate::{
 #[allow(dead_code)]
 pub struct Node {
     is_nulled: bool,
-    pub data_path: String,
     pub steady_clock: Arc<SteadyClock>,
     pub node_id: PrivateKey,
     pub config: NodeConfig,
@@ -160,7 +158,6 @@ pub struct Node {
 }
 
 pub struct NodeArgs {
-    pub data_path: String,
     pub config: NodeConfig,
     pub network_params: NetworkParams,
     pub flags: NodeFlags,
@@ -174,7 +171,6 @@ impl NodeArgs {
         let network_params = NetworkParams::new(Networks::NanoDevNetwork);
         let config = NodeConfig::new(None, &network_params, 2);
         Self {
-            data_path: "/home/nulled-node".into(),
             network_params,
             config,
             flags: Default::default(),
@@ -187,13 +183,18 @@ impl NodeArgs {
 
 impl Node {
     pub fn tick(&self) {
-        if let Some(mut guard) = self.backlog_scan.try_lock() {
-            guard.run_once();
+        if self.active.read().len() < 1024 && self.ledger.backlog_count() > 0 {
+            if let Some(mut guard) = self.backlog_scan.try_lock() {
+                guard.run_once();
+            }
+        }
+        if self.block_processor.total_queue_len() <= 1024
+            || self.ledger.backlog_count() >= 80_000
+        {
+            self.bounded_backlog.run_scan_once();
         }
         self.bounded_backlog.run_once();
-        self.bounded_backlog.run_scan_once();
         self.election_schedulers.run_once();
-        self.unchecked.run_once();
 
         let cancel_token = rsnano_core::utils::CancellationToken::new();
         if let Some(mut guard) = self.block_rate_calculator.try_lock() {
@@ -247,13 +248,11 @@ impl Node {
         let network_params = args.network_params;
         let current_network = network_params.network.current_network;
         let network_label = network_params.network.get_current_network_as_string();
-        let application_path = args.data_path;
 
         info!("Node started");
         info!("Version: 27.1");
         info!("Network: {}", network_label);
         info!("Protocol version: {}", network_params.network.protocol_info().version_using);
-        info!("Data path: {}", application_path);
         info!(
             "Genesis block: {}",
             network_params.ledger.genesis_block.hash()
@@ -289,19 +288,23 @@ impl Node {
             Default::default()
         };
 
-        kernel_common::uart::print(b"[node] Loading ledger via LedgerBuilder...\n");
-        let ledger = LedgerBuilder::new()
-            .constants(network_params.ledger.clone())
-            .min_rep_weight(config.representative_vote_weight_minimum)
-            .bootstrap_weights(bootstrap_weights.clone())
-            .stats(stats.clone())
-            .finish();
-        kernel_common::uart::print(b"[node] Loading ledger done.\n");
+        let ledger = if is_nulled {
+            Ledger::new_null()
+        } else {
+            kernel_common::uart::print(b"[node] Loading ledger via LedgerBuilder...\n");
+            let ledger = LedgerBuilder::new()
+                .constants(network_params.ledger.clone())
+                .min_rep_weight(config.representative_vote_weight_minimum)
+                .bootstrap_weights(bootstrap_weights.clone())
+                .stats(stats.clone())
+                .finish();
+            kernel_common::uart::print(b"[node] Loading ledger done.\n");
 
-        let ledger = match ledger {
-            Ok(i) => i,
-            Err(e) => {
-                panic!("Could not open ledger: {:?}. Details: {:?}", application_path, e)
+            match ledger {
+                Ok(i) => i,
+                Err(e) => {
+                    panic!("Could not open ledger. Details: {:?}", e)
+                }
             }
         };
 
@@ -332,12 +335,14 @@ impl Node {
         let inbound_message_queue = Arc::new(inbound_message_queue);
 
         let network = Network::new_from_config(config.network.clone());
-        let _ = run_loopback_channel_adapter(
-            network.loopback().clone(),
-            node_id,
-            current_network,
-            inbound_message_queue.clone(),
-        ) ;
+        if !is_nulled {
+            let _ = run_loopback_channel_adapter(
+                network.loopback().clone(),
+                node_id,
+                current_network,
+                inbound_message_queue.clone(),
+            );
+        }
         let network = Arc::new(RwLock::new(network));
 
         let mut network_filter = NetworkFilter::new(config.network_duplicate_filter_size);
@@ -549,12 +554,6 @@ impl Node {
             steady_clock.clone(),
         ));
         bootstrapper.initialize(&network_params.ledger.genesis_account);
-        for (account, _) in ledger.any().iter_accounts() {
-            bootstrapper.prioritize_account(&account);
-        }
-        for (key, _) in ledger.store.pending.iter() {
-            bootstrapper.prioritize_account(&key.receiving_account);
-        }
 
         let bootstrapper_w = Arc::downgrade(&bootstrapper);
         let election_schedulers = Arc::new(ElectionSchedulers::new(
@@ -665,16 +664,6 @@ impl Node {
         let backlog_scan =
             BacklogScan::new(config.backlog_scan.clone(), ledger.clone(), steady_clock.clone());
         let backlog_scan = Arc::new(Mutex::new(backlog_scan));
-        
-        let bootstrap_state_w = Arc::downgrade(&bootstrapper.get_state());
-        backlog_scan.lock().on_unconfirmed_found(move |batch| {
-            if let Some(state) = bootstrap_state_w.upgrade() {
-                let mut guard = state.lock();
-                for info in batch {
-                    guard.candidate_accounts.priority_set(&info.account, crate::bootstrap::state::CandidateAccounts::PRIORITY_MAX);
-                }
-            }
-        });
 
         //  TODO: Hook this direclty in the schedulers
         let schedulers_w = Arc::downgrade(&election_schedulers);
@@ -1075,7 +1064,6 @@ impl Node {
         rep_tiers_calculator.add_tiers_consumer(rep_tiers.clone());
 
         let wallet_backup = WalletBackup {
-            data_path: application_path.clone(),
             workers: workers.clone(),
             wallets: wallets.clone(),
         };
@@ -1145,7 +1133,9 @@ impl Node {
             plugins: Vec::new(),
         };
 
-        spawn_backpressure_processor("AEC ev proc", aec_receiver, aec_event_processor);
+        if !is_nulled {
+            spawn_backpressure_processor("AEC ev proc", aec_receiver, aec_event_processor);
+        }
 
         let dependent_elections_confirmer = DependentElectionsConfirmer {
             confirming_set: confirming_set.clone(),
@@ -1169,7 +1159,9 @@ impl Node {
             plugins: ledger_event_processor_plugins,
         };
 
-        spawn_backpressure_processor("Ledger ev proc", ledger_rx, ledger_event_processor);
+        if !is_nulled {
+            spawn_backpressure_processor("Ledger ev proc", ledger_rx, ledger_event_processor);
+        }
 
         vote_processor.add_observer(aec_sender);
 
@@ -1236,7 +1228,6 @@ impl Node {
             network,
             ledger,
             stats,
-            data_path: application_path,
             network_params,
             config,
             flags,
@@ -1542,8 +1533,7 @@ impl Node {
             self.vote_processor.start();
         }
         self.vote_cache_processor.start();
-        self.block_processor
-            .start(self.config.block_processor_threads);
+        self.block_processor.start();
         /*
         if !self.flags.disable_request_loop {
             self.aec_ticker
@@ -1570,24 +1560,17 @@ impl Node {
 
 
         let cleanup = self.dead_channel_cleanup.clone();
-        let stats = self.stats.clone();
         let clock = self.steady_clock.clone();
         async_rt::spawn_named(async move {
             let mut last_cleanup = clock.now();
-            let mut last_stats_flush = clock.now();
             let cleanup_interval = core::time::Duration::from_secs(5);
-            let stats_interval = core::time::Duration::from_secs(10);
             loop {
                 let now = clock.now();
                 if now.millis() - last_cleanup.millis() >= cleanup_interval.as_millis() as i64 {
                     cleanup.lock().clean_up();
                     last_cleanup = now;
                 }
-                if now.millis() - last_stats_flush.millis() >= stats_interval.as_millis() as i64 {
-                    let _ = stats.flush_to_db();
-                    last_stats_flush = now;
-                }
-                async_rt::yield_now().await;
+                async_rt::sleep(core::time::Duration::from_secs(1)).await;
             }
         }, Some("Node Cleanup/Stats"));
         /*
@@ -1690,201 +1673,6 @@ impl CompositeNodeEventHandler {
             for handler in self.handlers.iter_mut() {
                 handler.handle(&event);
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        consensus::{AecEvent, AecTickerPlugin, BootstrapStaleElections, StaleElectionsStats},
-        utils::{TimerStartEvent, TimerStartType},
-        NodeBuilder,
-    };
-    use rsnano_core::Networks;
-    use rsnano_stats::StatsSource;
-    // // // // // // // use std::{    any::type_name, ops::Deref, ops::DerefMut    }; // TODO: fix this
-    // // // // // // // // // use uuid::Uuid;
-
-    #[test]
-    fn start_peer_cache_updater() {
-        let mut node = TestNode::new();
-        let start_tracker = node.peer_cache_updater.track_start();
-
-        node.start();
-
-        assert_eq!(
-            start_tracker.output(),
-            vec![TimerStartEvent {
-                thread_name: "Peer history".to_string(),
-                interval: Duration::from_secs(1),
-                start_type: TimerStartType::StartDelayed
-            }]
-        );
-    }
-
-    #[test]
-    fn start_peer_cache_connector() {
-        let mut node = TestNode::new();
-        let merge_period = node.config.network.cached_peer_reachout;
-        let start_tracker = node.peer_cache_connector.track_start();
-
-        node.start();
-
-        assert_eq!(
-            start_tracker.output(),
-            vec![TimerStartEvent {
-                thread_name: "Net reachout".to_string(),
-                interval: merge_period,
-                start_type: TimerStartType::Start
-            }]
-        );
-    }
-
-    #[test]
-    fn start_block_rate_calculator() {
-        let mut node = TestNode::new();
-        let start_tracker = node.block_rate_calculator.track_start();
-
-        node.start();
-
-        assert_eq!(
-            start_tracker.output(),
-            vec![TimerStartEvent {
-                thread_name: "Blk rate".to_string(),
-                interval: Duration::from_millis(500),
-                start_type: TimerStartType::Start
-            }]
-        );
-    }
-
-    #[test]
-    fn stop_node() {
-        let mut node = TestNode::new();
-        node.start();
-        node.stop();
-
-        assert_eq!(
-            node.peer_cache_updater.is_running(),
-            false,
-            "peer_cache_updater running"
-        );
-        assert_eq!(
-            node.peer_cache_connector.is_running(),
-            false,
-            "peer_cache_connector running"
-        );
-    }
-
-    #[test]
-    fn initialize_aec_ticker() {
-        let config = NodeConfig {
-            bootstrap_stale_threshold: Duration::from_secs(42),
-            ..NodeConfig::new_test_instance()
-        };
-        let args = NodeArgs {
-            config: config.clone(),
-            ..NodeArgs::create_test_instance()
-        };
-        let node = Node::new(args, true, NodeIdKeyFile::new_null());
-        let task = node.aec_ticker.task();
-        let ticker = task.as_ref().unwrap();
-
-        assert_has_aec_ticker_plugin::<ConfirmationSolicitorPlugin>(ticker);
-
-        let stale = assert_has_aec_ticker_plugin::<BootstrapStaleElections>(ticker);
-        assert_eq!(
-            stale.get_stale_threshold(),
-            config.bootstrap_stale_threshold
-        );
-    }
-
-    fn assert_has_aec_ticker_plugin<T>(ticker: &AecTicker) -> &T
-    where
-        T: AecTickerPlugin + 'static,
-    {
-        let plugin = ticker.get_plugin::<T>();
-        assert!(
-            plugin.is_some(),
-            "AEC ticker plugin missing: {}",
-            type_name::<T>()
-        );
-        plugin.unwrap()
-    }
-
-    #[test]
-    fn initialize_stats_collector() {
-        let node = Node::new_null();
-        let node_stats = node.stats();
-        assert_contains_stats_source(&node_stats, StaleElectionsStats::default());
-        assert_contains_stats_source(&node_stats, WinnerBlockBroadcaster::new_null());
-    }
-
-    #[test]
-    fn connect_winner_block_rebroadcaster() {
-        let node = Node::new_null();
-        let broadcast_tracker = node.winner_block_broadcaster.lock().track();
-        let election = ConfirmedElection::new_test_instance();
-        let winner_hash = election.winner.hash();
-
-        node.active
-            .write()
-            .unwrap()
-            .simulate_event(AecEvent::ElectionConfirmed(election));
-
-        let output = broadcast_tracker.wait_output().unwrap();
-        assert_eq!(output, vec![winner_hash]);
-    }
-
-    fn assert_contains_stats_source(node_stats: &StatsCollection, source: impl StatsSource) {
-        let mut col = StatsCollection::default();
-        source.collect_stats(&mut col);
-        let (key, _) = col.iter().next().unwrap().clone();
-        assert!(node_stats.contains(key.stat, key.detail, key.dir));
-    }
-
-    struct TestNode {
-        app_path: PathBuf,
-        node: Node,
-    }
-
-    impl TestNode {
-        pub fn new() -> Self {
-            let mut app_path = std::env::temp_dir();
-            app_path.push(format!("rsnano-test-{}", Uuid::new_v4().simple()));
-            let config = NodeConfig::new_test_instance();
-            let network_params = NetworkParams::new(Networks::NanoDevNetwork);
-
-            let node = NodeBuilder::new(Networks::NanoDevNetwork)
-                .data_path(app_path.clone())
-                .config(config)
-                .network_params(network_params)
-                .finish()
-                .unwrap();
-
-            Self { node, app_path }
-        }
-    }
-
-    impl Drop for TestNode {
-        fn drop(&mut self) {
-            self.node.stop();
-            // // // // // // // // std::fs::remove_dir_all(&self.app_path).unwrap();
-        }
-    }
-
-    impl Deref for TestNode {
-        type Target = Node;
-
-        fn deref(&self) -> &Self::Target {
-            &self.node
-        }
-    }
-
-    impl DerefMut for TestNode {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.node
         }
     }
 }

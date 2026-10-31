@@ -8,6 +8,15 @@ use crate::uboot;
 use spin::Mutex;
 
 pub static NET: Mutex<Option<NetworkContext<'static>>> = Mutex::new(None);
+pub static HART1_WANTS_NET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+pub fn lock_net_worker() -> spin::MutexGuard<'static, Option<NetworkContext<'static>>> {
+    while HART1_WANTS_NET.load(core::sync::atomic::Ordering::Relaxed) {
+        core::hint::spin_loop();
+    }
+    NET.lock()
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct BareMetalNetConfig {
@@ -172,15 +181,16 @@ impl<'a> NetworkContext<'a> {
 
     pub fn poll(&mut self, mtime: u64) -> bool {
         let timestamp = Instant::from_micros((mtime as u128 * 1_000_000 / crate::clint::FREQ as u128) as i64);
-        
-        let mut progress = false;
-        loop {
-            match self.iface.poll(timestamp, &mut self.device, &mut self.sockets) {
-                PollResult::None => break,
-                _ => {
-                    progress = true;
-                }
-            }
+
+        match &mut self.device {
+            NetDevice::Uboot(d) => d.begin_poll(64),
+        }
+        let progress = !matches!(
+            self.iface.poll(timestamp, &mut self.device, &mut self.sockets),
+            PollResult::None
+        );
+        match &mut self.device {
+            NetDevice::Uboot(d) => d.flush_tx(),
         }
 
         let mut i = 0;
@@ -241,11 +251,11 @@ impl<'a> NetworkContext<'a> {
 }
 
 pub async fn resolve(name: &str) -> Result<alloc::vec::Vec<IpAddress>, ()> {
-    use core::future::poll_fn;
+    use core::future::{poll_fn, Future};
     use core::task::Poll;
 
     let handle = {
-        if let Some(ref mut ctx) = *NET.lock() {
+        if let Some(ref mut ctx) = *lock_net_worker() {
             let dns_socket = ctx.sockets.get_mut::<DnsSocket>(ctx.dns_handle);
             dns_socket.start_query(ctx.iface.context(), name, smoltcp::wire::DnsQueryType::A)
                 .map_err(|_| ())?
@@ -262,7 +272,7 @@ pub async fn resolve(name: &str) -> Result<alloc::vec::Vec<IpAddress>, ()> {
     impl Drop for QueryGuard {
         fn drop(&mut self) {
             if !self.done.load(core::sync::atomic::Ordering::SeqCst) {
-                if let Some(ref mut ctx) = *NET.lock() {
+                if let Some(ref mut ctx) = *lock_net_worker() {
                     let dns_socket = ctx.sockets.get_mut::<DnsSocket>(ctx.dns_handle);
                     dns_socket.cancel_query(self.handle);
                 }
@@ -272,22 +282,18 @@ pub async fn resolve(name: &str) -> Result<alloc::vec::Vec<IpAddress>, ()> {
 
     let done = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
     let _guard = QueryGuard { handle, done: done.clone() };
-    let start = crate::clint::mtime();
-    let timeout_ticks = 5 * crate::clint::FREQ;
+    let mut timeout_fut = core::pin::pin!(crate::async_rt::sleep(core::time::Duration::from_secs(5)));
 
     poll_fn(move |cx| {
-        let mtime = crate::clint::mtime();
-        if mtime - start > timeout_ticks {
+        if let Poll::Ready(()) = timeout_fut.as_mut().poll(cx) {
             return Poll::Ready(Err(()));
         }
 
-        if let Some(ref mut ctx) = *NET.lock() {
+        if let Some(ref mut ctx) = *lock_net_worker() {
             let dns_socket = ctx.sockets.get_mut::<DnsSocket>(ctx.dns_handle);
             match dns_socket.get_query_result(handle) {
                 Err(smoltcp::socket::dns::GetQueryResultError::Pending) => {
                     dns_socket.register_query_waker(handle, cx.waker());
-                    // Wake ourselves up frequently to check the timeout
-                    cx.waker().wake_by_ref();
                     Poll::Pending
                 }
                 Ok(addrs) => {
@@ -338,6 +344,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         if res != 0 {
             return None;
         }
+        uboot::eth_disable_tx_auto_poll();
 
         let mut device = NetDevice::Uboot(UbootNetDevice::new(info));
         let net_cfg = get_net_config();

@@ -2,7 +2,6 @@ use core::time::Duration;
 use alloc::string::ToString;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::config::toml::lmdb_toml::LmdbToml;
 use super::{fork_cache_toml::ForkCacheToml, *};
 use crate::config::NodeConfig;
 use bounded_backlog_toml::BoundedBacklogToml;
@@ -14,48 +13,37 @@ use tcp_toml::TcpToml;
 #[derive(Serialize, Deserialize, Default)]
 pub struct NodeToml {
     pub allow_local_peers: Option<bool>,
-    pub background_threads: Option<u32>,
-    pub backup_before_upgrade: Option<bool>,
     pub bandwidth_limit: Option<usize>,
     pub bandwidth_limit_burst_ratio: Option<f64>,
     pub bootstrap_bandwidth_burst_ratio: Option<f64>,
     pub bootstrap_bandwidth_limit: Option<usize>,
     pub bootstrap_fraction_numerator: Option<u32>,
-    pub bootstrap_initiator_threads: Option<u32>,
-    pub bootstrap_serving_threads: Option<u32>,
     pub confirming_set_batch_time: Option<u64>,
+    pub enable_bounded_backlog: Option<bool>,
     pub enable_voting: Option<bool>,
     pub external_address: Option<String>,
     pub external_port: Option<u16>,
-    pub io_threads: Option<usize>,
     pub max_queued_requests: Option<u32>,
     pub max_unchecked_blocks: Option<u32>,
     pub max_backlog: Option<u64>,
     pub max_work_generate_multiplier: Option<f64>,
-    pub network_threads: Option<u32>,
     pub online_weight_minimum: Option<String>,
-    pub password_fanout: Option<u32>,
     pub pow_sleep_interval: Option<i64>,
     pub preconfigured_peers: Option<Vec<String>>,
     pub preconfigured_representatives: Option<Vec<String>>,
     pub receive_minimum: Option<String>,
     pub rep_crawler_weight_minimum: Option<String>,
     pub representative_vote_weight_minimum: Option<String>,
-    pub request_aggregator_threads: Option<u32>,
-    pub signature_checker_threads: Option<u32>,
     pub unchecked_cutoff_time: Option<i64>,
-    pub use_memory_pools: Option<bool>,
     pub vote_generator_delay: Option<u64>,
     pub vote_minimum: Option<String>,
     pub work_peers: Option<Vec<String>>,
-    pub work_threads: Option<u32>,
     pub active_elections: Option<ActiveElectionsToml>,
     pub block_processor: Option<BlockProcessorToml>,
     pub bootstrap: Option<BootstrapToml>,
     pub bootstrap_server: Option<BootstrapServerToml>,
     pub experimental: Option<ExperimentalToml>,
     pub httpcallback: Option<HttpcallbackToml>,
-    pub lmdb: Option<LmdbToml>,
     pub message_processor: Option<MessageProcessorToml>,
     pub monitor: Option<MonitorToml>,
     pub optimistic_scheduler: Option<OptimisticSchedulerToml>,
@@ -81,24 +69,15 @@ impl NodeConfig {
         if let Some(allow_local_peers) = toml.allow_local_peers {
             self.allow_local_peers = allow_local_peers;
         }
-        if let Some(background_threads) = toml.background_threads {
-            self.background_threads = background_threads;
-        }
-        if let Some(backup_before_upgrade) = toml.backup_before_upgrade {
-            self.backup_before_upgrade = backup_before_upgrade;
-        }
         // Bandwidth limiting is currently not supported in no_std
         if let Some(bootstrap_fraction_numerator) = toml.bootstrap_fraction_numerator {
             self.bootstrap_fraction_numerator = bootstrap_fraction_numerator;
         }
-        if let Some(bootstrap_initiator_threads) = toml.bootstrap_initiator_threads {
-            self.bootstrap_initiator_threads = bootstrap_initiator_threads;
-        }
-        if let Some(bootstrap_serving_threads) = toml.bootstrap_serving_threads {
-            self.bootstrap_serving_threads = bootstrap_serving_threads;
-        }
         if let Some(confirming_set_batch_time) = &toml.confirming_set_batch_time {
             self.confirming_set_batch_time = Duration::from_millis(*confirming_set_batch_time);
+        }
+        if let Some(enable_bounded_backlog) = toml.enable_bounded_backlog {
+            self.enable_bounded_backlog = enable_bounded_backlog;
         }
         if let Some(enable_voting) = toml.enable_voting {
             self.enable_voting = enable_voting;
@@ -114,9 +93,6 @@ impl NodeConfig {
         if let Some(external_port) = toml.external_port {
             self.external_port = external_port;
         }
-        if let Some(io_threads) = toml.io_threads {
-            self.io_threads = io_threads;
-        }
         if let Some(max_queued_requests) = toml.max_queued_requests {
             self.max_queued_requests = max_queued_requests;
         }
@@ -129,15 +105,9 @@ impl NodeConfig {
         if let Some(max_work_generate_multiplier) = toml.max_work_generate_multiplier {
             self.max_work_generate_multiplier = max_work_generate_multiplier;
         }
-        if let Some(network_threads) = toml.network_threads {
-            self.network_threads = network_threads;
-        }
         if let Some(online_weight_minimum) = &toml.online_weight_minimum {
             self.online_weight_minimum =
                 Amount::decode_dec(&online_weight_minimum).expect("Invalid online weight minimum");
-        }
-        if let Some(password_fanout) = toml.password_fanout {
-            self.password_fanout = password_fanout;
         }
         if let Some(pow_sleep_interval_ns) = toml.pow_sleep_interval {
             self.pow_sleep_interval_ns = pow_sleep_interval_ns;
@@ -170,17 +140,8 @@ impl NodeConfig {
                 Amount::decode_dec(&representative_vote_weight_minimum)
                     .expect("Invalid representative vote weight minimum");
         }
-        if let Some(request_aggregator_threads) = toml.request_aggregator_threads {
-            self.request_aggregator_threads = request_aggregator_threads;
-        }
-        if let Some(signature_checker_threads) = toml.signature_checker_threads {
-            self.signature_checker_threads = signature_checker_threads;
-        }
         if let Some(unchecked_cutoff_time_s) = toml.unchecked_cutoff_time {
             self.unchecked_cutoff_time_s = unchecked_cutoff_time_s;
-        }
-        if let Some(use_memory_pools) = toml.use_memory_pools {
-            self.use_memory_pools = use_memory_pools;
         }
         if let Some(delay) = toml.vote_generator_delay {
             self.vote_generator_delay = Duration::from_millis(delay);
@@ -193,9 +154,6 @@ impl NodeConfig {
                 .iter()
                 .map(|string| string.parse::<Peer>().expect("Invalid work peer"))
                 .collect();
-        }
-        if let Some(work_threads) = toml.work_threads {
-            self.work_threads = work_threads;
         }
         if let Some(cfg) = &toml.optimistic_scheduler {
             if let Some(enable) = cfg.enable {
@@ -281,17 +239,11 @@ impl NodeConfig {
         if let Some(websocket_config_toml) = &toml.websocket {
             self.websocket_config.merge_toml(&websocket_config_toml);
         }
-        if let Some(lmdb_config_toml) = &toml.lmdb {
-            self.lmdb_config = lmdb_config_toml.into();
-        }
         if let Some(vote_cache_toml) = &toml.vote_cache {
             self.vote_cache = vote_cache_toml.into();
         }
         if let Some(t) = &toml.block_processor {
             self.block_processor.merge_toml(t);
-            if let Some(threads) = t.threads {
-                self.block_processor_threads = threads;
-            }
         }
 
         if let Some(i) = &toml.active_elections {
@@ -420,27 +372,21 @@ impl From<&NodeConfig> for NodeToml {
     fn from(config: &NodeConfig) -> Self {
         Self {
             allow_local_peers: Some(config.allow_local_peers),
-            background_threads: Some(config.background_threads),
-            backup_before_upgrade: Some(config.backup_before_upgrade),
             bandwidth_limit: None,
             bandwidth_limit_burst_ratio: None,
             bootstrap_bandwidth_limit: None,
             bootstrap_bandwidth_burst_ratio: None,
             bootstrap_fraction_numerator: Some(config.bootstrap_fraction_numerator),
-            bootstrap_initiator_threads: Some(config.bootstrap_initiator_threads),
-            bootstrap_serving_threads: Some(config.bootstrap_serving_threads),
             confirming_set_batch_time: Some(config.confirming_set_batch_time.as_millis() as u64),
+            enable_bounded_backlog: Some(config.enable_bounded_backlog),
             enable_voting: Some(config.enable_voting),
             external_address: Some(config.external_address.clone()),
             external_port: Some(config.external_port),
-            io_threads: Some(config.io_threads),
             max_queued_requests: Some(config.max_queued_requests),
             max_unchecked_blocks: Some(config.max_unchecked_blocks),
             max_backlog: Some(config.bounded_backlog.max_backlog),
             max_work_generate_multiplier: Some(config.max_work_generate_multiplier),
-            network_threads: Some(config.network_threads),
             online_weight_minimum: Some(config.online_weight_minimum.to_string_dec()),
-            password_fanout: Some(config.password_fanout),
             pow_sleep_interval: Some(config.pow_sleep_interval_ns),
             preconfigured_peers: Some(
                 config
@@ -461,10 +407,7 @@ impl From<&NodeConfig> for NodeToml {
             representative_vote_weight_minimum: Some(
                 config.representative_vote_weight_minimum.to_string_dec(),
             ),
-            request_aggregator_threads: Some(config.request_aggregator_threads),
-            signature_checker_threads: Some(config.signature_checker_threads),
             unchecked_cutoff_time: Some(config.unchecked_cutoff_time_s),
-            use_memory_pools: Some(config.use_memory_pools),
             vote_generator_delay: Some(config.vote_generator_delay.as_millis() as u64),
             vote_minimum: Some(config.vote_minimum.to_string_dec()),
             work_peers: Some(
@@ -474,11 +417,13 @@ impl From<&NodeConfig> for NodeToml {
                     .map(|peer| peer.to_string())
                     .collect(),
             ),
-            work_threads: Some(config.work_threads),
             optimistic_scheduler: Some(OptimisticSchedulerToml {
                 enable: Some(config.enable_optimistic_scheduler),
                 gap_threshold: Some(config.optimistic_scheduler.gap_threshold),
                 max_size: Some(config.optimistic_scheduler.max_size),
+                optimistic_limit_percentage: Some(
+                    config.optimistic_scheduler.optimistic_limit_percentage,
+                ),
             }),
             hinted_scheduler: Some(HintedSchedulerToml {
                 enable: Some(config.enable_hinted_scheduler),
@@ -491,7 +436,6 @@ impl From<&NodeConfig> for NodeToml {
             bootstrap: Some((&config.bootstrap).into()),
             bootstrap_server: Some(config.into()),
             websocket: Some((&config.websocket_config).into()),
-            lmdb: Some((&config.lmdb_config).into()),
             vote_cache: Some((&config.vote_cache).into()),
             block_processor: Some(config.into()),
             active_elections: Some(config.into()),
@@ -592,7 +536,7 @@ mod tests {
         assert_eq!(ascending_toml.enable, Some(true));
         assert_eq!(ascending_toml.enable_frontier_scan, Some(true));
         assert_eq!(ascending_toml.enable_dependency_walker, Some(true));
-        assert_eq!(ascending_toml.block_processor_threshold, Some(1000));
+        assert_eq!(ascending_toml.block_processor_threshold, Some(16384));
         assert_eq!(ascending_toml.database_rate_limit, Some(256));
         assert_eq!(ascending_toml.database_warmup_ratio, Some(10));
         assert_eq!(ascending_toml.max_pull_count, Some(128));
@@ -605,8 +549,8 @@ mod tests {
 
         let sets_toml = ascending_toml.account_sets.as_ref().unwrap();
         assert_eq!(sets_toml.consideration_count, Some(4));
-        assert_eq!(sets_toml.priorities_max, Some(1024 * 256));
-        assert_eq!(sets_toml.blocking_max, Some(1024 * 256));
+        assert_eq!(sets_toml.priorities_max, Some(1024 * 64));
+        assert_eq!(sets_toml.blocking_max, Some(1024 * 64));
         assert_eq!(sets_toml.cooldown, Some(3000));
     }
 
@@ -623,7 +567,6 @@ mod tests {
             }),
             cps_limit: Some(42),
             block_processor: Some(BlockProcessorToml {
-                threads: Some(42),
                 max_peer_queue: Some(43),
                 max_system_queue: Some(44),
                 priority_bootstrap: Some(45),
@@ -641,7 +584,6 @@ mod tests {
         assert_eq!(cfg.fork_cache_max_forks_per_root, 22);
         assert_eq!(cfg.bootstrap_stale_threshold, Duration::from_secs(42));
         assert_eq!(cfg.cps_limit, 42);
-        assert_eq!(cfg.block_processor_threads, 42);
         assert_eq!(cfg.block_processor.max_peer_queue, 43);
         assert_eq!(cfg.block_processor.max_system_queue, 44);
         assert_eq!(cfg.block_processor.priority_bootstrap, 45);
@@ -654,7 +596,6 @@ mod tests {
         let config = NodeConfig {
             bootstrap_stale_threshold: Duration::from_secs(42),
             cps_limit: 42,
-            block_processor_threads: 43,
             block_processor: ProcessQueueConfig {
                 max_peer_queue: 44,
                 max_system_queue: 45,
@@ -679,7 +620,6 @@ mod tests {
         assert_eq!(toml.cps_limit, Some(42));
 
         let block_proc = toml.block_processor.unwrap();
-        assert_eq!(block_proc.threads, Some(43));
         assert_eq!(block_proc.max_peer_queue, Some(44));
         assert_eq!(block_proc.max_system_queue, Some(45));
         assert_eq!(block_proc.priority_live, Some(46));

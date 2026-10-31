@@ -1,4 +1,4 @@
-use super::{NodeRpcToml, NodeToml, OpenclToml};
+use super::{NodeRpcToml, NodeToml};
 use crate::config::DaemonConfig;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,7 +20,6 @@ pub struct BareMetalToml {
 pub struct DaemonToml {
     pub network: Option<String>,
     pub node: Option<NodeToml>,
-    pub opencl: Option<OpenclToml>,
     pub rpc: Option<NodeRpcToml>,
     pub bare_metal: Option<BareMetalToml>,
 }
@@ -271,20 +270,6 @@ impl DaemonConfig {
         if let Some(node_toml) = &toml.node {
             self.node.merge_toml(node_toml);
         }
-        if let Some(opencl) = &toml.opencl {
-            if let Some(enable) = opencl.enable {
-                self.node.enable_opencl = enable;
-            }
-            if let Some(device) = opencl.device {
-                self.node.opencl.device = device;
-            }
-            if let Some(platform) = opencl.platform {
-                self.node.opencl.platform = platform;
-            }
-            if let Some(threads) = opencl.threads {
-                self.node.opencl.threads = threads;
-            }
-        }
         if let Some(rpc) = &toml.rpc {
             if let Some(enable) = rpc.enable {
                 self.rpc_enable = enable;
@@ -300,7 +285,6 @@ impl From<&DaemonConfig> for DaemonToml {
             network: None,
             node: Some((&config.node).into()),
             rpc: Some(config.into()),
-            opencl: Some(config.into()),
             bare_metal: None,
         }
     }
@@ -314,17 +298,6 @@ impl From<&DaemonConfig> for NodeRpcToml {
             enable_control: Some(config.rpc.enable_control),
             enable_sign_hash: Some(config.rpc.enable_sign_hash),
             child_process: Some((&config.rpc.child_process).into()),
-        }
-    }
-}
-
-impl From<&DaemonConfig> for OpenclToml {
-    fn from(config: &DaemonConfig) -> Self {
-        Self {
-            enable: Some(config.node.enable_opencl),
-            platform: Some(config.node.opencl.platform),
-            device: Some(config.node.opencl.device),
-            threads: Some(config.node.opencl.threads),
         }
     }
 }
@@ -385,7 +358,7 @@ mod tests {
         rate_limit = 999
 
         [node.bounded_backlog]
-        enable = false
+        enable = true
         batch_size = 999
         max_queued_notifications = 999
         scan_rate = 999
@@ -546,7 +519,7 @@ mod tests {
     #[test]
     fn deserialize_no_defaults() {
         let daemon_toml: DaemonToml =
-            toml::from_str(CUSTOM_TOML_STR).expect("Failed to deserialize TOML");
+            DaemonToml::from_toml_str(CUSTOM_TOML_STR).expect("Failed to deserialize TOML");
 
         let mut deserialized = create_default_daemon_config();
         deserialized.merge_toml(&daemon_toml);
@@ -557,34 +530,6 @@ mod tests {
         assert_ne!(
             deserialized.node.allow_local_peers,
             default_cfg.node.allow_local_peers
-        );
-        assert_ne!(
-            deserialized.node.backup_before_upgrade,
-            default_cfg.node.backup_before_upgrade
-        );
-        assert_ne!(
-            deserialized.node.network.limiter.generic_limit,
-            default_cfg.node.network.limiter.generic_limit
-        );
-        assert_ne!(
-            deserialized.node.network.limiter.generic_burst_ratio,
-            default_cfg.node.network.limiter.generic_burst_ratio
-        );
-        assert_ne!(
-            deserialized.node.network.limiter.bootstrap_limit,
-            default_cfg.node.network.limiter.bootstrap_limit
-        );
-        assert_ne!(
-            deserialized.node.network.limiter.bootstrap_burst_ratio,
-            default_cfg.node.network.limiter.bootstrap_burst_ratio
-        );
-        assert_ne!(
-            deserialized.node.bootstrap_initiator_threads,
-            default_cfg.node.bootstrap_initiator_threads
-        );
-        assert_ne!(
-            deserialized.node.bootstrap_serving_threads,
-            default_cfg.node.bootstrap_serving_threads
         );
         assert_ne!(
             deserialized.node.bootstrap_fraction_numerator,
@@ -606,18 +551,9 @@ mod tests {
             deserialized.node.external_port,
             default_cfg.node.external_port
         );
-        assert_ne!(deserialized.node.io_threads, default_cfg.node.io_threads);
         assert_ne!(
             deserialized.node.max_queued_requests,
             default_cfg.node.max_queued_requests
-        );
-        assert_ne!(
-            deserialized.node.network_threads,
-            default_cfg.node.network_threads
-        );
-        assert_ne!(
-            deserialized.node.background_threads,
-            default_cfg.node.background_threads
         );
         assert_ne!(
             deserialized.node.online_weight_minimum,
@@ -630,10 +566,6 @@ mod tests {
         assert_ne!(
             deserialized.node.rep_crawler_weight_minimum,
             default_cfg.node.rep_crawler_weight_minimum
-        );
-        assert_ne!(
-            deserialized.node.password_fanout,
-            default_cfg.node.password_fanout
         );
         assert_ne!(
             deserialized.node.pow_sleep_interval_ns,
@@ -652,16 +584,8 @@ mod tests {
             default_cfg.node.receive_minimum
         );
         assert_ne!(
-            deserialized.node.signature_checker_threads,
-            default_cfg.node.signature_checker_threads
-        );
-        assert_ne!(
             deserialized.node.unchecked_cutoff_time_s,
             default_cfg.node.unchecked_cutoff_time_s
-        );
-        assert_ne!(
-            deserialized.node.use_memory_pools,
-            default_cfg.node.use_memory_pools
         );
         assert_ne!(
             deserialized.node.vote_generator_delay,
@@ -673,16 +597,8 @@ mod tests {
         );
         assert_ne!(deserialized.node.work_peers, default_cfg.node.work_peers);
         assert_ne!(
-            deserialized.node.work_threads,
-            default_cfg.node.work_threads
-        );
-        assert_ne!(
             deserialized.node.max_work_generate_multiplier,
             default_cfg.node.max_work_generate_multiplier
-        );
-        assert_ne!(
-            deserialized.node.request_aggregator_threads,
-            default_cfg.node.request_aggregator_threads
         );
         assert_ne!(
             deserialized.node.max_unchecked_blocks,
@@ -803,20 +719,6 @@ mod tests {
         assert_ne!(
             deserialized.node.websocket_config.port,
             default_cfg.node.websocket_config.port
-        );
-
-        // LMDB section
-        assert_ne!(
-            deserialized.node.lmdb_config.sync,
-            default_cfg.node.lmdb_config.sync
-        );
-        assert_ne!(
-            deserialized.node.lmdb_config.max_databases,
-            default_cfg.node.lmdb_config.max_databases
-        );
-        assert_ne!(
-            deserialized.node.lmdb_config.map_size,
-            default_cfg.node.lmdb_config.map_size
         );
 
         // Optimistic Scheduler section
@@ -1001,24 +903,6 @@ mod tests {
             default_cfg.node.message_processor.max_queue
         );
 
-        // OpenCL section
-        assert_ne!(
-            deserialized.node.opencl.device,
-            default_cfg.node.opencl.device
-        );
-        assert_ne!(
-            deserialized.node.enable_opencl,
-            default_cfg.node.enable_opencl
-        );
-        assert_ne!(
-            deserialized.node.opencl.platform,
-            default_cfg.node.opencl.platform
-        );
-        assert_ne!(
-            deserialized.node.opencl.threads,
-            default_cfg.node.opencl.threads
-        );
-
         // RPC section
         assert_ne!(deserialized.rpc_enable, default_cfg.rpc_enable);
         assert_ne!(
@@ -1083,14 +967,6 @@ mod tests {
             default_cfg.node.network.cached_peer_reachout
         );
         assert_ne!(
-            deserialized.node.network.max_peers_per_ip,
-            default_cfg.node.network.max_peers_per_ip
-        );
-        assert_ne!(
-            deserialized.node.network.max_peers_per_subnetwork,
-            default_cfg.node.network.max_peers_per_subnetwork
-        );
-        assert_ne!(
             deserialized.node.network_duplicate_filter_size,
             default_cfg.node.network_duplicate_filter_size
         );
@@ -1098,16 +974,13 @@ mod tests {
             deserialized.node.network_duplicate_filter_cutoff,
             default_cfg.node.network_duplicate_filter_cutoff
         );
-        assert_ne!(
-            deserialized.node.network.minimum_fanout,
-            default_cfg.node.network.minimum_fanout
-        );
     }
 
     #[test]
     fn deserialize_empty() {
         let toml_str = "";
-        let daemon_toml: DaemonToml = toml::from_str(toml_str).expect("Failed to deserialize TOML");
+        let daemon_toml: DaemonToml =
+            DaemonToml::from_toml_str(toml_str).expect("Failed to deserialize TOML");
 
         let mut deserialized_daemon_config = create_default_daemon_config();
         deserialized_daemon_config.merge_toml(&daemon_toml);
@@ -1118,7 +991,7 @@ mod tests {
 
     fn create_default_daemon_config() -> DaemonConfig {
         let mut config = DaemonConfig::new2(Networks::NanoBetaNetwork, 8);
-        config.rpc.child_process.rpc_path = PathBuf::from("/home/foo/nano_rpc");
+        config.rpc.child_process.rpc_path = "/home/foo/nano_rpc".into();
         config
     }
 }

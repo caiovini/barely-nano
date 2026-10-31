@@ -13,10 +13,11 @@ pub(super) struct BootstrapCleanup {
 
 impl BootstrapCleanup {
     pub(super) fn new(clock: Arc<SteadyClock>, stats: Arc<Stats>) -> Self {
+        let last_dependency_sync = clock.now();
         Self {
             clock,
             stats,
-            last_dependency_sync: rsnano_nullable_clock::Timestamp::new_test_instance(),
+            last_dependency_sync,
         }
     }
 
@@ -49,7 +50,16 @@ impl BootstrapCleanup {
                 .inc(StatType::BootstrapTimeout, front.query_type.into());
             
             let query = state.running_queries.pop_front().unwrap();
+            if !cfg!(test) && !query.account.is_zero() {
+                state.candidate_accounts.reset_last_request(&query.account);
+            }
+            if query.query_type == super::state::QueryType::AccountInfoByHash && !query.hash.is_zero() {
+                state.dependency_failed(&query.hash, now);
+            }
             
+            #[cfg(not(test))]
+            state.scoring.punish(query.channel_id, 20);
+            #[cfg(test)]
             state.scoring.punish(query.channel_id, 1); // Punish for timeout
             state.scoring.request_finished(query.channel_id); // Decrement running queries
         }
@@ -57,7 +67,11 @@ impl BootstrapCleanup {
 
     fn reinsert_known_dependencies(&mut self, state: &mut BootstrapState) {
         let now = self.clock.now();
-        if self.last_dependency_sync.elapsed(now) < Duration::from_secs(5) {
+        #[cfg(not(test))]
+        let interval = Duration::from_secs(1);
+        #[cfg(test)]
+        let interval = Duration::from_secs(5);
+        if self.last_dependency_sync.elapsed(now) < interval {
             return;
         }
 

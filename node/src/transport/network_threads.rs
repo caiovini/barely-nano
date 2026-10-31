@@ -103,6 +103,7 @@ impl NetworkThreads {
                 stopped: self.stopped.clone(),
                 reachout_interval: self.network_config.peer_reachout,
                 stats: self.stats.clone(),
+                network: self.network.clone(),
                 peer_connector: self.peer_connector.clone(),
                 latest_keepalives: self.latest_keepalives.clone(),
             };
@@ -243,6 +244,7 @@ struct ReachoutLoop {
     stopped: Arc<(Condvar, Mutex<bool>)>,
     reachout_interval: Duration,
     stats: Arc<Stats>,
+    network: Arc<RwLock<Network>>,
     peer_connector: Arc<PeerConnector>,
     latest_keepalives: Arc<Mutex<LatestKeepalives>>,
 }
@@ -250,7 +252,6 @@ struct ReachoutLoop {
 impl ReachoutLoop {
     #[allow(dead_code)]
     async fn run_async(&self) {
-        let mut loop_count = 0;
         while !*self.stopped.1.lock() {
             async_rt::sleep(self.reachout_interval).await;
 
@@ -258,14 +259,15 @@ impl ReachoutLoop {
                 return;
             }
 
-            loop_count += 1;
-            if loop_count % 10 == 0 {
-                kernel_common::uart::print(b"[reachout] Woke up, checking keepalives...\n");
+            {
+                let net = self.network.read();
+                if net.count() >= 96 || !net.is_outbound_slot_available() {
+                    continue;
+                }
             }
 
             let keepalive = self.latest_keepalives.lock().pop_random();
             if let Some(keepalive) = keepalive {
-                kernel_common::uart::print(b"[reachout] Found keepalives!\n");
                 for peer in keepalive.peers {
                     if peer.ip().is_unspecified() {
                         continue;

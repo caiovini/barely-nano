@@ -8,7 +8,7 @@ use core::time::Duration;
 use core::cmp::min;
 use crate::utils::{Condvar, JoinHandle};
 
-use rsnano_core::{utils::FairQueue, Block, BlockHash, Frontier};
+use rsnano_core::{utils::FairQueue, Block, BlockHash};
 use rsnano_ledger::{AnySet, ConfirmedSet, Ledger, OwningAnySet};
 use rsnano_messages::{
     AccountInfoAckPayload, AccountInfoReqPayload, AscPullAck, AscPullAckType, AscPullReq,
@@ -32,11 +32,15 @@ pub struct BootstrapServerConfig {
 
 impl Default for BootstrapServerConfig {
     fn default() -> Self {
+        #[cfg(not(test))]
+        let limiter = 50;
+        #[cfg(test)]
+        let limiter = 500;
         Self {
             max_queue: 16,
             threads: 1,
             batch_size: 64,
-            limiter: 500,
+            limiter,
         }
     }
 }
@@ -119,6 +123,13 @@ impl BootstrapServer {
         *self.server_impl.on_response.lock() = Some(cb);
     }
 
+    pub fn run_once(&self) -> bool {
+        if !self.running.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.server_impl.run_once()
+    }
+
     pub fn enqueue(&self, message: AscPullReq, channel: Arc<Channel>) -> bool {
         if !self.running.load(Ordering::Relaxed) {
             return false;
@@ -189,6 +200,42 @@ pub(crate) struct BootstrapResponderImpl {
 }
 
 impl BootstrapResponderImpl {
+    pub(crate) fn run_once(&self) -> bool {
+        if self.stopped.load(Ordering::Relaxed) {
+            return false;
+        }
+        let item = {
+            let Some(mut queue) = self.queue.try_lock() else {
+                return false;
+            };
+            if queue.is_empty() {
+                return false;
+            }
+            if !self.limiter.lock().try_consume(1, self.clock.now()) {
+                self.stats
+                    .inc(StatType::BootstrapServer, DetailType::Cooldown);
+                return false;
+            }
+            queue.next()
+        };
+        let Some((_, (request, channel))) = item else {
+            return false;
+        };
+        self.stats.inc(StatType::BootstrapServer, DetailType::Loop);
+        if !channel.should_drop(TrafficType::BootstrapServer) {
+            let any = self.ledger.any();
+            let response = self.process(&any, request);
+            self.respond(response, &channel);
+        } else {
+            self.stats.inc_dir(
+                StatType::BootstrapServer,
+                DetailType::ChannelFull,
+                Direction::Out,
+            );
+        }
+        true
+    }
+
     #[allow(dead_code)]
     fn run(&self) {
         let mut queue = self.queue.lock();
@@ -274,9 +321,7 @@ impl BootstrapResponderImpl {
                 }
             }
             HashType::Block => {
-                if any.block_exists(&request.start.into()) {
-                    return self.prepare_response(any, id, request.start.into(), count);
-                }
+                return self.prepare_response(any, id, request.start.into(), count);
             }
         }
 
@@ -325,12 +370,8 @@ impl BootstrapResponderImpl {
         id: u64,
         request: FrontiersReqPayload,
     ) -> AscPullAck {
-        let frontiers = any
-            .accounts_range(request.start..)
-            .into_iter()
-            .map(|(account, info)| Frontier::new(account, info.head))
-            .take(request.count as usize)
-            .collect();
+        let count = min(request.count as usize, BootstrapServer::MAX_FRONTIERS);
+        let frontiers = any.collect_frontiers(request.start, count);
 
         AscPullAck {
             id,
@@ -368,13 +409,17 @@ impl BootstrapResponderImpl {
         count: usize,
     ) -> VecDeque<Block> {
         let mut result = VecDeque::new();
-        if !start_block.is_zero() {
+        if !start_block.is_zero() && count > 0 {
             let mut current = any.get_block(&start_block);
             while let Some(c) = current.take() {
-                let successor = any.block_successor(&c.hash()).unwrap_or_default();
+                let hash = c.hash();
                 result.push_back(c.into());
 
-                if result.len() == count {
+                if result.len() >= count {
+                    break;
+                }
+                let successor = any.block_successor(&hash).unwrap_or_default();
+                if successor.is_zero() {
                     break;
                 }
                 current = any.get_block(&successor);

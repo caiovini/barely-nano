@@ -38,6 +38,9 @@ fn parse_peer(input: &str, default_port: u16) -> anyhow::Result<Peer> {
         let parts: Vec<&str> = input.split("]:").collect();
         if parts.len() == 2 {
             let addr = parts[0].trim_start_matches('[').to_string();
+            if !addr.contains(':') {
+                return Err(anyhow!("invalid ipv6 format"));
+            }
             let port = parts[1].parse::<u16>()?;
             Ok(Peer::new(addr, port))
         } else {

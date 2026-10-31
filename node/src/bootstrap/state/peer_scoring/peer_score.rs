@@ -24,7 +24,7 @@ impl PeerScore {
 
     pub fn decay(&mut self) {
         if self.score < Self::INITIAL_SCORE {
-            self.score += 1;
+            self.score = core::cmp::min(Self::INITIAL_SCORE, self.score.saturating_add(5));
         }
     }
 }

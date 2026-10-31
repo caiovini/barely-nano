@@ -208,7 +208,8 @@ impl Stats {
                 db_val[0..8].copy_from_slice(&val.to_le_bytes());
                 db.insert(db_key, &db_val[0..8]);
             }
-            db.flush().map_err(|e| anyhow::anyhow!("DB flush failed: {:?}", e))?;
+            // No direct flush: stats pages stay dirty in the buffer pool and are persisted by the
+            // next WAL checkpoint together with everything else.
         }
         Ok(())
     }

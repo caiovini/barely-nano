@@ -1,13 +1,12 @@
 use alloc::sync::Arc;
-use alloc::collections::BTreeSet;
 use spin::Mutex;
 
 use rsnano_core::{Account, Block, BlockType, SavedBlock};
-use rsnano_ledger::{AnySet, BlockError, Ledger, LedgerSet};
+use rsnano_ledger::{AnySet, BlockError, Ledger};
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{DetailType, StatType, Stats};
 
-use super::state::BootstrapState;
+use super::state::{BootstrapState, PriorityUpResult};
 use crate::block_processing::{BlockSource, ProcessedResult};
 
 /// Inspects a processed block and adjusts the bootstrap state accordingly
@@ -34,19 +33,46 @@ impl BlockInspector {
     }
 
     pub fn inspect(&self, batch: &[ProcessedResult]) {
-        let mut state = self.state.lock();
         let any = self.ledger.any();
-        let mut failed_accounts = BTreeSet::new();
-        
+        let mut accounts = alloc::vec::Vec::with_capacity(batch.len());
         for result in batch {
-            let account = self.get_account(&any, &result.block, &result.saved_block);
-            let is_cascading = failed_accounts.contains(&account);
-            
-            if result.status.is_err() {
-                failed_accounts.insert(account);
-            }
-            
-            self.inspect_block(&mut state, result, &account, is_cascading);
+            let account = match result.status {
+                Ok(()) => result
+                    .saved_block
+                    .as_ref()
+                    .map(|b| b.account())
+                    .unwrap_or_default(),
+                Err(BlockError::GapSource)
+                    if matches!(
+                        result.source,
+                        BlockSource::Bootstrap | BlockSource::Unchecked
+                    ) =>
+                {
+                    let source = result.block.source_or_link();
+                    if !source.is_zero()
+                        && !cfg!(test)
+                        && rsnano_ledger::block_may_exist(&source)
+                        && any.block_exists_or_pruned(&source)
+                    {
+                        Account::zero()
+                    } else if let Some(acc) = result.account {
+                        acc
+                    } else {
+                        self.get_account(&any, &result.block, &result.saved_block)
+                    }
+                }
+                Err(BlockError::GapEpochOpenPending) => {
+                    result.block.account_field().unwrap_or_default()
+                }
+                _ => Account::zero(),
+            };
+            accounts.push(account);
+        }
+        drop(any);
+
+        let mut state = self.state.lock();
+        for (result, account) in batch.iter().zip(accounts) {
+            self.inspect_block(&mut state, result, &account);
         }
     }
 
@@ -72,56 +98,97 @@ impl BlockInspector {
         state: &mut BootstrapState,
         result: &ProcessedResult,
         account: &Account,
-        is_cascading: bool,
     ) {
-        if is_cascading {
-            return;
-        }
-
         let hash = result.block.hash();
 
         match result.status {
             Ok(()) => {
-                // Reward peer for providing a valid block
-                state.scoring.reward(result.channel_id, 10);
+                let saved_block = result.saved_block.as_ref().unwrap();
+                let account = saved_block.account();
+                // If we've inserted any block in to an account, unmark it as blocked
+                if state.candidate_accounts.unblock(account, None) {
+                    self.stats
+                        .inc(StatType::BootstrapAccountSets, DetailType::Unblock);
+                    self.stats.inc(
+                        StatType::BootstrapAccountSets,
+                        DetailType::PriorityUnblocked,
+                    );
+                } else {
+                    self.stats
+                        .inc(StatType::BootstrapAccountSets, DetailType::UnblockFailed);
+                }
 
-                // Progress blocks from live traffic don't need further bootstrapping
+                // Unblock any accounts waiting for this specific block hash
+                let unblocked = state.candidate_accounts.unblock_hash(&hash);
+                if unblocked > 0 {
+                    self.stats.add(
+                        StatType::BootstrapAccountSets,
+                        DetailType::PriorityUnblocked,
+                        unblocked as u64,
+                    );
+                }
+
+                // Progress blocks from live traffic don't need further bootstrapping.
+                // In production, only boost accounts still present in `priorities` so that
+                // async `LedgerEventProcessor` inspection on Hart 4 does not re-insert an
+                // account that was just erased by a short-batch completion callback on Hart 6.
+                if result.source != BlockSource::Live
+                    && (cfg!(test) || state.candidate_accounts.prioritized(&account))
+                {
+                    match state.candidate_accounts.priority_up(&account) {
+                        PriorityUpResult::Updated => {
+                            self.stats
+                                .inc(StatType::BootstrapAccountSets, DetailType::Prioritize);
+                        }
+                        PriorityUpResult::Inserted => {
+                            self.stats
+                                .inc(StatType::BootstrapAccountSets, DetailType::Prioritize);
+                            self.stats
+                                .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
+                        }
+                        PriorityUpResult::AccountBlocked => {
+                            self.stats
+                                .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
+                        }
+                        PriorityUpResult::InvalidAccount => {}
+                    }
+                }
+
                 if result.source != BlockSource::Live {
-                    let saved_block = result.saved_block.clone().unwrap();
-                    let account = saved_block.account();
-                    // If we've inserted any block in to an account, unmark it as blocked
-                    if state.candidate_accounts.unblock(account, None) {
-                        self.stats
-                            .inc(StatType::BootstrapAccountSets, DetailType::Unblock);
-                        self.stats.inc(
-                            StatType::BootstrapAccountSets,
-                            DetailType::PriorityUnblocked,
-                        );
-                    } else {
-                        self.stats
-                            .inc(StatType::BootstrapAccountSets, DetailType::UnblockFailed);
-                    }
-
-                    // Unblock any accounts waiting for this specific block hash
-                    let unblocked = state.candidate_accounts.unblock_hash(&hash);
-                    if unblocked > 0 {
-                        self.stats.add(
-                            StatType::BootstrapAccountSets,
-                            DetailType::PriorityUnblocked,
-                            unblocked as u64,
-                        );
-                    }
-
-                    let boost = super::state::Priority::new(1024.0);
-                    let _ = state.candidate_accounts.priority_up_with(&account, boost);
 
                     if saved_block.is_send() {
                         if let Some(destination) = saved_block.destination() {
                             if !destination.is_zero() {
-                                let _ = state.candidate_accounts.unblock(destination, Some(hash));
-                                if state.candidate_accounts.priority_set_initial(&destination) {
+                                if state.candidate_accounts.unblock(destination, Some(hash)) {
                                     self.stats
-                                        .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
+                                        .inc(StatType::BootstrapAccountSets, DetailType::Unblock);
+                                    self.stats.inc(
+                                        StatType::BootstrapAccountSets,
+                                        DetailType::PriorityUnblocked,
+                                    );
+                                } else {
+                                    self.stats
+                                        .inc(StatType::BootstrapAccountSets, DetailType::UnblockFailed);
+                                }
+                                #[cfg(test)]
+                                let inserted =
+                                    state.candidate_accounts.priority_set_initial(&destination);
+                                #[cfg(not(test))]
+                                let inserted = !state.candidate_accounts.priority_half_full()
+                                    && state.candidate_accounts.priority_set(
+                                        &destination,
+                                        super::state::Priority::new(0.25),
+                                    );
+                                if inserted {
+                                    self.stats.inc(
+                                        StatType::BootstrapAccountSets,
+                                        DetailType::PriorityInsert,
+                                    );
+                                } else {
+                                    self.stats.inc(
+                                        StatType::BootstrapAccountSets,
+                                        DetailType::PrioritizeFailed,
+                                    );
                                 }
                             }
                         }
@@ -129,9 +196,11 @@ impl BlockInspector {
                 }
             }
             Err(BlockError::GapSource) => {
-
                 // Prevent malicious live traffic from filling up the blocked set
-                if result.source == BlockSource::Bootstrap {
+                if matches!(
+                    result.source,
+                    BlockSource::Bootstrap | BlockSource::Unchecked
+                ) {
                     let source = result.block.source_or_link();
 
                     if !account.is_zero() && !source.is_zero() {
@@ -151,7 +220,30 @@ impl BlockInspector {
                             self.stats
                                 .inc(StatType::BootstrapAccountSets, DetailType::BlockFailed);
                         }
+                    } else if account.is_zero() && !source.is_zero() {
+                        // Source block already exists in ledger; unblock any accounts waiting on it
+                        let unblocked = state.candidate_accounts.unblock_hash(&source);
+                        if unblocked > 0 {
+                            self.stats.add(
+                                StatType::BootstrapAccountSets,
+                                DetailType::PriorityUnblocked,
+                                unblocked as u64,
+                            );
+                        }
+                        if let Some(acc) = result.account {
+                            state.candidate_accounts.reset_last_request(&acc);
+                        }
                     }
+                }
+            }
+            Err(BlockError::Old) => {
+                let unblocked = state.candidate_accounts.unblock_hash(&hash);
+                if unblocked > 0 {
+                    self.stats.add(
+                        StatType::BootstrapAccountSets,
+                        DetailType::PriorityUnblocked,
+                        unblocked as u64,
+                    );
                 }
             }
             Err(BlockError::GapPrevious) => {
@@ -162,15 +254,12 @@ impl BlockInspector {
                 {
                     if result.block.block_type() == BlockType::State {
                         let account = result.block.account_field().unwrap();
-                        let any = self.ledger.any();
-                        if any.get_account(&account).is_some() || any.receivable_exists(account) {
-                            if state.candidate_accounts.priority_set_initial(&account) {
-                                self.stats
-                                    .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
-                            } else {
-                                self.stats
-                                    .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
-                            }
+                        if state.candidate_accounts.priority_set_initial(&account) {
+                            self.stats
+                                .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
+                        } else {
+                            self.stats
+                                .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
                         }
                     }
                 }
@@ -182,34 +271,8 @@ impl BlockInspector {
                         .inc(StatType::BootstrapAccountSets, DetailType::PriorityErase);
                 }
             }
-            Err(BlockError::BadSignature) => {
-                // Severe punishment for invalid data
-                state.scoring.punish(result.channel_id, 500);
-
-                if state.candidate_accounts.priority_erase(account) {
-                    self.stats
-                        .inc(StatType::BootstrapAccountSets, DetailType::PriorityErase);
-                }
-            }
-            Err(BlockError::Fork) => {
-                // Fork means our local ledger disagrees. Do not punish the peer, as our ledger might be the one that is wrong.
-                if state.candidate_accounts.priority_erase(account) {
-                    self.stats
-                        .inc(StatType::BootstrapAccountSets, DetailType::PriorityErase);
-                }
-            }
-            Err(BlockError::Old) => {
-                // Ignore old blocks, don't erase from priority
-            }
             _ => {
-                // Any other error (BalanceMismatch, InsufficientWork, etc.) might just be local state inconsistencies.
-                // Apply a mild de-prioritization rather than a ban.
-                state.scoring.punish(result.channel_id, 10);
-
-                if state.candidate_accounts.priority_erase(account) {
-                    self.stats
-                        .inc(StatType::BootstrapAccountSets, DetailType::PriorityErase);
-                }
+                // No need to handle other cases
             }
         }
     }

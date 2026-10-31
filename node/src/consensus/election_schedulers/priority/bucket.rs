@@ -94,21 +94,20 @@ impl Bucket {
 
         let candidate_prio = highest_block.priority.time;
         let bucket_len = aec.bucket_len(self.bucket_id);
+        let limit = if aec.vacancy() > 0 {
+            self.config.max_elections.max(self.config.reserved_elections)
+        } else {
+            self.config.reserved_elections
+        };
+
+        if bucket_len < limit {
+            return aec.vacancy() > 0;
+        }
+
         let lowest_prio = aec.lowest_priority(self.bucket_id);
-
-        let can_reprioritize = lowest_prio
+        lowest_prio
             .map(|(_, lowest)| candidate_prio > lowest)
-            .unwrap_or(false);
-
-        if can_reprioritize {
-            return true;
-        }
-
-        if bucket_len >= self.config.reserved_elections {
-            return false;
-        }
-
-        aec.vacancy() > 0 // cooldown check. TODO: check for cooldown explicitly
+            .unwrap_or(false)
     }
 
     pub fn activate(
@@ -136,7 +135,12 @@ impl Bucket {
             return;
         }
 
-        if aec.bucket_len(self.bucket_id) >= self.config.reserved_elections {
+        let limit = if aec.vacancy() > 0 {
+            self.config.max_elections.max(self.config.reserved_elections)
+        } else {
+            self.config.reserved_elections
+        };
+        if aec.bucket_len(self.bucket_id) >= limit {
             // TODO aec.replace(old, new);
             aec.erase_lowest_prio_election(self.bucket_id);
             stats.replaced.fetch_add(1, Ordering::Relaxed);

@@ -54,6 +54,9 @@ impl AecVoter {
 
 impl Tickable for AecVoter {
     fn tick(&mut self, cancel_token: &CancellationToken) {
+        if !cfg!(test) && !self.vote_generators.voting_enabled() {
+            return;
+        }
         let now = self.clock.now();
         let mut aec = self.aec.write();
         let mut voted = true;

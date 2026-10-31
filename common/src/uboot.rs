@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use spin::Mutex;
 
 static UBOOT_LOCK: Mutex<()> = Mutex::new(());
+static UBOOT_NET_LOCK: Mutex<()> = Mutex::new(());
 static UBOOT_GP: AtomicUsize = AtomicUsize::new(0);
 
 struct UBootContext {
@@ -22,6 +23,7 @@ impl UBootContext {
     fn enter() -> Self {
         let uboot_gp = UBOOT_GP.load(Ordering::Relaxed);
         let mut old_gp = 0usize;
+        #[cfg(target_arch = "riscv64")]
         if uboot_gp != 0 {
             unsafe {
                 core::arch::asm!(
@@ -32,6 +34,8 @@ impl UBootContext {
                 );
             }
         }
+        #[cfg(not(target_arch = "riscv64"))]
+        let _ = (&mut old_gp, uboot_gp);
         Self { old_gp }
     }
 }
@@ -39,6 +43,7 @@ impl UBootContext {
 impl Drop for UBootContext {
     #[inline(always)]
     fn drop(&mut self) {
+        #[cfg(target_arch = "riscv64")]
         if self.old_gp != 0 {
             unsafe {
                 core::arch::asm!(
@@ -47,6 +52,8 @@ impl Drop for UBootContext {
                 );
             }
         }
+        #[cfg(not(target_arch = "riscv64"))]
+        let _ = self.old_gp;
     }
 }
 
@@ -95,7 +102,10 @@ pub unsafe fn init(jt_ptr: *const JumpTable) {
         UBOOT_JT.store(jt_ptr as *mut _, Ordering::SeqCst);
     }
     let mut gp_val = 0usize;
+    #[cfg(target_arch = "riscv64")]
     core::arch::asm!("mv {}, gp", out(reg) gp_val);
+    #[cfg(not(target_arch = "riscv64"))]
+    let _ = &mut gp_val;
     UBOOT_GP.store(gp_val, Ordering::SeqCst);
 }
 
@@ -191,20 +201,195 @@ unsafe impl Sync for DeviceInfo {}
 pub const DEV_TYP_NET: i32 = 1;
 pub const DEV_TYP_STOR: i32 = 2;
 
+/// SpacemiT K1 EMAC0 MMIO registers (`ethernet@cac80000` in `x1.dtsi`).
+#[cfg(target_arch = "riscv64")]
+const EMAC0_BASE: usize = 0xCAC8_0000;
+#[cfg(target_arch = "riscv64")]
+const DMA_CONTROL: usize = EMAC0_BASE + 0x0004;
+#[cfg(target_arch = "riscv64")]
+const DMA_TRANSMIT_AUTO_POLL_COUNTER: usize = EMAC0_BASE + 0x0010;
+#[cfg(target_arch = "riscv64")]
+const DMA_TRANSMIT_POLL_DEMAND: usize = EMAC0_BASE + 0x0014;
+#[cfg(target_arch = "riscv64")]
+const DMA_TRANSMIT_BASE_ADDRESS: usize = EMAC0_BASE + 0x001C;
+#[cfg(target_arch = "riscv64")]
+const DMA_RECEIVE_BASE_ADDRESS: usize = EMAC0_BASE + 0x0020;
+
+/// CLINT `mtime` timestamp when Hart 1 entered `API_DEV_WRITE` (`emac_send`), or `0` when idle.
+/// Used by secondary harts to issue a delayed `DMA_TRANSMIT_POLL_DEMAND` kick if `emac_send`'s
+/// `fence i,or` allowed the initial poll demand to arrive at the EMAC before `cbo.flush` drained
+/// `tx_desc` to DRAM.
+pub static EMAC_TX_START_MTIME: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Ensures hardware TX auto-polling is disabled (`DMA_TRANSMIT_AUTO_POLL_COUNTER = 0`), matching
+/// U-Boot's `emac_configure_tx` so the DMA engine never reads partially-written cached descriptors.
+#[inline]
+pub fn eth_disable_tx_auto_poll() {
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        core::arch::asm!("fence rw, io", options(nostack));
+        core::ptr::write_volatile(DMA_TRANSMIT_AUTO_POLL_COUNTER as *mut u32, 0);
+        core::arch::asm!("fence io, io", options(nostack));
+    }
+}
+
+/// Called by secondary harts during `adaptive_pause_backoff`. If an `emac_send` call has been
+/// spinning in U-Boot's `for (i = 0; i < 1000000; i++)` loop for more than 200 microseconds
+/// (`4_800` CLINT ticks at 24 MHz), `emac_flush_desc` has already drained to DRAM and the TX DMA
+/// missed the initial `DMA_TRANSMIT_POLL_DEMAND` due to U-Boot's `fence i,or`. Re-writing
+/// `DMA_TRANSMIT_POLL_DEMAND` wakes the Suspended TX DMA in ~0.2 ms instead of timing out after 1.67s.
+#[inline]
+pub fn eth_check_tx_stall() {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let start = EMAC_TX_START_MTIME.load(Ordering::Relaxed);
+        if start != 0 {
+            let now = crate::clint::mtime();
+            if now.wrapping_sub(start) > 4_800 {
+                if EMAC_TX_START_MTIME
+                    .compare_exchange(start, now, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    unsafe {
+                        core::arch::asm!("fence rw, io", options(nostack));
+                        core::ptr::write_volatile(DMA_TRANSMIT_POLL_DEMAND as *mut u32, 0xFF);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resynchronizes the U-Boot `x1_emac` TX descriptor ring and `priv->tx_desc_idx` if `emac_send`
+/// ever returns an error (`-ETIMEDOUT`), preventing `priv->tx_desc_idx` and hardware
+/// `DMA_CURRENT_TRANSMIT_DESCRIPTOR_POINTER` from getting out of sync.
+#[cfg(target_arch = "riscv64")]
+unsafe fn eth_recover_tx_dma() {
+    core::arch::asm!("fence rw, io", options(nostack));
+    let tx_base = core::ptr::read_volatile(DMA_TRANSMIT_BASE_ADDRESS as *const u32) as usize;
+    let rx_base = core::ptr::read_volatile(DMA_RECEIVE_BASE_ADDRESS as *const u32) as usize;
+    if tx_base < 0x1000_0000 || rx_base != tx_base.wrapping_add(2048 * 16) {
+        core::ptr::write_volatile(DMA_TRANSMIT_POLL_DEMAND as *mut u32, 0xFF);
+        return;
+    }
+
+    // Stop TX DMA while keeping RX DMA running
+    let dma_ctrl = core::ptr::read_volatile(DMA_CONTROL as *const u32);
+    core::ptr::write_volatile(DMA_CONTROL as *mut u32, dma_ctrl & !1u32);
+    core::arch::asm!("fence io, rw", options(nostack));
+
+    // Clear all 2048 TX descriptors (16 bytes each = 32 KB) and flush to DRAM
+    let tx_words = tx_base as *mut u32;
+    for i in 0..(2048 * 4) {
+        core::ptr::write_volatile(tx_words.add(i), 0);
+    }
+    let mut line = tx_base & !63usize;
+    let end = tx_base + 2048 * 16;
+    while line < end {
+        core::arch::asm!("cbo.flush 0({0})", in(reg) line, options(nostack));
+        line += 64;
+    }
+    core::arch::asm!("fence rw, io", options(nostack));
+
+    // Locate `priv->tx_desc_idx` in U-Boot's `struct emac_priv` (immediately following `tx_descs`
+    // and `rx_descs` pointers) and reset it to 0 to match `DMA_TRANSMIT_BASE_ADDRESS`.
+    let api = UBOOT_API.load(Ordering::Relaxed);
+    if !api.is_null() {
+        let search_start = (api as usize).saturating_sub(32 * 1024 * 1024) & !7usize;
+        let search_end = (api as usize).saturating_add(4 * 1024 * 1024) & !7usize;
+        let mut p = search_start;
+        while p < search_end {
+            let w0 = core::ptr::read_volatile(p as *const usize);
+            if w0 == tx_base {
+                let w1 = core::ptr::read_volatile((p + 8) as *const usize);
+                if w1 == rx_base {
+                    let tx_idx_ptr = (p + 16) as *mut i32;
+                    let idx = core::ptr::read_volatile(tx_idx_ptr);
+                    if (0..2048).contains(&idx) {
+                        core::ptr::write_volatile(tx_idx_ptr, 0);
+                        let flush_addr = (p + 16) & !63usize;
+                        core::arch::asm!("cbo.flush 0({0})", in(reg) flush_addr, options(nostack));
+                        break;
+                    }
+                }
+            }
+            p += 8;
+        }
+    }
+
+    // Reprogram TX base address and restart TX DMA
+    core::arch::asm!("fence rw, io", options(nostack));
+    core::ptr::write_volatile(DMA_TRANSMIT_BASE_ADDRESS as *mut u32, tx_base as u32);
+    core::ptr::write_volatile(DMA_CONTROL as *mut u32, dma_ctrl | 1u32);
+    core::arch::asm!("fence io, io", options(nostack));
+}
+
 /// Sends a raw network packet using the U-Boot Ethernet driver.
 pub fn eth_send(info: &DeviceInfo, buffer: &[u8]) -> i32 {
     let api = UBOOT_API.load(Ordering::Relaxed);
     let mut ret = 0i32;
     if !api.is_null() {
-        let _lock = UBOOT_LOCK.lock();
+        let _lock = UBOOT_NET_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
             let len = buffer.len() as i32;
+            EMAC_TX_START_MTIME.store(crate::clint::mtime().max(1), Ordering::Release);
             // API_dev_write for network takes 3 arguments: di, buf, len
             ((*api).syscall)(API_DEV_WRITE, &mut ret, info as *const DeviceInfo, buffer.as_ptr(), &len);
+            EMAC_TX_START_MTIME.store(0, Ordering::Release);
+            #[cfg(target_arch = "riscv64")]
+            if ret != 0 {
+                eth_recover_tx_dma();
+            }
         }
     }
     ret
+}
+
+/// Sends a batch of raw network packets using the U-Boot Ethernet driver,
+/// amortizing U-Boot context switches and locks across all queued TX packets.
+pub fn eth_send_batch(
+    info: &DeviceInfo,
+    slots: &[[u8; 1536]],
+    lens: &[u16],
+    start_head: usize,
+    count: usize,
+) -> usize {
+    let api = UBOOT_API.load(Ordering::Relaxed);
+    if api.is_null() || count == 0 {
+        return 0;
+    }
+    let _lock = UBOOT_NET_LOCK.lock();
+    let _ctx = UBootContext::enter();
+    let total_slots = slots.len();
+    let mut sent = 0;
+    let mut curr_idx = start_head;
+
+    while sent < count {
+        let len = lens[curr_idx] as i32;
+        let mut ret = 0i32;
+        unsafe {
+            EMAC_TX_START_MTIME.store(crate::clint::mtime().max(1), Ordering::Release);
+            ((*api).syscall)(
+                API_DEV_WRITE,
+                &mut ret,
+                info as *const DeviceInfo,
+                slots[curr_idx].as_ptr(),
+                &len,
+            );
+            EMAC_TX_START_MTIME.store(0, Ordering::Release);
+            #[cfg(target_arch = "riscv64")]
+            if ret != 0 {
+                eth_recover_tx_dma();
+                sent += 1;
+                break;
+            }
+        }
+        curr_idx = (curr_idx + 1) % total_slots;
+        sent += 1;
+    }
+    sent
 }
 
 /// Receives a raw network packet using the U-Boot Ethernet driver.
@@ -212,7 +397,7 @@ pub fn eth_receive(info: &DeviceInfo, buffer: &mut [u8]) -> i32 {
     let api = UBOOT_API.load(Ordering::Relaxed);
     let mut ret = 0i32;
     if !api.is_null() {
-        let _lock = UBOOT_LOCK.lock();
+        let _lock = UBOOT_NET_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
             let mut len = buffer.len() as i32;
@@ -242,7 +427,7 @@ pub fn eth_receive_batch(
     if api.is_null() {
         return 0;
     }
-    let _lock = UBOOT_LOCK.lock();
+    let _lock = UBOOT_NET_LOCK.lock();
     let _ctx = UBootContext::enter();
     let total_slots = slots.len();
     let mut received = 0;

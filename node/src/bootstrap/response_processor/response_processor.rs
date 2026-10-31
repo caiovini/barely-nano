@@ -73,17 +73,21 @@ impl ResponseProcessor {
         channel_id: ChannelId,
         now: Timestamp,
     ) -> Result<ProcessInfo, ProcessError> {
-        let query = self.take_running_query_for(&response)?;
-        self.update_peer_scoring(channel_id);
+        let query = self.take_running_query_and_score(&response, channel_id)?;
         self.process_response(&query, response, channel_id)?;
         Ok(ProcessInfo::new(&query, now))
     }
 
-    fn take_running_query_for(&self, response: &AscPullAck) -> Result<RunningQuery, ProcessError> {
+    fn take_running_query_and_score(
+        &self,
+        response: &AscPullAck,
+        channel_id: ChannelId,
+    ) -> Result<RunningQuery, ProcessError> {
         let mut guard = self.state.lock();
 
         // Only process messages that have a known running query
         let Some(query) = guard.running_queries.remove(response.id) else {
+            guard.scoring.reward(channel_id, 5);
             return Err(ProcessError::NoRunningQueryFound);
         };
 
@@ -91,14 +95,8 @@ impl ResponseProcessor {
             return Err(ProcessError::InvalidResponseType);
         }
 
+        guard.scoring.received_message(channel_id);
         Ok(query)
-    }
-
-    fn update_peer_scoring(&self, channel_id: ChannelId) {
-        self.state
-            .lock()
-            .scoring
-            .received_message(channel_id);
     }
 
     fn process_response(
@@ -108,8 +106,8 @@ impl ResponseProcessor {
         channel_id: ChannelId,
     ) -> Result<(), ProcessError> {
         let ok = match response.pull_type {
-            AscPullAckType::Blocks(blocks) => self.blocks.process(query, &blocks, channel_id),
-            AscPullAckType::AccountInfo(info) => self.accounts.process(query, &info),
+            AscPullAckType::Blocks(blocks) => self.blocks.process(query, blocks, channel_id),
+            AscPullAckType::AccountInfo(info) => self.accounts.process(query, &info, channel_id),
             AscPullAckType::Frontiers(frontiers) => self.frontiers.process(query, frontiers),
         };
 

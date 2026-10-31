@@ -5,16 +5,40 @@ use crate::{
     PrivateKey, PublicKey, Root, Signature, WorkNonce,
 };
 use anyhow::Result;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ChangeBlock {
     work: WorkNonce,
     signature: Signature,
     hashables: ChangeHashables,
     hash: BlockHash,
+    pub signature_verified: AtomicBool,
+}
+
+impl Clone for ChangeBlock {
+    fn clone(&self) -> Self {
+        Self {
+            work: self.work,
+            signature: self.signature.clone(),
+            hashables: self.hashables.clone(),
+            hash: self.hash,
+            signature_verified: AtomicBool::new(self.signature_verified.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl ChangeBlock {
+    #[inline(always)]
+    pub fn is_signature_verified(&self) -> bool {
+        self.signature_verified.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn set_signature_verified(&self, verified: bool) {
+        self.signature_verified.store(verified, Ordering::Relaxed);
+    }
+
     pub fn new_test_instance() -> Self {
         let key = PrivateKey::from(42);
         ChangeBlockArgs {
@@ -52,6 +76,7 @@ impl ChangeBlock {
             signature,
             hashables,
             hash,
+            signature_verified: AtomicBool::new(false),
         })
     }
 
@@ -111,6 +136,7 @@ impl BlockBase for ChangeBlock {
 
     fn set_signature(&mut self, signature: Signature) {
         self.signature = signature.clone();
+        self.signature_verified.store(false, Ordering::Relaxed);
     }
 
     fn previous(&self) -> BlockHash {
@@ -199,6 +225,7 @@ impl<'a> From<ChangeBlockArgs<'a>> for ChangeBlock {
             signature,
             hashables,
             hash,
+            signature_verified: AtomicBool::new(false),
         }
     }
 }
@@ -231,6 +258,7 @@ impl From<JsonChangeBlock> for ChangeBlock {
             signature: value.signature,
             hashables,
             hash,
+            signature_verified: AtomicBool::new(false),
         }
     }
 }

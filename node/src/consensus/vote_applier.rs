@@ -147,7 +147,6 @@ mod tests {
 
         online_reps
             .lock()
-            .unwrap()
             .vote_observed(another_rep.public_key(), clock.now());
 
         assert_eq!(
@@ -156,7 +155,6 @@ mod tests {
         );
 
         aec.write()
-            .unwrap()
             .insert(
                 AecInsertRequest::new_priority(block, BlockPriority::new_test_instance()),
                 clock.now(),

@@ -13,6 +13,7 @@ use strum::IntoEnumIterator;
 
 pub struct InboundMessageQueue {
     state: Mutex<State>,
+    pending_count: AtomicUsize,
     inbound_callback: Option<MessageCallback>,
     inbound_dropped_callback: Option<MessageCallback>,
     stats: MsgQueueStats,
@@ -25,6 +26,7 @@ impl InboundMessageQueue {
                 queue: FairQueue::new(move |_| max_queue, |_| 1),
                 stopped: false,
             }),
+            pending_count: AtomicUsize::new(0),
             inbound_callback: None,
             inbound_dropped_callback: None,
             stats: Default::default(),
@@ -41,11 +43,14 @@ impl InboundMessageQueue {
 
     pub fn put(&self, message: Message, channel: Arc<Channel>) -> bool {
         let message_type = message.message_type();
-        let added = self
-            .state
-            .lock()
-            .queue
-            .push(channel.channel_id(), (message.clone(), channel.clone()));
+        let added = {
+            let mut state = self.state.lock();
+            let res = state.queue.push(channel.channel_id(), (message.clone(), channel.clone()));
+            if res {
+                self.pending_count.store(state.queue.len(), Ordering::Release);
+            }
+            res
+        };
 
         if added {
             kernel_common::uart::putchar(b'>');
@@ -67,11 +72,31 @@ impl InboundMessageQueue {
         added
     }
 
+    #[inline]
+    pub fn is_empty_fast(&self) -> bool {
+        self.pending_count.load(Ordering::Relaxed) == 0
+    }
+
+    #[inline]
+    pub fn is_empty_relaxed(&self) -> bool {
+        self.pending_count.load(Ordering::Relaxed) == 0
+    }
+
     pub fn next_batch(
         &self,
         max_batch_size: usize,
     ) -> VecDeque<(ChannelId, (Message, Arc<Channel>))> {
-        let batch = self.state.lock().queue.next_batch(max_batch_size);
+        if self.is_empty_relaxed() {
+            return VecDeque::new();
+        }
+        let batch = {
+            let Some(mut state) = self.state.try_lock() else {
+                return VecDeque::new();
+            };
+            let b = state.queue.next_batch(max_batch_size);
+            self.pending_count.store(state.queue.len(), Ordering::Relaxed);
+            b
+        };
         if !batch.is_empty() {
             kernel_common::uart::putchar(b'{');
         }

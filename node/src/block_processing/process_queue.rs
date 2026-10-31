@@ -33,7 +33,7 @@ impl Default for ProcessQueueConfig {
             max_peer_queue: 2048,
             max_system_queue: 8192,
             priority_live: 1,
-            priority_bootstrap: 8,
+            priority_bootstrap: 128,
             priority_local: 16,
             priority_system: 32,
             batch_size: 256,
@@ -72,6 +72,15 @@ impl ProcessQueue {
             batch_size: config.batch_size,
             queued_hashes: alloc::collections::BTreeSet::new(),
         }
+    }
+
+    pub fn can_push(
+        &self,
+        source: BlockSource,
+        channel_id: ChannelId,
+        hash: &rsnano_core::BlockHash,
+    ) -> bool {
+        self.queue.free_capacity(&(source, channel_id)) > 0 && !self.queued_hashes.contains(hash)
     }
 
     pub fn push(&mut self, context: Arc<BlockContext>) -> bool {

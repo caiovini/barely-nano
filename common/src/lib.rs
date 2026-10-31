@@ -12,6 +12,7 @@ pub mod pmic_wdt;
 pub mod sbi;
 pub mod storage;
 pub mod trap;
+pub mod tunnel;
 pub mod uart;
 pub mod uboot;
 pub mod watchdog;

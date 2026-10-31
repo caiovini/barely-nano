@@ -37,11 +37,7 @@ impl BtreeAccountStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            let is_new = db.search(&key).is_none();
             db.insert(key, &buffer[0..len]);
-            if is_new {
-                self.cache.account_count.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-            }
         }
     }
 
@@ -50,12 +46,12 @@ impl BtreeAccountStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            if let Some(value) = db.search(&key) {
-                let mut stream = BufferReader::new(&value);
-                if let Ok(info) = AccountInfo::deserialize(&mut stream) {
-                    tracing::debug!("AccountStore: found account {}, head={}", account.encode_account(), info.head);
-                    return Some(info);
-                }
+            if let Some(Some(info)) = db.get_with(&key, |value| {
+                let mut stream = BufferReader::new(value);
+                AccountInfo::deserialize(&mut stream).ok()
+            }) {
+                tracing::debug!("AccountStore: found account {}, head={}", account.encode_account(), info.head);
+                return Some(info);
             }
         }
         // tracing::debug!("AccountStore: NOT found account {}", account.encode_account());
@@ -67,10 +63,7 @@ impl BtreeAccountStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            if db.search(&key).is_some() {
-                db.delete(key);
-                self.cache.account_count.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
-            }
+            db.delete(key);
         }
     }
 
@@ -85,8 +78,87 @@ impl BtreeAccountStore {
         count
     }
 
+    /// Single-pass scan over the accounts table (matching RSNano `Ledger::initialize`),
+    /// returning `(account_count, total_block_count)` without scanning the blocks table.
+    pub fn scan_counts(&self) -> (u64, u64) {
+        let mut account_count = 0u64;
+        let mut block_count = 0u64;
+        let mut start_key = [0u8; KEY_SIZE];
+        start_key[0] = Self::TABLE_ID;
+
+        for i in 0..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                let mut it = db.iter(start_key);
+                while let Some(step) = it.next_kv_with(|key, value| {
+                    if key[0] != Self::TABLE_ID {
+                        return Err(());
+                    }
+                    let mut stream = BufferReader::new(value);
+                    Ok(AccountInfo::deserialize(&mut stream)
+                        .ok()
+                        .map(|info| info.block_count))
+                }) {
+                    match step {
+                        Ok(Some(bc)) => {
+                            account_count += 1;
+                            block_count += bc;
+                            if account_count % 1000 == 0 {
+                                kernel_common::watchdog::kick();
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(()) => break,
+                    }
+                }
+            }
+        }
+        (account_count, block_count)
+    }
+
     pub fn count(&self) -> usize {
-        self.cache.account_count.load(core::sync::atomic::Ordering::SeqCst) as usize
+        self.cache.account_count.load(core::sync::atomic::Ordering::Relaxed) as usize
+    }
+
+    pub fn for_each_while<F>(&self, start: Account, mut f: F)
+    where
+        F: FnMut(Account, AccountInfo) -> bool,
+    {
+        let start_key = self.make_key(&start);
+        let start_shard = get_shard_index(&start_key);
+
+        for i in start_shard..SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                let seek_key = if i == start_shard {
+                    start_key
+                } else {
+                    let mut k = [0u8; KEY_SIZE];
+                    k[0] = Self::TABLE_ID;
+                    k[1] = (i as u8) << 4;
+                    k
+                };
+                let mut it = db.iter(seek_key);
+                while let Some(step) = it.next_kv_with(|key, value| {
+                    if key[0] != Self::TABLE_ID {
+                        return Err(());
+                    }
+                    let account = Account::from_bytes(key[1..33].try_into().unwrap());
+                    let mut stream = BufferReader::new(value);
+                    Ok(AccountInfo::deserialize(&mut stream).ok().map(|info| (account, info)))
+                }) {
+                    match step {
+                        Ok(Some((account, info))) => {
+                            if !f(account, info) {
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(()) => break,
+                    }
+                }
+            }
+        }
     }
 
     pub fn for_each<F>(&self, start: Account, mut f: F)
@@ -108,14 +180,18 @@ impl BtreeAccountStore {
                     k
                 };
                 let mut it = db.iter(seek_key);
-                while let Some((key, value)) = it.next_kv() {
+                while let Some(step) = it.next_kv_with(|key, value| {
                     if key[0] != Self::TABLE_ID {
-                        break;
+                        return Err(());
                     }
                     let account = Account::from_bytes(key[1..33].try_into().unwrap());
-                    let mut stream = BufferReader::new(&value);
-                    if let Ok(info) = AccountInfo::deserialize(&mut stream) {
-                        f(account, info);
+                    let mut stream = BufferReader::new(value);
+                    Ok(AccountInfo::deserialize(&mut stream).ok().map(|info| (account, info)))
+                }) {
+                    match step {
+                        Ok(Some((account, info))) => f(account, info),
+                        Ok(None) => {}
+                        Err(()) => break,
                     }
                 }
             }

@@ -46,7 +46,7 @@ pub struct ActiveElectionsContainer {
 impl ActiveElectionsContainer {
     pub fn new(config: ActiveElectionsConfig, base_latency: Duration) -> Self {
         Self {
-            roots: RootContainer::default(),
+            roots: RootContainer::with_capacity(config.max_elections),
             observer: None,
             stopped: false,
             count_by_behavior: Default::default(),
@@ -190,12 +190,12 @@ impl ActiveElectionsContainer {
             }
             AddForkResult::Replaced(removed) => {
                 self.roots.vote_router.disconnect(&removed.hash());
-                self.notify(AecEvent::BlockDiscarded(removed.into()));
+                self.notify(AecEvent::BlockDiscarded(alloc::boxed::Box::new(removed.into())));
                 self.notify(AecEvent::BlockAddedToElection(fork.hash()));
                 true
             }
             AddForkResult::TallyTooLow => {
-                self.notify(AecEvent::BlockDiscarded(fork.clone()));
+                self.notify(AecEvent::BlockDiscarded(alloc::boxed::Box::new(fork.clone())));
                 false
             }
             AddForkResult::Duplicate | AddForkResult::ElectionEnded => false,
@@ -319,7 +319,7 @@ impl ActiveElectionsContainer {
         *self.count_by_behavior_mut(election.behavior()) -= 1;
 
         self.stats.stopped(&entry.election);
-        self.notify(AecEvent::ElectionEnded(entry.election.clone()));
+        self.notify(AecEvent::ElectionEnded(alloc::boxed::Box::new(entry.election.clone())));
     }
 
     /// Dependent elections are implicitly confirmed when their block is confirmed
@@ -377,7 +377,10 @@ impl ActiveElectionsContainer {
 
     fn block_confirmed(&mut self, block: SavedBlock, election: ConfirmedElection) {
         self.stats.block_confirmations[election.confirmation_type as usize] += 1;
-        self.notify(AecEvent::BlockConfirmed(block, election));
+        self.notify(AecEvent::BlockConfirmed(
+            alloc::boxed::Box::new(block),
+            alloc::boxed::Box::new(election),
+        ));
     }
 
     pub fn remove_recently_confirmed(&mut self, block_hash: &BlockHash) {
@@ -403,14 +406,23 @@ impl ActiveElectionsContainer {
     }
 
     pub fn force_confirm(&mut self, block_hash: &BlockHash, now: Timestamp) {
-        let Some(election) = self.roots.election_for_block_mut(block_hash) else {
+        if !self.try_force_confirm(block_hash, now) {
             panic!("Force confirm failed, because no active election was found");
+        }
+    }
+
+    /// Like `force_confirm`, but returns `false` instead of panicking when the election is gone
+    /// (e.g. it was confirmed or dropped between collecting stale hashes and applying them).
+    pub fn try_force_confirm(&mut self, block_hash: &BlockHash, now: Timestamp) -> bool {
+        let Some(election) = self.roots.election_for_block_mut(block_hash) else {
+            return false;
         };
         if election.force_confirm() {
             let confirmed_election =
                 election.into_confirmed_election(now, ConfirmationType::ActiveConfirmedQuorum);
-            self.notify(AecEvent::ElectionConfirmed(confirmed_election));
+            self.notify(AecEvent::ElectionConfirmed(alloc::boxed::Box::new(confirmed_election)));
         }
+        true
     }
 
     pub fn cancel(&mut self, root: &QualifiedRoot) {

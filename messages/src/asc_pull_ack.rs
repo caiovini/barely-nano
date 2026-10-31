@@ -179,6 +179,10 @@ impl BlocksAckPayload {
         &self.0
     }
 
+    pub fn into_blocks(self) -> VecDeque<Block> {
+        self.0
+    }
+
     pub fn deserialize(&mut self, stream: &mut dyn Stream) -> anyhow::Result<()> {
         while let Ok(current) = Block::deserialize(stream) {
             if self.0.len() >= Self::MAX_BLOCKS as usize {

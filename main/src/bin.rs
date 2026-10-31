@@ -19,16 +19,83 @@ use rsnano_core::utils::Tickable;
 use rsnano_node::Node;
 use rsnano_rpc_handler::RpcCommandHandler;
 use rsnano_rpc_server::bare_metal::BareMetalRpcServer;
-use smoltcp::socket::tcp::Socket as TcpSocket;
+
+static SLAB_FREE: [spin::Mutex<(usize, usize)>; 16] = [const { spin::Mutex::new((0, 0)) }; 16];
 
 struct InterruptSafeAllocator(LockedHeap);
+
+impl InterruptSafeAllocator {
+    #[inline]
+    fn slab_class(layout: core::alloc::Layout) -> Option<usize> {
+        let size = layout.size();
+        if size == 0 || size > (64 << 15) || layout.align() > 64 {
+            return None;
+        }
+        // Exclude boot-time 4160-byte BufferPool Frame allocations so they are not rounded up to 8 KB.
+        if size == core::mem::size_of::<kernel_common::storage::bpm::Frame>() && layout.align() == 64 {
+            return None;
+        }
+        let sz = size.max(64).next_power_of_two();
+        Some((sz.trailing_zeros() as usize) - 6)
+    }
+
+    unsafe fn drain_slabs(&self) {
+        let mut heap = self.0.lock();
+        // Drain all cached slabs (0..SLAB_FREE.len()) back to LockedHeap on allocation failure
+        // so adjacent small blocks can coalesce into large contiguous spans.
+        for c in 0..SLAB_FREE.len() {
+            let slab_layout = core::alloc::Layout::from_size_align_unchecked(64 << c, 64);
+            let mut slot = SLAB_FREE[c].lock();
+            let mut cur = slot.0;
+            slot.0 = 0;
+            slot.1 = 0;
+            drop(slot);
+            while cur != 0 {
+                let next = *(cur as *const usize);
+                heap.deallocate(core::ptr::NonNull::new_unchecked(cur as *mut u8), slab_layout);
+                cur = next;
+            }
+        }
+    }
+}
+
 unsafe impl core::alloc::GlobalAlloc for InterruptSafeAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         let _intr = kernel_common::uart::InterruptGuard::new();
+        if let Some(c) = Self::slab_class(layout) {
+            {
+                let mut slot = SLAB_FREE[c].lock();
+                if slot.0 != 0 {
+                    let ptr = slot.0 as *mut usize;
+                    slot.0 = *ptr;
+                    slot.1 -= 1;
+                    return ptr as *mut u8;
+                }
+            }
+            let slab_layout = core::alloc::Layout::from_size_align_unchecked(64 << c, 64);
+            let p = self.0.alloc(slab_layout);
+            if !p.is_null() {
+                return p;
+            }
+            self.drain_slabs();
+            return self.0.alloc(slab_layout);
+        }
+        let p = self.0.alloc(layout);
+        if !p.is_null() {
+            return p;
+        }
+        self.drain_slabs();
         self.0.alloc(layout)
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
         let _intr = kernel_common::uart::InterruptGuard::new();
+        if let Some(c) = Self::slab_class(layout) {
+            let mut slot = SLAB_FREE[c].lock();
+            *(ptr as *mut usize) = slot.0;
+            slot.0 = ptr as usize;
+            slot.1 += 1;
+            return;
+        }
         self.0.dealloc(ptr, layout)
     }
 }
@@ -616,31 +683,43 @@ fn boot_hart_main(hart_id: usize) {
         let exec = kernel_common::async_rt::Executor::new();
         kernel_common::async_rt::set_global_executor(exec.clone());
 
-        let config = daemon_config.node;
+        let mut config = daemon_config.node;
+        config.bootstrap.max_requests = config.bootstrap.max_requests.min(1024);
+        config.bootstrap.channel_limit = config.bootstrap.channel_limit.min(16);
+        config.bootstrap.rate_limit = config.bootstrap.rate_limit.max(1500).min(2000);
+        config.bootstrap.frontier_rate_limit = config.bootstrap.frontier_rate_limit.max(48).min(64);
+        config.bootstrap.frontier_scan.cooldown = core::time::Duration::from_millis(250);
+        config.bootstrap.request_timeout = config
+            .bootstrap
+            .request_timeout
+            .min(core::time::Duration::from_secs(5));
+        config.priority_bucket.reserved_elections = config.priority_bucket.reserved_elections.max(250);
+        config.priority_bucket.max_elections = config.priority_bucket.max_elections.max(1500);
+        config.optimistic_scheduler.optimistic_limit_percentage =
+            config.optimistic_scheduler.optimistic_limit_percentage.max(50);
         let preconfigured_peers = config.preconfigured_peers.clone();
 
         let mut flags = rsnano_node::config::NodeFlags::new();
-        flags.enable_voting = config.enable_voting;
         flags.enable_pruning = daemon_toml
             .node
             .as_ref()
             .and_then(|n| n.experimental.as_ref())
             .and_then(|e| e.enable_pruning)
             .unwrap_or(false);
+        if flags.enable_pruning && config.enable_voting {
+            kernel_common::uart::print(
+                b"[boot] Notice: disabling enable_voting because enable_pruning is enabled\n",
+            );
+            config.enable_voting = false;
+        }
+        flags.enable_voting = config.enable_voting;
 
         let mut node = rsnano_node::NodeBuilder::new(network)
-            .data_path(".")
             .resolver(alloc::sync::Arc::new(BareMetalDnsResolver))
             .flags(flags.clone())
             .config(config)
             .finish()
             .expect("Failed to initialize node");
-
-        if flags.enable_pruning {
-            kernel_common::uart::print(b"[boot] wiping store...\n");
-            node.ledger.store.wipe();
-            kernel_common::uart::print(b"[boot] wiping store done.\n");
-        }
 
         kernel_common::uart::print(b"[boot] node.start() starting...\n");
         node.start();
@@ -838,12 +917,12 @@ fn dispatch_hart_task(
 ) -> ! {
     match hart_id {
         1 => run_maintenance_and_network_loop(node_arc, exec, hart_id),
-        2 => run_block_processor_loop(node_arc, exec, hart_id),
-        3 => run_consensus_loop(node_arc, exec, hart_id),
-        4 => run_rpc_worker_loop(node_arc, exec, hart_id),
+        2 => run_crypto_worker_1_loop(node_arc, exec, hart_id),
+        3 => run_crypto_worker_2_loop(node_arc, exec, hart_id),
+        4 => run_consensus_and_elections_loop(node_arc, exec, hart_id),
         5 => run_vote_processor_loop(node_arc, exec, hart_id),
-        6 => run_heavy_io_loop(node_arc, exec, hart_id),
-        7 => run_monitor_loop(node_arc, exec, hart_id),
+        6 => run_ledger_commit_and_bootstrap_loop(node_arc, exec, hart_id),
+        7 => run_storage_flush_and_monitor_loop(node_arc, exec, hart_id),
         _ => {
             kernel_common::uart::print(b"[boot] Hart ");
             kernel_common::uart::print_usize(hart_id);
@@ -855,59 +934,73 @@ fn dispatch_hart_task(
     }
 }
 
-fn run_rpc_worker_loop(
+#[inline(always)]
+fn adaptive_pause_backoff(worked: bool, idle_spins: &mut u32) {
+    kernel_common::uboot::eth_check_tx_stall();
+    if worked {
+        *idle_spins = 1;
+    } else {
+        for _ in 0..*idle_spins {
+            // Compiles to the RISC-V `pause` instruction (0x0100000F) via `+zihintpause`,
+            // delaying subsequent instruction decode and suppressing interconnect thrashing.
+            core::hint::spin_loop();
+        }
+        if *idle_spins < 64 {
+            *idle_spins <<= 1;
+        }
+    }
+}
+
+fn run_consensus_and_elections_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    tracing::info!("[boot] Hart 4: RPC Server loop enter\n");
+    tracing::info!("[boot] Hart 4: Consensus & Active Elections loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
+    let mut last_aec_voter_tick = kernel_common::clint::mtime();
     let mut iterations = 0;
+    let mut idle_spins = 1u32;
     loop {
         let mtime = kernel_common::clint::mtime();
-        {
-            let _intr = kernel_common::uart::InterruptGuard::new();
-            if let Some(mut ctx) = kernel_common::net::NET.try_lock() {
-                if let Some(ref mut ctx_val) = *ctx {
-                    handle_rpc_server(ctx_val, node_arc.clone());
-                }
-            }
-        }
-
         if mtime - last_watchdog > seconds(1) {
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
         }
 
+        // 1. Drive AEC voter and ticker every 300ms (matching RSNano's aec_loop_interval)
+        if mtime - last_aec_voter_tick > millis(300) {
+            let mut aec_voter = node_arc.aec_voter.lock();
+            let mut aec_ticker = node_arc.aec_ticker.lock();
+            let cancel_token = rsnano_core::utils::CancellationToken::new();
+            rsnano_core::utils::Tickable::tick(&mut *aec_voter, &cancel_token);
+            rsnano_core::utils::Tickable::tick(&mut *aec_ticker, &cancel_token);
+            last_aec_voter_tick = mtime;
+        }
+
         if mtime - last_heartbeat > seconds(10) {
             if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 4 (RPC) | Iters: ");
+                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 4 (Consensus) | Iters: ");
                 kernel_common::uart::print_usize_no_lock(iterations);
+                kernel_common::uart::print_no_lock(b" | Active: ");
+                kernel_common::uart::print_usize_no_lock(node_arc.active.read().len());
                 kernel_common::uart::print_no_lock(b"\n");
                 last_heartbeat = mtime;
                 iterations = 0;
             }
         }
 
-        let mut worked_sig = false;
-        for _ in 0..8 {
-            if node_arc.signature_checker.try_help_verify() {
-                worked_sig = true;
+        let mut worked = false;
+        for _ in 0..4 {
+            if exec.run_once(hart_id) {
+                worked = true;
             } else {
                 break;
             }
         }
 
-        if !worked_sig {
-            if !exec.run_once(hart_id) {
-                for _ in 0..1000 {
-                    core::hint::spin_loop();
-                }
-            }
-        } else {
-            let _ = exec.run_once(hart_id);
-        }
+        adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
 }
@@ -921,6 +1014,7 @@ fn run_vote_processor_loop(
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
+    let mut idle_spins = 1u32;
     loop {
         let mtime = kernel_common::clint::mtime();
 
@@ -939,86 +1033,38 @@ fn run_vote_processor_loop(
             }
         }
 
-        node_arc.vote_cache_processor.run_once();
-        node_arc.vote_processor.run_once();
-        node_arc.signature_checker.try_help_verify();
-        if !exec.run_once(hart_id) {
-            core::hint::spin_loop();
+        let mut worked = false;
+        if node_arc.vote_cache_processor.run_once() {
+            worked = true;
         }
-        iterations += 1;
-        core::hint::spin_loop();
-    }
-}
-
-fn run_block_processor_loop(
-    node_arc: Arc<Node>,
-    exec: kernel_common::async_rt::Executor,
-    hart_id: usize,
-) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 2: Block Processor loop enter\n");
-    let mut last_heartbeat = kernel_common::clint::mtime();
-    let mut last_watchdog = kernel_common::clint::mtime();
-    let mut iterations = 0;
-    loop {
-        let mtime = kernel_common::clint::mtime();
-        if mtime - last_watchdog > seconds(1) {
-            kernel_common::watchdog::kick();
-            last_watchdog = mtime;
+        if node_arc.vote_processor.run_once() {
+            worked = true;
         }
-
-        if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 2 (BlockProc) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b" | Total Blocks: ");
-                kernel_common::uart::print_usize_no_lock(node_arc.ledger.block_count());
-                kernel_common::uart::print_no_lock(b"\n");
-                iterations = 0;
-            }
-            last_heartbeat = mtime;
-        }
-
-        if node_arc.block_processor.total_queue_len() > 0 {
-            node_arc.block_processor.run_once();
-        }
-        if node_arc.unchecked.buffer_count() > 0 {
-            node_arc.unchecked.run_once();
-        }
-        node_arc.confirming_set.run_once();
-
         for _ in 0..4 {
-            if !node_arc.signature_checker.try_help_verify() {
+            if exec.run_once(hart_id) {
+                worked = true;
+            } else {
                 break;
             }
         }
-        if !exec.run_once(hart_id) {
-            core::hint::spin_loop();
-        }
+        adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
-        core::hint::spin_loop();
     }
 }
 
-fn run_consensus_loop(
+fn run_crypto_worker_1_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 3: Consensus loop enter\n");
+    kernel_common::uart::print(b"[boot] Hart 2: Crypto Worker 1 (SIMD Verify) loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
-    let mut last_aec_voter_tick = kernel_common::clint::mtime();
     let mut iterations = 0;
+    let mut verified_count = 0usize;
+    let mut idle_spins = 1u32;
     loop {
         let mtime = kernel_common::clint::mtime();
-        if mtime - last_aec_voter_tick > millis(100) {
-            let mut aec_voter = node_arc.aec_voter.lock();
-            let mut aec_ticker = node_arc.aec_ticker.lock();
-            let cancel_token = rsnano_core::utils::CancellationToken::new();
-            rsnano_core::utils::Tickable::tick(&mut *aec_voter, &cancel_token);
-            rsnano_core::utils::Tickable::tick(&mut *aec_ticker, &cancel_token);
-            last_aec_voter_tick = mtime;
-        }
         if mtime - last_watchdog > seconds(1) {
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
@@ -1026,25 +1072,97 @@ fn run_consensus_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 3 (Consensus) | Iters: ");
+                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 2 (Crypto-1) | Iters: ");
                 kernel_common::uart::print_usize_no_lock(iterations);
+                kernel_common::uart::print_no_lock(b" | Verified: ");
+                kernel_common::uart::print_usize_no_lock(verified_count);
                 kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
                 iterations = 0;
+                last_heartbeat = mtime;
             }
         }
 
-        // Help with executor during consensus wait periods.
-        // Spreading exec.run_once() across harts ensures low-latency response for async tasks.
-        for _ in 0..16 {
-            if !exec.run_once(hart_id) {
-                core::hint::spin_loop();
-                break;
+        let mut worked = false;
+        if !node_arc.signature_checker.is_empty_relaxed() {
+            for _ in 0..16 {
+                if node_arc.signature_checker.help_verify() {
+                    worked = true;
+                    verified_count = verified_count.wrapping_add(1);
+                } else {
+                    break;
+                }
             }
         }
-        node_arc.signature_checker.try_help_verify();
+
+        if !node_arc.inbound_message_queue.is_empty_relaxed() {
+            let hp1 = kernel_common::clint::mtime();
+            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
+                worked = true;
+            }
+            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
+        }
+
+        let _ = (&exec, hart_id);
+
+        adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
-        core::hint::spin_loop();
+    }
+}
+
+fn run_crypto_worker_2_loop(
+    node_arc: Arc<Node>,
+    exec: kernel_common::async_rt::Executor,
+    hart_id: usize,
+) -> ! {
+    kernel_common::uart::print(b"[boot] Hart 3: Crypto Worker 2 (SIMD Verify) loop enter\n");
+    let mut last_heartbeat = kernel_common::clint::mtime();
+    let mut last_watchdog = kernel_common::clint::mtime();
+    let mut iterations = 0;
+    let mut verified_count = 0usize;
+    let mut idle_spins = 1u32;
+    loop {
+        let mtime = kernel_common::clint::mtime();
+        if mtime - last_watchdog > seconds(1) {
+            kernel_common::watchdog::kick();
+            last_watchdog = mtime;
+        }
+
+        if mtime - last_heartbeat > seconds(10) {
+            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
+                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 3 (Crypto-2) | Iters: ");
+                kernel_common::uart::print_usize_no_lock(iterations);
+                kernel_common::uart::print_no_lock(b" | Verified: ");
+                kernel_common::uart::print_usize_no_lock(verified_count);
+                kernel_common::uart::print_no_lock(b"\n");
+                iterations = 0;
+                last_heartbeat = mtime;
+            }
+        }
+
+        let mut worked = false;
+        if !node_arc.signature_checker.is_empty_relaxed() {
+            for _ in 0..16 {
+                if node_arc.signature_checker.help_verify() {
+                    worked = true;
+                    verified_count = verified_count.wrapping_add(1);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if !node_arc.inbound_message_queue.is_empty_relaxed() {
+            let hp1 = kernel_common::clint::mtime();
+            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
+                worked = true;
+            }
+            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
+        }
+
+        let _ = (&exec, hart_id);
+
+        adaptive_pause_backoff(worked, &mut idle_spins);
+        iterations += 1;
     }
 }
 
@@ -1053,31 +1171,41 @@ fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Nod
     if !net_cfg.rpc_enable {
         return;
     }
-    let socket = ctx.sockets.get_mut::<TcpSocket>(ctx.rpc_handle);
-    if !socket.is_open() {
-        let _ = socket.listen(net_cfg.rpc_port);
-    }
-    if socket.can_recv() {
-        let mut response: Option<alloc::string::String> = None;
-        let enable_control = net_cfg.rpc_enable_control;
-        let _ = socket.recv(|buffer| {
-            let request = core::str::from_utf8(buffer).unwrap_or("");
-            let handler = RpcCommandHandler::new(node.clone(), enable_control);
-            let server = BareMetalRpcServer::new(handler);
-
-            if let Some(resp_str) = server.handle_request(request) {
-                response = Some(resp_str);
-            } else {
-                response = Some(alloc::string::String::from(
-                    "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n",
-                ));
-            }
-            (buffer.len(), ())
-        });
-        if let Some(resp_str) = response {
-            let _ = socket.send_slice(resp_str.as_bytes());
-            socket.close();
+    use smoltcp::socket::tcp::{Socket as SmolTcpSocket, State as SmolTcpState};
+    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handle);
+    match socket.state() {
+        SmolTcpState::Closed => {
+            let _ = socket.listen(net_cfg.rpc_port);
         }
+        SmolTcpState::TimeWait | SmolTcpState::CloseWait | SmolTcpState::LastAck | SmolTcpState::Closing => {
+            socket.abort();
+            let _ = socket.listen(net_cfg.rpc_port);
+        }
+        SmolTcpState::Established => {
+            if socket.can_recv() {
+                let mut response: Option<alloc::string::String> = None;
+                let enable_control = net_cfg.rpc_enable_control;
+                let _ = socket.recv(|buffer| {
+                    let request = core::str::from_utf8(buffer).unwrap_or("");
+                    let handler = RpcCommandHandler::new(node.clone(), enable_control);
+                    let server = BareMetalRpcServer::new(handler);
+
+                    if let Some(resp_str) = server.handle_request(request) {
+                        response = Some(resp_str);
+                    } else {
+                        response = Some(alloc::string::String::from(
+                            "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n",
+                        ));
+                    }
+                    (buffer.len(), ())
+                });
+                if let Some(resp_str) = response {
+                    let _ = socket.send_slice(resp_str.as_bytes());
+                    socket.close();
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1118,16 +1246,18 @@ impl rsnano_network::AsyncDnsResolver for BareMetalDnsResolver {
     }
 }
 
-fn run_monitor_loop(
+fn run_storage_flush_and_monitor_loop(
     node_mon: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 7: Monitor loop enter\n");
+    kernel_common::uart::print(b"[boot] Hart 7: Storage Flush & Monitor loop enter\n");
     let mut last_tick = kernel_common::clint::mtime();
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_oled = kernel_common::clint::mtime();
+    let mut last_cleanup = kernel_common::clint::mtime();
+    let mut last_online_weight_tick = kernel_common::clint::mtime();
     let mut last_stored_count = node_mon.ledger.block_count();
     let mut last_confirmed_count = node_mon.ledger.confirmed_count();
     let mut last_oled_stored = last_stored_count;
@@ -1136,7 +1266,7 @@ fn run_monitor_loop(
 
     // Initial OLED status render right after boot completes
     {
-        let peers = node_mon.network.read().channels_info().total;
+        let peers = node_mon.network.try_read().map(|n| n.channels_info().total).unwrap_or(0);
         kernel_common::oled::update_status(
             peers,
             last_stored_count as usize,
@@ -1153,12 +1283,25 @@ fn run_monitor_loop(
             last_watchdog = mtime;
         }
 
+        if mtime - last_online_weight_tick > seconds(2) {
+            if let Some(mut guard) = node_mon.online_weight_calculation.try_lock() {
+                let cancel_token = rsnano_core::utils::CancellationToken::new();
+                guard.tick(&cancel_token);
+            }
+            last_online_weight_tick = mtime;
+        }
+        let _ = &mut last_cleanup;
+
+        // 1. Persistence is owned by the ledger writer (Hart 6): it checkpoints all shards
+        // atomically through the WAL at transaction boundaries. Nothing may flush shards directly.
+
+        // 2. Hardware OLED status refresh
         if mtime - last_oled > seconds(2) {
             let stored_now = node_mon.ledger.block_count();
             let confirmed_now = node_mon.ledger.confirmed_count();
             let oled_bps = stored_now.saturating_sub(last_oled_stored) / 2;
             last_oled_stored = stored_now;
-            let peers = node_mon.network.read().channels_info().total;
+            let peers = node_mon.network.try_read().map(|n| n.channels_info().total).unwrap_or(0);
             kernel_common::oled::update_status(
                 peers,
                 stored_now as usize,
@@ -1171,7 +1314,7 @@ fn run_monitor_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 7 (Monitor) | Iters: ");
+                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 7 (Storage+Mon) | Iters: ");
                 kernel_common::uart::print_usize_no_lock(iterations);
                 kernel_common::uart::print_no_lock(b"\n");
                 last_heartbeat = mtime;
@@ -1182,14 +1325,12 @@ fn run_monitor_loop(
         if mtime - last_tick > seconds(15) {
             let mut free_pages = 0;
             let mut total_pages = 0;
+            let mut cached_pages = 0;
             if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
                 let (used, _) = {
                     let heap = ALLOCATOR.0.lock();
                     (heap.used(), heap.size())
                 };
-                kernel_common::uart::print_no_lock(b"[monitor] Heap: ");
-                kernel_common::uart::print_usize_no_lock(used / 1024 / 1024);
-                kernel_common::uart::print_no_lock(b" MB | DB: ");
                 let shard_max = kernel_common::storage::SHARD_SIZE_PAGES.load(Ordering::Relaxed);
                 for i in 0..kernel_common::storage::SHARD_COUNT {
                     if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
@@ -1197,24 +1338,28 @@ fn run_monitor_loop(
                             total_pages += btree.page_count();
                             free_pages += btree.capacity_remaining(shard_max);
                             free_pages += btree.free_page_count();
+                            cached_pages += btree.bpm.cached_page_count();
                         }
                     }
                 }
                 let db_kb = total_pages * 4;
+                let cache_mb = (cached_pages * 4) / 1024;
                 cached_db_kb = db_kb;
                 let stored_count = node_mon.ledger.block_count();
                 let confirmed_count = node_mon.ledger.confirmed_count();
 
-                let bps = (stored_count - last_stored_count) / 15;
-                let _cps = (confirmed_count - last_confirmed_count) / 15;
+                let bps = stored_count.saturating_sub(last_stored_count) / 15;
+                let _cps = confirmed_count.saturating_sub(last_confirmed_count) / 15;
                 last_stored_count = stored_count;
                 last_confirmed_count = confirmed_count;
 
-                let channels_info = node_mon.network.read().channels_info();
-                let online_stake = node_mon.online_reps.lock().online_weight();
+                let channels_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
+                let online_stake = node_mon.online_reps.try_lock().map(|r| r.online_weight()).unwrap_or_default();
 
                 kernel_common::uart::print_no_lock(b"[monitor] Heap: ");
                 kernel_common::uart::print_usize_no_lock(used / 1024 / 1024);
+                kernel_common::uart::print_no_lock(b" MB | Cache: ");
+                kernel_common::uart::print_usize_no_lock(cache_mb);
                 kernel_common::uart::print_no_lock(b" MB | DB: ");
                 if db_kb >= 1024 {
                     kernel_common::uart::print_usize_no_lock(db_kb / 1024);
@@ -1235,8 +1380,65 @@ fn run_monitor_loop(
                 kernel_common::uart::print_no_lock(b" | Rate: ");
                 kernel_common::uart::print_usize_no_lock(bps as usize);
                 kernel_common::uart::print_no_lock(b" bps\n");
+                print_block_prof_no_lock();
+                {
+                    let names: [&[u8]; 7] = [b"ascack", b"publish", b"confack", b"confreq", b"keepalive", b"ascreq", b"other"];
+                    kernel_common::uart::print_no_lock(b"   [msgprof]");
+                    for i in 0..7 {
+                        let n = rsnano_node::transport::MSG_PROF[i].load(Ordering::Relaxed);
+                        let ms = rsnano_node::transport::MSG_PROF[7 + i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ;
+                        kernel_common::uart::print_no_lock(b" ");
+                        kernel_common::uart::print_no_lock(names[i]);
+                        kernel_common::uart::print_no_lock(b"=");
+                        kernel_common::uart::print_usize_no_lock(n as usize);
+                        kernel_common::uart::print_no_lock(b"/");
+                        kernel_common::uart::print_usize_no_lock(ms as usize);
+                        kernel_common::uart::print_no_lock(b"ms");
+                    }
+                    kernel_common::uart::print_no_lock(b"\n");
+                }
+                {
+                    let st = node_mon.bootstrapper.get_state();
+                    if let Some(g) = st.try_lock() {
+                        kernel_common::uart::print_no_lock(b"   [bsets] priority=");
+                        kernel_common::uart::print_usize_no_lock(g.candidate_accounts.priority_len());
+                        kernel_common::uart::print_no_lock(b" blocked=");
+                        kernel_common::uart::print_usize_no_lock(g.candidate_accounts.blocked_len());
+                        let (rq, chans, inflight, at_limit) = g.diag_summary();
+                        kernel_common::uart::print_no_lock(b" running_queries=");
+                        kernel_common::uart::print_usize_no_lock(rq);
+                        kernel_common::uart::print_no_lock(b" channels=");
+                        kernel_common::uart::print_usize_no_lock(chans);
+                        kernel_common::uart::print_no_lock(b" inflight=");
+                        kernel_common::uart::print_usize_no_lock(inflight);
+                        kernel_common::uart::print_no_lock(b" at_limit=");
+                        kernel_common::uart::print_usize_no_lock(at_limit);
+                        kernel_common::uart::print_no_lock(b"\n");
+                    };
+                }
 
                 let stats_col = node_mon.stats();
+                {
+                    let mut bfirst = true;
+                    for (key, val) in stats_col.iter() {
+                        if *val > 0 && key.stat.starts_with("boot") {
+                            if bfirst {
+                                kernel_common::uart::print_no_lock(b"   [bstats] ");
+                                bfirst = false;
+                            } else {
+                                kernel_common::uart::print_no_lock(b" | ");
+                            }
+                            kernel_common::uart::print_no_lock(key.stat.as_bytes());
+                            kernel_common::uart::print_no_lock(b".");
+                            kernel_common::uart::print_no_lock(key.detail.as_bytes());
+                            kernel_common::uart::print_no_lock(b"=");
+                            kernel_common::uart::print_usize_no_lock(*val as usize);
+                        }
+                    }
+                    if !bfirst {
+                        kernel_common::uart::print_no_lock(b"\n");
+                    };
+                }
                 let mut first = true;
                 for (key, val) in stats_col.iter() {
                     if (key.stat == "block_processor_result"
@@ -1263,28 +1465,20 @@ fn run_monitor_loop(
             last_tick = mtime;
         }
 
-        let mut worked_sig = false;
-        for _ in 0..8 {
-            if node_mon.signature_checker.try_help_verify() {
-                worked_sig = true;
+        let mut worked_exec = false;
+        for _ in 0..32 {
+            if exec.run_once(hart_id) {
+                worked_exec = true;
             } else {
                 break;
             }
         }
 
-        if !worked_sig {
-            if !exec.run_once(hart_id) {
-                // Aggressive throttle when completely idle to free up system bus
-                for _ in 0..2000 {
-                    core::hint::spin_loop();
-                }
-            } else {
-                for _ in 0..500 {
-                    core::hint::spin_loop();
-                }
+        if !worked_exec {
+            // Aggressive throttle when completely idle to free up system bus
+            for _ in 0..2000 {
+                core::hint::spin_loop();
             }
-        } else {
-            let _ = exec.run_once(hart_id);
         }
         iterations += 1;
     }
@@ -1296,94 +1490,213 @@ fn panic(info: &PanicInfo) -> ! {
     unsafe {
         core::arch::asm!("mv {0}, tp", out(reg) hart_id);
     }
-    uart::print(b"[PANIC] hart=");
-    uart::print_usize(hart_id);
-    uart::print(b" system panicked\n");
-    if let Some(loc) = info.location() {
-        uart::print(b" at ");
-        uart::print(loc.file().as_bytes());
-        // uart::print(b".");
-        uart::print_usize(loc.line() as usize);
+    loop {
+        uart::print(b"[PANIC] hart=");
+        uart::print_usize(hart_id);
+        uart::print(b" system panicked");
+        if let Some(loc) = info.location() {
+            uart::print(b" at ");
+            uart::print(loc.file().as_bytes());
+            uart::print(b":");
+            uart::print_usize(loc.line() as usize);
+        }
+        uart::print(b"\n");
+        use core::fmt::Write;
+        let _ = write!(kernel_common::uart::UartWriter, "Message: {}\n", info.message());
+        let t0 = kernel_common::clint::mtime();
+        while kernel_common::clint::mtime().wrapping_sub(t0) < seconds(15) {
+            core::hint::spin_loop();
+        }
     }
-    uart::print(b"\n");
-    use core::fmt::Write;
-    let _ = write!(kernel_common::uart::UartWriter, "Message: {}\n", info.message());
-    loop {}
 }
 
-fn run_heavy_io_loop(
+/// Prints block-processor stage profiling (ms of CLINT time) while the caller holds the UART lock.
+fn print_block_prof_no_lock() {
+    let names: [&[u8]; 8] = [
+        b"[prof] sig_ms=", b" ledger_ms=", b" post_ms=", b" batches=",
+        b" blocks=", b" verified=", b" send_ms=", b" loop_ms=",
+    ];
+    for i in 0..8 {
+        kernel_common::uart::print_no_lock(names[i]);
+        let v = rsnano_node::block_processing::BLOCK_PROF[i].load(Ordering::Relaxed);
+        let v = if i < 3 || i >= 6 { (v * 1000 / CLINT_FREQ) as usize } else { v as usize };
+        kernel_common::uart::print_usize_no_lock(v);
+    }
+    kernel_common::uart::print_no_lock(b"\n");
+    let snames: [&[u8]; 10] = [
+        b"[sprof] fetch_n=", b" fetch_ms=", b" read_n=", b" read_ms=", b" write_n=",
+        b" write_ms=", b" search_n=", b" search_ms=", b" insert_n=", b" insert_ms=",
+    ];
+    for i in 0..10 {
+        kernel_common::uart::print_no_lock(snames[i]);
+        let v = kernel_common::storage::bpm::STORAGE_PROF[i].load(Ordering::Relaxed);
+        let v = if i % 2 == 1 { (v * 1000 / CLINT_FREQ) as usize } else { v as usize };
+        kernel_common::uart::print_usize_no_lock(v);
+    }
+    kernel_common::uart::print_no_lock(b"\n");
+    kernel_common::uart::print_no_lock(b"[bexists] lock_wait_ms=");
+    kernel_common::uart::print_usize_no_lock((kernel_common::storage::bpm::STORAGE_PROF[10].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
+    kernel_common::uart::print_no_lock(b" search_ms=");
+    kernel_common::uart::print_usize_no_lock((kernel_common::storage::bpm::STORAGE_PROF[11].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
+    kernel_common::uart::print_no_lock(b" calls=");
+    kernel_common::uart::print_usize_no_lock(kernel_common::storage::bpm::STORAGE_PROF[12].load(Ordering::Relaxed) as usize);
+    kernel_common::uart::print_no_lock(b"\n");
+    for h in 0..8 {
+        let acq = kernel_common::storage::LOCK_ACQ[h].load(Ordering::Relaxed);
+        if acq > 0 {
+            kernel_common::uart::print_no_lock(b"[shardlock] hart=");
+            kernel_common::uart::print_usize_no_lock(h);
+            kernel_common::uart::print_no_lock(b" acquires=");
+            kernel_common::uart::print_usize_no_lock(acq as usize);
+            kernel_common::uart::print_no_lock(b" hold_ms=");
+            kernel_common::uart::print_usize_no_lock((kernel_common::storage::LOCK_HOLD[h].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
+            kernel_common::uart::print_no_lock(b" wait_ms=");
+            kernel_common::uart::print_usize_no_lock((kernel_common::storage::LOCK_WAIT[h].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
+            kernel_common::uart::print_no_lock(b"\n");
+        }
+    }
+    if let Some(t) = kernel_common::storage::LONG_HOLDS.try_lock() {
+        for e in t.iter().flatten() {
+            kernel_common::uart::print_no_lock(b"[longhold] hart=");
+            kernel_common::uart::print_usize_no_lock(e.0);
+            kernel_common::uart::print_no_lock(b" ");
+            kernel_common::uart::print_no_lock(e.1.file().as_bytes());
+            kernel_common::uart::print_no_lock(b":");
+            kernel_common::uart::print_usize_no_lock(e.1.line() as usize);
+            kernel_common::uart::print_no_lock(b" total_ms=");
+            kernel_common::uart::print_usize_no_lock((e.2 * 1000 / CLINT_FREQ) as usize);
+            kernel_common::uart::print_no_lock(b" count=");
+            kernel_common::uart::print_usize_no_lock(e.3 as usize);
+            kernel_common::uart::print_no_lock(b"\n");
+        }
+    }
+    let lnames: [&[u8]; 10] = [
+        b"[lprof] create_validator_ms=", b" validate_ms=", b" insert_ms=", b" prev_block_ms=",
+        b" source_exists_ms=", b" get_pending_ms=", b" hash_exists_ms=", b" get_account_ms=",
+        b" receivable_exists_ms=", b" now_ms=",
+    ];
+    for i in 0..10 {
+        kernel_common::uart::print_no_lock(lnames[i]);
+        let v = rsnano_ledger::LEDGER_PROF[i].load(Ordering::Relaxed);
+        kernel_common::uart::print_usize_no_lock((v * 1000 / CLINT_FREQ) as usize);
+    }
+    kernel_common::uart::print_no_lock(b"\n");
+    let wnames: [&[u8]; 4] = [b"[wal] checkpoints=", b" wal_pages=", b" applied_pages=", b" ckpt_ms="];
+    for i in 0..4 {
+        kernel_common::uart::print_no_lock(wnames[i]);
+        let v = kernel_common::storage::wal::WAL_STATS[i].load(Ordering::Relaxed);
+        let v = if i == 3 { (v * 1000 / CLINT_FREQ) as usize } else { v as usize };
+        kernel_common::uart::print_usize_no_lock(v);
+    }
+    kernel_common::uart::print_no_lock(b"\n");
+}
+
+fn run_ledger_commit_and_bootstrap_loop(
     node_arc: Arc<Node>,
-    exec: kernel_common::async_rt::Executor,
-    hart_id: usize,
+    _exec: kernel_common::async_rt::Executor,
+    _hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 6: Heavy I/O & Bootstrap loop enter\n");
+    kernel_common::uart::print(b"[boot] Hart 6: Single-Writer Ledger Commit & Bootstrap loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
-    let mut last_flush = kernel_common::clint::mtime();
-    let mut last_bootstrap_tick = kernel_common::clint::mtime();
+    let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_node_tick = kernel_common::clint::mtime();
-    let mut current_flush_shard = 0;
+    let mut last_scheduler_tick = kernel_common::clint::mtime();
+    let mut last_checkpoint = kernel_common::clint::mtime();
     let mut iterations = 0;
+    let mut idle_spins = 1u32;
     loop {
         let mtime = kernel_common::clint::mtime();
-
-        if mtime - last_bootstrap_tick > seconds(2) {
-            node_arc.bootstrapper.run_once();
-            last_bootstrap_tick = mtime;
-        }
-
-        // Smooth round-robin background flush: 1 shard every 2 seconds (cycles all 16 shards every 32s)
-        if mtime - last_flush > seconds(2) {
-            let shard_idx = current_flush_shard;
-            current_flush_shard = (current_flush_shard + 1) % kernel_common::storage::SHARD_COUNT;
-            if let Some(mut btree_guard) = kernel_common::storage::SHARDS[shard_idx].try_lock() {
-                if let Some(btree) = btree_guard.as_mut() {
-                    let _ = btree.flush();
-                }
-            }
-            last_flush = mtime;
-        }
-
-        if mtime - last_node_tick > seconds(2) {
-            node_arc.tick();
-            last_node_tick = mtime;
+        if mtime - last_watchdog > seconds(1) {
+            kernel_common::watchdog::heartbeat_hart6(mtime);
+            kernel_common::watchdog::kick();
+            last_watchdog = mtime;
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart ");
-                kernel_common::uart::print_usize_no_lock(hart_id);
-                kernel_common::uart::print_no_lock(b" (HeavyIO) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-                iterations = 0;
-            }
+            let _lock = kernel_common::uart::UART_LOCK.lock();
+            kernel_common::uart::print_no_lock(b"[heartbeat] Hart 6 (Ledger+Boot) | Iters: ");
+            kernel_common::uart::print_usize_no_lock(iterations);
+            kernel_common::uart::print_no_lock(b" | Total Blocks: ");
+            kernel_common::uart::print_usize_no_lock(node_arc.ledger.block_count());
+            kernel_common::uart::print_no_lock(b" | BPQ: ");
+            kernel_common::uart::print_usize_no_lock(node_arc.block_processor.total_queue_len());
+            kernel_common::uart::print_no_lock(b"\n");
+            iterations = 0;
+            last_heartbeat = mtime;
         }
 
-        let mut worked_sig = false;
-        for _ in 0..8 {
-            if node_arc.signature_checker.try_help_verify() {
-                worked_sig = true;
-            } else {
-                break;
+        let mut worked = false;
+
+        // 1. Single-writer block insertion & dependencies
+        // Throttle new block commits when unconfirmed backlog exceeds 250,000 so
+        // ConfirmingSet and ElectionSchedulers can drain the backlog without destructive rollbacks.
+        if node_arc.ledger.backlog_count() < 250_000 {
+            if node_arc.unchecked.buffer_count() > 0 {
+                node_arc.unchecked.run_once();
+                worked = true;
+            }
+            for _ in 0..8 {
+                let mut batch_worked = false;
+                if node_arc.block_processor.total_queue_len() > 0 {
+                    node_arc.block_processor.run_once();
+                    worked = true;
+                    batch_worked = true;
+                }
+                if node_arc.unchecked.buffer_count() > 0 {
+                    node_arc.unchecked.run_once();
+                    worked = true;
+                    batch_worked = true;
+                }
+                if node_arc.confirming_set.len() >= 128 {
+                    node_arc.confirming_set.run_once();
+                }
+                if !batch_worked || node_arc.ledger.backlog_count() >= 250_000 {
+                    break;
+                }
             }
         }
+        node_arc.confirming_set.run_once();
+        node_arc.election_schedulers.priority.run_one();
 
-        let mut worked_task = false;
-        for _ in 0..16 {
-            if exec.run_once(hart_id) {
-                worked_task = true;
-            } else {
-                break;
+        if mtime - last_scheduler_tick > millis(100) {
+            if node_arc.active.read().len() < 4096 && node_arc.ledger.backlog_count() > 0 {
+                if let Some(mut guard) = node_arc.backlog_scan.try_lock() {
+                    guard.run_once();
+                }
             }
+            node_arc.election_schedulers.run_once();
+            last_scheduler_tick = mtime;
+        }
+
+        // Atomic WAL checkpoint at a transaction boundary (this hart is the single ledger writer,
+        // so the cut across the 16 shards is consistent). Time based, or when a buffer pool had to
+        // grow because every frame was dirty.
+        if mtime - last_checkpoint > seconds(10)
+            || kernel_common::storage::bpm::NEED_CHECKPOINT.load(Ordering::Relaxed)
+        {
+            let _ = kernel_common::storage::wal::checkpoint();
+            last_checkpoint = kernel_common::clint::mtime();
+            worked = true;
+        }
+
+        // 3. Periodic node tick
+        if mtime - last_node_tick > seconds(2) {
+            node_arc.tick();
+            last_node_tick = mtime;
+            worked = true;
+        }
+
+        // 4. Only service bootstrap responder when single-writer ledger commit queues are idle
+        if !worked
+            && node_arc.block_processor.total_queue_len() == 0
+            && node_arc.unchecked.buffer_count() == 0
+            && node_arc.bootstrap_server.run_once()
+        {
+            worked = true;
         }
 
         iterations += 1;
-        if !worked_sig && !worked_task {
-            for _ in 0..100 {
-                core::hint::spin_loop();
-            }
-        }
+        adaptive_pause_backoff(worked, &mut idle_spins);
     }
 }
 
@@ -1787,16 +2100,17 @@ fn run_deterministic_block_test(
     );
 }
 
+/// Hart 1 loop section time in CLINT ticks: [net poll + rpc, message processor, sig checker, executor].
+static HART1_PROF: [core::sync::atomic::AtomicU64; 4] = [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+
 fn run_maintenance_and_network_loop(
     node_arc: Arc<Node>,
-    exec: kernel_common::async_rt::Executor,
-    hart_id: usize,
+    _exec: kernel_common::async_rt::Executor,
+    _hart_id: usize,
 ) -> ! {
     kernel_common::uart::print(b"[boot] Hart 1: Maintenance & Network loop enter\n");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
-    let mut last_cleanup = kernel_common::clint::mtime();
-    let mut last_online_weight_tick = kernel_common::clint::mtime();
     let mut iterations = 0;
 
     let mut last_ping = kernel_common::clint::mtime();
@@ -1807,11 +2121,15 @@ fn run_maintenance_and_network_loop(
         kernel_common::storage::process_delegated_requests();
 
         let mut retry_net = false;
+        let mut net_active = false;
+        let hp0 = kernel_common::clint::mtime();
         {
             let _intr = kernel_common::uart::InterruptGuard::new();
+            kernel_common::net::HART1_WANTS_NET.store(true, Ordering::Release);
             let mut ctx = kernel_common::net::NET.lock();
             if let Some(ref mut ctx_val) = *ctx {
-                ctx_val.poll(mtime);
+                net_active = ctx_val.poll(mtime);
+                handle_rpc_server(ctx_val, node_arc.clone());
 
                 if mtime - last_ping > seconds(5) {
                     let gw = kernel_common::net::get_net_config().gateway;
@@ -1826,8 +2144,11 @@ fn run_maintenance_and_network_loop(
                     last_ping = mtime;
                 }
             }
+            drop(ctx);
+            kernel_common::net::HART1_WANTS_NET.store(false, Ordering::Release);
         }
 
+        HART1_PROF[0].fetch_add(kernel_common::clint::mtime() - hp0, Ordering::Relaxed);
         if retry_net {
             kernel_common::uart::print(b"[net] Retrying network initialization...\n");
             if let Some(new_ctx) = kernel_common::net::init_uboot_net() {
@@ -1836,29 +2157,8 @@ fn run_maintenance_and_network_loop(
                 kernel_common::uart::print(b"[net] Network initialized successfully!\n");
             }
         }
-        node_arc.message_processor.lock().run_once();
 
-        // 2. Maintenance Ticks (AEC ticker is driven exclusively by Hart 3)
-        if mtime - last_cleanup > seconds(5) {
-            if let Some(guard) = node_arc.dead_channel_cleanup.try_lock() {
-                guard.clean_up();
-            }
-            if let Some(mut guard) = node_arc.peer_cache_connector.try_lock() {
-                let cancel_token = rsnano_core::utils::CancellationToken::new();
-                guard.tick(&cancel_token);
-            }
-            last_cleanup = mtime;
-        }
-
-        if mtime - last_online_weight_tick > seconds(2) {
-            if let Some(mut guard) = node_arc.online_weight_calculation.try_lock() {
-                let cancel_token = rsnano_core::utils::CancellationToken::new();
-                guard.tick(&cancel_token);
-            }
-            last_online_weight_tick = mtime;
-        }
-
-        // 3. Heartbeat
+        // 2. Heartbeat & Watchdog
         if mtime - last_watchdog > seconds(1) {
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
@@ -1871,22 +2171,32 @@ fn run_maintenance_and_network_loop(
                 kernel_common::uart::print_usize_no_lock(iterations);
                 kernel_common::uart::print_no_lock(b" | Msgs: ");
                 kernel_common::uart::print_usize_no_lock(processed as usize);
+                kernel_common::uart::print_no_lock(b" | ms net=");
+                kernel_common::uart::print_usize_no_lock((HART1_PROF[0].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
+                kernel_common::uart::print_no_lock(b" msgproc=");
+                kernel_common::uart::print_usize_no_lock((HART1_PROF[1].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
+                kernel_common::uart::print_no_lock(b" sig=");
+                kernel_common::uart::print_usize_no_lock((HART1_PROF[2].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
+                kernel_common::uart::print_no_lock(b" exec=");
+                kernel_common::uart::print_usize_no_lock((HART1_PROF[3].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
                 kernel_common::uart::print_no_lock(b"\n");
                 last_heartbeat = mtime;
                 iterations = 0;
             }
         }
 
-        // 4. Executor & Signature Checker
-        node_arc.signature_checker.try_help_verify();
-        for _ in 0..8 {
-            if !exec.run_once(hart_id) {
-                core::hint::spin_loop();
-                break;
-            }
-        }
         iterations += 1;
 
-        core::hint::spin_loop();
+        // Release NET.lock() for a brief window (50 us when active, 200 us when idle)
+        // so Cluster 1 worker harts can acquire NET.lock() for socket reads/writes without starving.
+        let pause_ticks = if net_active {
+            CLINT_FREQ / 20_000
+        } else {
+            CLINT_FREQ / 5_000
+        };
+        let pause_start = kernel_common::clint::mtime();
+        while kernel_common::clint::mtime().wrapping_sub(pause_start) < pause_ticks {
+            core::hint::spin_loop();
+        }
     }
 }

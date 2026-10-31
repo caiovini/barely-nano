@@ -90,12 +90,19 @@ impl Epochs {
     }
 
     pub fn validate_epoch_signature(&self, block: &Block) -> anyhow::Result<()> {
+        if block.is_signature_verified() {
+            return Ok(());
+        }
         let epoch_signer: PublicKey = self
             .epoch_signer(&block.link_field().unwrap_or_default())
             .ok_or_else(|| anyhow!("not an epoch link!"))?
             .into();
 
-        epoch_signer.verify(block.hash().as_bytes(), block.signature())
+        let res = epoch_signer.verify(block.hash().as_bytes(), block.signature());
+        if res.is_ok() {
+            block.set_signature_verified(true);
+        }
+        res
     }
 
     pub fn epoch_signer(&self, link: &Link) -> Option<Account> {

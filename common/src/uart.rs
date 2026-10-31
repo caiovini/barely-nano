@@ -1,3 +1,4 @@
+#[cfg(target_arch = "riscv64")]
 const UART0: *mut u8 = 0xD401_7000 as *mut u8;
 pub static UART_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
@@ -16,13 +17,20 @@ static SUPPRESS_LINE: [AtomicBool; 8] = [
 
 #[inline]
 pub fn current_hart_id() -> usize {
-    let hart_id: usize;
-    unsafe {
-        core::arch::asm!("mv {0}, tp", out(reg) hart_id);
+    #[cfg(target_arch = "riscv64")]
+    {
+        let hart_id: usize;
+        unsafe {
+            core::arch::asm!("mv {0}, tp", out(reg) hart_id);
+        }
+        if hart_id < 8 {
+            hart_id
+        } else {
+            0
+        }
     }
-    if hart_id < 8 {
-        hart_id
-    } else {
+    #[cfg(not(target_arch = "riscv64"))]
+    {
         0
     }
 }
@@ -57,54 +65,72 @@ pub struct InterruptGuard {
 
 impl InterruptGuard {
     pub fn new() -> Self {
-        let mut sstatus: usize;
-        unsafe {
-            core::arch::asm!("csrr {0}, sstatus", out(reg) sstatus);
-        }
-        let enabled = (sstatus & (1 << 1)) != 0;
-        if enabled {
+        #[cfg(target_arch = "riscv64")]
+        {
+            let mut sstatus: usize;
             unsafe {
-                core::arch::asm!("csrci sstatus, 2");
+                core::arch::asm!("csrr {0}, sstatus", out(reg) sstatus);
             }
+            let enabled = (sstatus & (1 << 1)) != 0;
+            if enabled {
+                unsafe {
+                    core::arch::asm!("csrci sstatus, 2");
+                }
+            }
+            Self { enabled }
         }
-        Self { enabled }
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            Self { enabled: false }
+        }
     }
 }
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
+        #[cfg(target_arch = "riscv64")]
         if self.enabled {
             unsafe {
                 core::arch::asm!("csrsi sstatus, 2");
             }
         }
+        #[cfg(not(target_arch = "riscv64"))]
+        let _ = self.enabled;
     }
 }
 
 pub fn putchar_no_lock(b: u8) {
-    if b == b'\n' {
+    #[cfg(target_arch = "riscv64")]
+    {
+        if b == b'\n' {
+            unsafe {
+                while (UART0.add(20).read_volatile() & 0x20) == 0 {}
+                UART0.write_volatile(b'\r');
+            }
+        }
         unsafe {
             while (UART0.add(20).read_volatile() & 0x20) == 0 {}
-            UART0.write_volatile(b'\r');
+            UART0.write_volatile(b);
         }
     }
-    unsafe {
-        while (UART0.add(20).read_volatile() & 0x20) == 0 {}
-        UART0.write_volatile(b);
-    }
+    #[cfg(not(target_arch = "riscv64"))]
+    let _ = b;
 }
 
 pub fn blind_write(b: u8) {
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         while (UART0.add(20).read_volatile() & 0x20) == 0 {}
         UART0.write_volatile(b);
     }
+    #[cfg(not(target_arch = "riscv64"))]
+    let _ = b;
 }
 
 pub fn print(s: &[u8]) {
     let hart_id = current_hart_id();
     if is_log_suppressed(s) {
-        SUPPRESS_LINE[hart_id].store(true, core::sync::atomic::Ordering::Relaxed);
+        SUPPRESS_LINE[hart_id].store(!s.contains(&b'\n'), core::sync::atomic::Ordering::Relaxed);
         return;
     }
     if SUPPRESS_LINE[hart_id].load(core::sync::atomic::Ordering::Relaxed) {

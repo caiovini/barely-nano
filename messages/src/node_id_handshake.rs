@@ -386,11 +386,32 @@ mod tests {
     }
     #[test]
     fn rpi_v2_signature() {
-        let node_id_bytes = hex_literal::hex!("d3986e8a483c0a72f7ac3b3a205daafef12c842cf952c62714bd0c2d297a54d7");
-        let cookie = hex_literal::hex!("39d3aba9335e739ee7560599fef09ccdd919e5e0e3f2b407a74bf00f146c9d1f");
-        let salt = hex_literal::hex!("00664eeebb4ee697cc2216802b1b0e7350be6fd33ae78ba44c3fc59c09ce9486");
-        let genesis = BlockHash::from_bytes(hex_literal::hex!("991cf190094c00f0b68e2e5f75f6bee95a2e0bd93ceaa4a6734db9f19b728948"));
-        let signature = Signature::from_bytes(hex_literal::hex!("770004494b8d8aaac524582445fb3ad992adf4305e517a36eb648eff308f136e29789d6f3551cf8b4e05d919afd59515d04d03330156dd4ca1ec6c5573b94305"));
+        let mut node_id_bytes = [0u8; 32];
+        hex::decode_to_slice(
+            "d3986e8a483c0a72f7ac3b3a205daafef12c842cf952c62714bd0c2d297a54d7",
+            &mut node_id_bytes,
+        )
+        .unwrap();
+        let mut cookie = [0u8; 32];
+        hex::decode_to_slice(
+            "39d3aba9335e739ee7560599fef09ccdd919e5e0e3f2b407a74bf00f146c9d1f",
+            &mut cookie,
+        )
+        .unwrap();
+        let mut salt = [0u8; 32];
+        hex::decode_to_slice(
+            "00664eeebb4ee697cc2216802b1b0e7350be6fd33ae78ba44c3fc59c09ce9486",
+            &mut salt,
+        )
+        .unwrap();
+        let genesis = BlockHash::decode_hex(
+            "991cf190094c00f0b68e2e5f75f6bee95a2e0bd93ceaa4a6734db9f19b728948",
+        )
+        .unwrap();
+        let signature = Signature::decode_hex(
+            "770004494b8d8aaac524582445fb3ad992adf4305e517a36eb648eff308f136e29789d6f3551cf8b4e05d919afd59515d04d03330156dd4ca1ec6c5573b94305",
+        )
+        .unwrap();
 
         let response = NodeIdHandshakeResponse {
             node_id: NodeId::from_bytes(node_id_bytes),
@@ -398,6 +419,9 @@ mod tests {
             v2: Some(V2Payload { salt, genesis }),
         };
 
-        assert!(response.validate(&cookie).is_ok(), "Verification of real RPi signature failed!");
+        assert!(
+            response.validate(&cookie).is_ok(),
+            "Verification of real RPi signature failed!"
+        );
     }
 }

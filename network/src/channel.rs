@@ -100,7 +100,7 @@ impl Channel {
     }
 
     pub fn new_test_instance_with_id(id: impl Into<ChannelId>) -> Self {
-        Self::new(
+        let channel = Self::new(
             id.into(),
             into_core_addr(TEST_ENDPOINT_1),
             into_core_addr(TEST_ENDPOINT_2),
@@ -109,7 +109,12 @@ impl Channel {
             Timestamp::new_test_instance(),
             Arc::new(BandwidthLimiter::default()),
             Arc::new(ChannelStats::default()),
-        )
+        );
+        channel
+            .socket_type
+            .store(ChannelMode::Realtime as u8, Ordering::SeqCst);
+        channel.realtime_start_ms.store(-2000, Ordering::SeqCst);
+        channel
     }
 
     pub fn channel_id(&self) -> ChannelId {
@@ -223,7 +228,9 @@ impl Channel {
         let old_mode = self.mode();
         self.socket_type.store(mode as u8, Ordering::SeqCst);
         if mode == ChannelMode::Realtime && old_mode != ChannelMode::Realtime {
-            self.realtime_start_ms.store(rsnano_nullable_clock::Timestamp::now().millis(), Ordering::SeqCst);
+            let now_ms = rsnano_nullable_clock::Timestamp::now().millis();
+            self.realtime_start_ms
+                .store(if now_ms == 0 { -2000 } else { now_ms }, Ordering::SeqCst);
         }
     }
 

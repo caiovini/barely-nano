@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
 
 use rsnano_ledger::Ledger;
 use rsnano_network::Channel;
@@ -37,8 +38,9 @@ impl PriorityRequester {
         ledger: Arc<Ledger>,
         config: &BootstrapConfig,
     ) -> Self {
+        let pull_type_decider = crate::bootstrap::state::candidate_accounts::PullTypeDecider::new(config.optimistic_request_percentage);
         let pull_count_decider = PullCountDecider::new(config.max_pull_count);
-        let query_factory = QueryFactory::new(ledger, pull_count_decider);
+        let query_factory = QueryFactory::new(ledger, pull_type_decider, pull_count_decider);
         let stats = Arc::new(PriorityRequesterStats {
             channel_waiter: channel_waiter.stats(),
             ..Default::default()
@@ -62,6 +64,73 @@ impl PriorityRequester {
     fn block_processor_free(&self) -> bool {
         self.block_processor_queue.queue_len(BlockSource::Bootstrap)
             < self.block_processor_threshold
+    }
+
+    pub(crate) fn poll_step(
+        &mut self,
+        state_mutex: &Arc<Mutex<BootstrapState>>,
+        now: Timestamp,
+    ) -> PollResult<AscPullQuerySpec> {
+        loop {
+            match self.state {
+                PriorityState::Initial => {
+                    self.stats.loop_count.fetch_add(1, Ordering::Relaxed);
+                    self.state = PriorityState::WaitBlockProcessor;
+                }
+                PriorityState::WaitBlockProcessor => {
+                    if self.block_processor_free() {
+                        self.state = PriorityState::WaitChannel;
+                    } else {
+                        self.stats
+                            .wait_block_processor
+                            .fetch_add(1, Ordering::Relaxed);
+                        return PollResult::Wait;
+                    }
+                }
+                PriorityState::WaitChannel => {
+                    let res = {
+                        let mut state = state_mutex.lock();
+                        self.channel_waiter.poll(&mut state, now)
+                    };
+                    match res {
+                        PollResult::Progress => {}
+                        PollResult::Wait => return PollResult::Wait,
+                        PollResult::Finished(channel) => {
+                            self.state = PriorityState::WaitPriority(channel);
+                        }
+                    }
+                }
+                PriorityState::WaitPriority(ref channel) => {
+                    let next = {
+                        let mut state = state_mutex.lock();
+                        let next = state.next_priority(now);
+                        if next.account.is_zero() {
+                            state.scoring.request_finished(channel.channel_id());
+                        }
+                        next
+                    };
+
+                    if next.account.is_zero() {
+                        self.stats.wait_priority.fetch_add(1, Ordering::Relaxed);
+                        self.state = PriorityState::Initial;
+                        return PollResult::Wait;
+                    }
+
+                    // Query account head with NO BootstrapState lock held!
+                    let head = self.query_factory.get_account_head(&next.account);
+                    let query = self.query_factory.create_priority_query(
+                        &next,
+                        channel.clone(),
+                        crate::bootstrap::state::PullType::Optimistic,
+                        head,
+                        rsnano_core::BlockHash::zero(),
+                    );
+
+                    self.state = PriorityState::Initial;
+                    return PollResult::Finished(query);
+                }
+            }
+        }
     }
 }
 
@@ -151,9 +220,11 @@ impl StatsSource for PriorityRequesterStats {
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
     use spin::{Mutex, RwLock};
 
     use rsnano_core::Account;
+    use rsnano_ledger::Ledger;
     use rsnano_network::{Network, token_bucket::TokenBucket};
     use rsnano_nullable_clock::SteadyClock;
 
@@ -217,7 +288,14 @@ mod tests {
         let result = progress(&mut requester, &mut state);
 
         assert!(matches!(result, PollResult::Wait));
-        assert!(matches!(requester.state, PriorityState::WaitPriority(_)));
+        assert!(matches!(requester.state, PriorityState::Initial));
+        assert_eq!(
+            requester
+                .stats
+                .wait_priority
+                .load(core::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     fn create_requester() -> (PriorityRequester, Arc<RwLock<Network>>) {

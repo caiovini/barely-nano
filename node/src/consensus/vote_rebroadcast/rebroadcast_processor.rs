@@ -156,6 +156,10 @@ impl StatsSource for RebroadcastStats {
 mod tests {
     use super::*;
     use crate::transport::FloodEvent;
+    use rsnano_core::Vote;
+    use rsnano_messages::{ConfirmAck, Message};
+    use rsnano_network::TrafficType;
+    use rsnano_nullable_clock::SteadyClock;
 
     #[test]
     fn rebroadcast_vote() {

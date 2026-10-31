@@ -37,11 +37,50 @@ impl BtreeRepWeightStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            if let Some(value) = db.search(&key) {
-                let mut reader = BufferReader::new(&value);
-                return Amount::deserialize(&mut reader).ok();
+            if let Some(res) = db.get_with(&key, |value| {
+                let mut reader = BufferReader::new(value);
+                Amount::deserialize(&mut reader).ok()
+            }) {
+                return res;
             }
         }
         None
+    }
+
+    pub fn for_each<F>(&self, mut f: F)
+    where
+        F: FnMut(PublicKey, Amount),
+    {
+        let mut start_key = [0u8; KEY_SIZE];
+        start_key[0] = Self::TABLE_ID;
+        let mut count = 0usize;
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            let mut lock = SHARDS[i].lock();
+            if let Some(db) = lock.as_mut() {
+                let mut it = db.iter(start_key);
+                while let Some(step) = it.next_kv_with(|key, value| {
+                    if key[0] != Self::TABLE_ID {
+                        return Err(());
+                    }
+                    let rep = PublicKey::from_bytes(key[1..33].try_into().unwrap());
+                    let mut reader = BufferReader::new(value);
+                    Ok(Amount::deserialize(&mut reader)
+                        .ok()
+                        .map(|amount| (rep, amount)))
+                }) {
+                    match step {
+                        Ok(Some((rep, amount))) => {
+                            f(rep, amount);
+                            count += 1;
+                            if count % 1000 == 0 {
+                                kernel_common::watchdog::kick();
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(()) => break,
+                    }
+                }
+            }
+        }
     }
 }

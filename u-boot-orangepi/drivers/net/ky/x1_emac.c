@@ -94,8 +94,8 @@
 #define EQOS_DESCRIPTOR_SIZE            (EQOS_DESCRIPTOR_WORDS * 4)
 /* We assume ARCH_DMA_MINALIGN >= 16; 16 is the EQOS HW minimum */
 #define EQOS_DESCRIPTOR_ALIGN           ARCH_DMA_MINALIGN
-#define EQOS_DESCRIPTORS_TX             4
-#define EQOS_DESCRIPTORS_RX             512
+#define EQOS_DESCRIPTORS_TX             2048
+#define EQOS_DESCRIPTORS_RX             2048
 #define EQOS_DESCRIPTORS_NUM            (EQOS_DESCRIPTORS_TX + EQOS_DESCRIPTORS_RX)
 #define EQOS_DESCRIPTORS_SIZE           ALIGN(EQOS_DESCRIPTORS_NUM * \
                                             EQOS_DESCRIPTOR_SIZE, ARCH_DMA_MINALIGN)
@@ -729,23 +729,27 @@ int emac_send(struct udevice *dev, void *packet, int length)
 
     tx_desc->des2 = (u32)(ulong)priv->tx_dma_buf;
     tx_desc->des3 = (u32)((ulong)priv->tx_dma_buf >> 32);
-    tx_desc->des1 = EMAC_DESC_BUFF_SIZE1 & length;
-    tx_desc->des1 |= EMAC_DESC_FD | EMAC_DESC_LD;
+
+    u32 des1 = (EMAC_DESC_BUFF_SIZE1 & length) | EMAC_DESC_FD | EMAC_DESC_LD;
+    if (priv->tx_desc_idx == 0)
+        des1 |= EMAC_DESC_EOR;
+    tx_desc->des1 = des1;
+
+    asm volatile("fence w, w" ::: "memory");
     tx_desc->des0 = EMAC_DESC_OWN | EMAC_DESC_FD | EMAC_DESC_LD;
 
-    if (priv->tx_desc_idx == 0)
-        tx_desc->des1 |= EMAC_DESC_EOR;
-
     emac_flush_desc(tx_desc);
-    asm volatile("fence i,or" ::: "memory");
+    asm volatile("fence rw, io" ::: "memory");
 
     emac_wr(priv, DMA_TRANSMIT_POLL_DEMAND, 0xFF);
 
-    for (i = 0; i < 1000; i++) {
+    for (i = 0; i < 1000000; i++) {
         emac_inval_desc(tx_desc);
         if (!(readl(&tx_desc->des0) & EMAC_DESC_OWN))
             return 0;
-        mdelay(1);
+        if (((i + 1) & 0x3f) == 0)
+            emac_wr(priv, DMA_TRANSMIT_POLL_DEMAND, 0xFF);
+        udelay(1);
     }
 
     printf("%s: TX timeout. DMA_STATUS=%08x, MAC_STATUS=%08x, TX_DESC0=%08x\n", 
@@ -815,10 +819,11 @@ int emac_free_pkt(struct udevice *dev, uchar *packet, int length)
             ulong buf_addr = (ulong)(priv->rx_dma_buf + (desc_idx * EQOS_MAX_PACKET_SIZE));
             rx_desc->des2 = (u32)buf_addr;
             rx_desc->des3 = (u32)(buf_addr >> 32);
+            asm volatile("fence w, w" ::: "memory");
             rx_desc->des0 = EMAC_DESC_OWN;
 
             emac_flush_desc(rx_desc);
-            asm volatile("fence i,or" ::: "memory");
+            asm volatile("fence rw, io" ::: "memory");
 
             emac_wr(priv, DMA_RECEIVE_POLL_DEMAND, 0xFF);
         }

@@ -163,6 +163,8 @@ fn new_test_validator<'a>(
         pending_receive_info: None,
         any_pending_exists: false,
         source_block_exists: false,
+        is_genesis: false,
+        signature_verified: false,
         now: UnixMillisTimestamp::new(123456),
     }
 }

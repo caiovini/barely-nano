@@ -21,11 +21,9 @@ impl PeerScoring {
         self.channel_limit = limit;
     }
 
-    pub const BAN_THRESHOLD: i32 = 0;
-
     pub fn punish(&mut self, channel_id: ChannelId, penalty: i32) {
         self.scoring.modify(channel_id, |i| {
-            i.score = i.score.saturating_sub(penalty);
+            i.score = (i.score - penalty).max(0);
         });
     }
 
@@ -35,23 +33,17 @@ impl PeerScoring {
         });
     }
 
-    pub fn is_banned(&self, channel_id: ChannelId) -> bool {
-        if let Some(score) = self.scoring.get(channel_id) {
-            score.score <= Self::BAN_THRESHOLD
-        } else {
-            false
-        }
-    }
-
     pub fn received_message(&mut self, channel_id: ChannelId) {
         self.scoring.modify(channel_id, |i| {
             if i.running_queries > 0 {
                 i.running_queries -= 1;
                 i.response_count_total += 1;
             }
+            i.score = core::cmp::min(PeerScore::INITIAL_SCORE, i.score.saturating_add(5));
         });
     }
 
+    #[allow(dead_code)]
     pub fn request_finished(&mut self, channel_id: ChannelId) {
         self.scoring.modify(channel_id, |i| {
             if i.running_queries > 0 {
@@ -65,12 +57,23 @@ impl PeerScoring {
         let mut rng = rsnano_nullable_random::NullableRng::rng();
         candidates.shuffle(&mut rng);
 
+        candidates.sort_by_key(|&id| {
+            let score = self
+                .scoring
+                .get(id)
+                .map(|s| s.score)
+                .unwrap_or(PeerScore::INITIAL_SCORE);
+            core::cmp::Reverse(score)
+        });
+
         let limit = self.channel_limit;
         for channel_id in candidates {
-            if self.is_banned(channel_id) {
-                continue;
-            }
-            if Self::try_send_message(&mut self.scoring, channel_id, limit) {
+            let eff_limit = match self.scoring.get(channel_id).map(|s| s.score) {
+                Some(0) => 2.min(limit),
+                Some(s) if s < 500 => limit.min(8),
+                _ => limit,
+            };
+            if Self::try_send_message(&mut self.scoring, channel_id, eff_limit) {
                 return Some(channel_id);
             }
         }
@@ -101,6 +104,21 @@ impl PeerScoring {
         self.scoring.len()
     }
 
+    /// Diagnostics: (tracked channels, total in-flight queries, channels at the in-flight limit).
+    pub fn summary(&self) -> (usize, usize, usize) {
+        let mut total = 0;
+        let mut at_limit = 0;
+        let mut n = 0;
+        for i in self.scoring.iter() {
+            n += 1;
+            total += i.running_queries as usize;
+            if i.running_queries as usize >= self.channel_limit {
+                at_limit += 1;
+            }
+        }
+        (n, total, at_limit)
+    }
+
     pub fn decay(&mut self) {
         self.scoring.modify_all(|i| i.decay());
     }
@@ -110,15 +128,6 @@ impl PeerScoring {
             self.scoring.remove(*channel_id);
         }
     }
-
-    pub fn banned_channels(&self) -> Vec<ChannelId> {
-        self.scoring
-            .iter()
-            .filter(|i| i.score <= Self::BAN_THRESHOLD)
-            .map(|i| i.channel_id)
-            .collect()
-    }
-
 
     pub fn container_info(&self) -> ContainerInfo {
         [("scores", self.len(), 0)].into()

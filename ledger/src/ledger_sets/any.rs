@@ -83,69 +83,99 @@ impl<'a> OwningAnySet<'a> {
         }
     }
 
+    pub fn collect_frontiers(&self, start: Account, count: usize) -> Vec<rsnano_core::Frontier> {
+        let mut result = Vec::with_capacity(count);
+        if count == 0 {
+            return result;
+        }
+        self.store.account.for_each_while(start, |acc, info| {
+            result.push(rsnano_core::Frontier::new(acc, info.head));
+            result.len() < count
+        });
+        result
+    }
+
     pub fn accounts_range(
-        &self,
+        &'a self,
         range: impl RangeBounds<Account> + 'static,
-    ) -> Vec<(Account, AccountInfo)> {
+    ) -> AccountRangeIterator<'a> {
         use core::ops::Bound::*;
-        let start = match range.start_bound() {
-            Included(a) => *a,
-            Excluded(a) => a.inc().unwrap_or(Account::zero()),
-            Unbounded => Account::zero(),
+        let next_start = match range.start_bound() {
+            Included(a) => Some(*a),
+            Excluded(a) => a.inc(),
+            Unbounded => Some(Account::zero()),
         };
-        self.store.account.iter(start)
+        let end_bound = match range.end_bound() {
+            Included(a) => Included(*a),
+            Excluded(a) => Excluded(*a),
+            Unbounded => Unbounded,
+        };
+        AccountRangeIterator {
+            store: self.store,
+            next_start,
+            end_bound,
+            batch: Vec::new(),
+            index: 0,
+        }
     }
 
     pub fn iter_account_range(
-        &self,
+        &'a self,
         range: impl RangeBounds<Account> + 'static,
-    ) -> impl Iterator<Item = (Account, AccountInfo)> {
-        self.accounts_range(range).into_iter()
+    ) -> impl Iterator<Item = (Account, AccountInfo)> + 'a {
+        self.accounts_range(range)
     }
 
     pub fn iter_pending_range(
-        &self,
+        &'a self,
         range: impl RangeBounds<PendingKey> + 'static,
-    ) -> Vec<(PendingKey, PendingInfo)> {
+    ) -> PendingRangeIterator<'a> {
         use core::ops::Bound::*;
         let start = match range.start_bound() {
             Included(k) => *k,
             Excluded(k) => *k,
             Unbounded => PendingKey::new(Account::zero(), BlockHash::zero()),
         };
-        self.store.pending.iter_range(start)
+        let end_bound = match range.end_bound() {
+            Included(k) => Included(*k),
+            Excluded(k) => Excluded(*k),
+            Unbounded => Unbounded,
+        };
+        PendingRangeIterator {
+            store: self.store,
+            next_start: Some(start),
+            end_bound,
+            batch: Vec::new(),
+            index: 0,
+        }
     }
 
-    pub fn iter_accounts(&self) -> Vec<(Account, AccountInfo)> {
+    pub fn iter_accounts(&'a self) -> AccountRangeIterator<'a> {
         self.accounts_range(Account::zero()..)
     }
 
     pub fn random_blocks(&self, count: usize) -> Vec<SavedBlock> {
         let total = self.store.block.count();
-        if total == 0 {
+        if total == 0 || count == 0 {
             return Vec::new();
         }
 
-        let skip = if total > count {
-            static mut COUNTER: usize = 0;
-            let seed = unsafe {
-                COUNTER = COUNTER.wrapping_add(1);
-                COUNTER
-            };
-            seed % (total - count + 1)
-        } else {
-            0
-        };
-
-        let mut results = Vec::with_capacity(count);
-        let mut current = 0;
-        self.store.block.for_each(|block| {
-            if current >= skip && results.len() < count {
-                results.push(block);
-            }
-            current += 1;
-        });
-        results
+        static RANDOM_SEED: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+        let mut s = RANDOM_SEED
+            .fetch_add(0x9E37_79B9_7F4A_7C15, core::sync::atomic::Ordering::Relaxed)
+            ^ kernel_common::clint::mtime();
+        let mut hash_bytes = [0u8; 32];
+        for chunk in hash_bytes.chunks_exact_mut(8) {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z = z ^ (z >> 31);
+            chunk.copy_from_slice(&z.to_le_bytes());
+        }
+        let start_hash = BlockHash::from_bytes(hash_bytes);
+        self.store.block.random_blocks(start_hash, count)
     }
 
     pub fn latest_root(&self, account: &Account) -> Root {
@@ -385,9 +415,7 @@ impl<'a> AnySet for BorrowingAnySet<'a> {
     }
 
     fn receivable_exists(&self, account: Account) -> bool {
-        self.account_receivable_upper_bound(account, BlockHash::zero())
-            .next()
-            .is_some()
+        self.store.pending.exists_for_account(&account)
     }
 
     fn confirmed(&self) -> BorrowingConfirmedSet<'_> {
@@ -607,5 +635,121 @@ impl Iterator for AnyReceivableIterator {
                 Some((key.clone(), info.clone()))
             }
         }
+    }
+}
+
+pub struct AccountRangeIterator<'a> {
+    store: &'a BtreeStore,
+    next_start: Option<Account>,
+    end_bound: core::ops::Bound<Account>,
+    batch: Vec<(Account, AccountInfo)>,
+    index: usize,
+}
+
+impl<'a> Iterator for AccountRangeIterator<'a> {
+    type Item = (Account, AccountInfo);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        const BATCH_SIZE: usize = 32;
+        if self.index >= self.batch.len() {
+            let start = self.next_start.take()?;
+            self.batch.clear();
+            if self.batch.capacity() < BATCH_SIZE {
+                self.batch.reserve(BATCH_SIZE);
+            }
+            self.index = 0;
+            let end_bound = self.end_bound;
+            let mut next_after_batch = None;
+            self.store.account.for_each_while(start, |acc, info| {
+                let in_range = match end_bound {
+                    core::ops::Bound::Included(end) => acc <= end,
+                    core::ops::Bound::Excluded(end) => acc < end,
+                    core::ops::Bound::Unbounded => true,
+                };
+                if !in_range {
+                    return false;
+                }
+                self.batch.push((acc, info));
+                if self.batch.len() >= BATCH_SIZE {
+                    next_after_batch = acc.inc();
+                    return false;
+                }
+                true
+            });
+            self.next_start = next_after_batch;
+            if self.batch.is_empty() {
+                return None;
+            }
+        }
+        let item = self.batch[self.index].clone();
+        self.index += 1;
+        Some(item)
+    }
+}
+
+pub struct PendingRangeIterator<'a> {
+    store: &'a BtreeStore,
+    next_start: Option<PendingKey>,
+    end_bound: core::ops::Bound<PendingKey>,
+    batch: Vec<(PendingKey, PendingInfo)>,
+    index: usize,
+}
+
+impl<'a> Iterator for PendingRangeIterator<'a> {
+    type Item = (PendingKey, PendingInfo);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        const BATCH_SIZE: usize = 16;
+        const MAX_DUP_STEPS: usize = 16;
+        while self.index >= self.batch.len() {
+            let start = self.next_start.take()?;
+            self.batch.clear();
+            if self.batch.capacity() < BATCH_SIZE {
+                self.batch.reserve(BATCH_SIZE);
+            }
+            self.index = 0;
+            let end_bound = self.end_bound;
+            let mut next_after_batch = None;
+            let mut dup_steps = 0usize;
+            self.store.pending.for_each_from_while(start, |key, info| {
+                let in_range = match end_bound {
+                    core::ops::Bound::Included(end) => key <= end,
+                    core::ops::Bound::Excluded(end) => key < end,
+                    core::ops::Bound::Unbounded => true,
+                };
+                if !in_range {
+                    return false;
+                }
+                let last_acc = self.batch.last().map(|(k, _)| k.receiving_account);
+                if last_acc != Some(key.receiving_account) {
+                    self.batch.push((key, info));
+                    dup_steps = 0;
+                    if self.batch.len() >= BATCH_SIZE {
+                        next_after_batch = key
+                            .receiving_account
+                            .inc()
+                            .map(|next_acc| PendingKey::new(next_acc, BlockHash::zero()));
+                        return false;
+                    }
+                } else {
+                    dup_steps += 1;
+                    if dup_steps >= MAX_DUP_STEPS {
+                        next_after_batch = key
+                            .receiving_account
+                            .inc()
+                            .map(|next_acc| PendingKey::new(next_acc, BlockHash::zero()));
+                        return false;
+                    }
+                }
+                true
+            });
+            self.next_start = next_after_batch;
+            if self.batch.is_empty() && self.next_start.is_none() {
+                return None;
+            }
+        }
+        let item = self.batch[self.index].clone();
+        self.index += 1;
+        Some(item)
     }
 }

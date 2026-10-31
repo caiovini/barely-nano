@@ -58,13 +58,14 @@ impl RpcCommandHandler {
     }
 
     fn is_local_address(&self, addr: &SocketAddrV6) -> bool {
-        addr.ip().is_loopback()
+        addr.ip().is_loopback() && addr.port() == self.node.tcp_listener.local_address().port()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv6Addr, sync::Arc};
+    use alloc::sync::Arc;
+    use core::net::Ipv6Addr;
 
     use rsnano_messages::TelemetryData;
     use rsnano_node::Node;

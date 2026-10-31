@@ -151,10 +151,11 @@ impl<'a> EncodedAccountStr<'a> {
     }
 
     fn is_length_valid(&self) -> bool {
-        if self.has_xrb_prefix() && self.0.len() != 64 {
+        let char_count = self.0.chars().count();
+        if self.has_xrb_prefix() && char_count != 64 {
             return false;
         }
-        if self.has_nano_prefix() && self.0.len() != 65 {
+        if self.has_nano_prefix() && char_count != 65 {
             return false;
         }
         true

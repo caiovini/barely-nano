@@ -68,13 +68,12 @@ impl<T: TimerStrategy> ThreadPoolImpl<T> {
 
 impl<T: TimerStrategy + 'static> ThreadPool for ThreadPoolImpl<T> {
     fn post(&self, callback: Box<dyn FnOnce() + Send>) {
-        let stopped_guard = self.stopped.lock();
-        if !*stopped_guard {
-            let data_guard = self.data.lock();
-            drop(stopped_guard);
-            if let Some(data) = data_guard.as_ref() {
-                data.push_task(callback);
-            }
+        let can_run = {
+            let stopped_guard = self.stopped.lock();
+            !*stopped_guard && self.data.lock().is_some()
+        };
+        if can_run {
+            callback();
         }
     }
 

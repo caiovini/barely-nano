@@ -37,11 +37,12 @@ impl<'a> BlockInserter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn insert(&mut self) -> Option<SavedBlock> {
-        if self.account_changed_since_validation() {
-            return None;
-        }
+        self.insert_with_options(false)
+    }
 
+    pub(crate) fn insert_with_options(&mut self, defer_btree_tables: bool) -> Option<SavedBlock> {
         let sideband = self.instructions.set_sideband.clone();
         let saved_block = SavedBlock::new(self.block.clone(), sideband);
         
@@ -51,23 +52,38 @@ impl<'a> BlockInserter<'a> {
             saved_block.account().encode_account()
         );
 
-        self.ledger.store.block.put(&saved_block);
-        
-        if !saved_block.previous().is_zero() {
-            self.ledger.store.successors.put(
-                &saved_block.previous(),
-                &saved_block.hash(),
-            );
+        if !defer_btree_tables {
+            self.ledger.store.block.put(&saved_block);
+            
+            if !saved_block.previous().is_zero() {
+                self.ledger.store.successors.put(
+                    &saved_block.previous(),
+                    &saved_block.hash(),
+                );
+            }
+            
+            self.update_account();
+        } else if !self.instructions.set_account_info.head.is_zero()
+            && self.instructions.old_account_info.head.is_zero()
+            && self.instructions.set_account_info.open_block == self.instructions.set_account_info.head
+        {
+            self.ledger
+                .store
+                .cache
+                .account_count
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         }
-        
-        self.update_account();
+
         self.delete_old_pending_info();
         self.insert_new_pending_info();
-        self.update_representative_cache();
+        if !defer_btree_tables {
+            self.update_representative_cache();
+        }
 
         Some(saved_block)
     }
 
+    #[allow(dead_code)]
     fn account_changed_since_validation(&mut self) -> bool {
         let account_info = self.get_current_account_info();
         let account_changed_since_validation =
@@ -75,6 +91,7 @@ impl<'a> BlockInserter<'a> {
         account_changed_since_validation
     }
 
+    #[allow(dead_code)]
     fn get_current_account_info(&mut self) -> AccountInfo {
         let account_info = self
             .ledger

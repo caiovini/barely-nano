@@ -25,6 +25,7 @@ pub struct BlockProcessorQueue {
     condition: Condvar,
     is_nulled: bool,
     wait_listener: OutputListenerMt<Duration>,
+    signature_checker: Mutex<Option<Arc<crate::signatures::SignatureChecker>>>,
 }
 
 impl BlockProcessorQueue {
@@ -34,7 +35,15 @@ impl BlockProcessorQueue {
             condition: Condvar::new(),
             is_nulled: false,
             wait_listener: OutputListenerMt::new(),
+            signature_checker: Mutex::new(None),
         }
+    }
+
+    pub fn set_signature_checker(
+        &self,
+        checker: Arc<crate::signatures::SignatureChecker>,
+    ) {
+        *self.signature_checker.lock() = Some(checker);
     }
 
     pub fn new_null() -> Self {
@@ -54,6 +63,7 @@ impl BlockProcessorQueue {
             condition: Condvar::new(),
             is_nulled: true,
             wait_listener: OutputListenerMt::new(),
+            signature_checker: Mutex::new(None),
         }
     }
 
@@ -147,14 +157,43 @@ impl BlockProcessorQueue {
     }
 
     pub fn push(&self, context: impl Into<Arc<BlockContext>>) -> bool {
-        let context = context.into();
-        let added = self.queue.lock().push(context);
+        let context: Arc<BlockContext> = context.into();
+        let hash = context.block.hash();
+        let added = {
+            let mut guard = self.queue.lock();
+            if guard.can_push(context.source, context.channel_id, &hash) {
+                guard.push(context)
+            } else {
+                guard.record_overfill(context.source);
+                false
+            }
+        };
 
         if added {
             self.condition.notify_one();
         }
 
         added
+    }
+
+    pub fn push_batch(&self, contexts: impl IntoIterator<Item = BlockContext>) {
+        let mut any_added = false;
+        {
+            let mut guard = self.queue.lock();
+            for ctx in contexts {
+                let hash = ctx.block.hash();
+                if guard.can_push(ctx.source, ctx.channel_id, &hash) {
+                    if guard.push(Arc::new(ctx)) {
+                        any_added = true;
+                    }
+                } else {
+                    guard.record_overfill(ctx.source);
+                }
+            }
+        }
+        if any_added {
+            self.condition.notify_one();
+        }
     }
 
     pub fn try_push(&self, context: impl Into<Arc<BlockContext>>) -> Result<bool, ()> {
@@ -177,12 +216,12 @@ impl BlockProcessorQueue {
     ) -> anyhow::Result<Result<SavedBlock, BlockError>> {
         let channel_id = ChannelId::LOOPBACK;
 
-        let ctx = Arc::new(BlockContext::new(
+        let (ctx_inner, waiter) = BlockContext::new_blocking(
             block.as_ref().clone(),
             source,
             channel_id,
-        ));
-        let waiter = ctx.get_waiter();
+        );
+        let ctx = Arc::new(ctx_inner);
         self.push(ctx.clone());
 
         match waiter.wait_result() {
@@ -224,7 +263,9 @@ impl DeadChannelCleanupStep for BlockProcessorQueue {
 
 impl StatsSource for BlockProcessorQueue {
     fn collect_stats(&self, result: &mut StatsCollection) {
-        self.queue.lock().collect_stats(result)
+        if let Some(guard) = self.queue.try_lock() {
+            guard.collect_stats(result);
+        }
     }
 }
 
@@ -272,6 +313,20 @@ impl BlockProcessorQueueImpl {
 
     pub fn total_queue_len(&self) -> usize {
         self.process_queue.len()
+    }
+
+    pub fn can_push(
+        &self,
+        source: BlockSource,
+        channel_id: ChannelId,
+        hash: &rsnano_core::BlockHash,
+    ) -> bool {
+        !self.stopped && self.process_queue.can_push(source, channel_id, hash)
+    }
+
+    pub fn record_overfill(&mut self, source: BlockSource) {
+        self.overfill_count += 1;
+        self.overfill_by_source[source as usize] += 1;
     }
 
     pub fn push(&mut self, context: Arc<BlockContext>) -> bool {

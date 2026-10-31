@@ -107,7 +107,7 @@ impl NetworkConstants {
             telemetry_request_interval_ms: 1000 * 60,
             telemetry_broadcast_interval_ms: 1000 * 60,
             telemetry_cache_cutoff_ms: 1000 * 130, //  2 * `telemetry_broadcast_interval` + some margin
-            optimistic_activation_delay: Duration::from_secs(30),
+            optimistic_activation_delay: Duration::from_secs(5),
             rep_crawler_normal_interval: Duration::from_secs(7),
             rep_crawler_warmup_interval: Duration::from_secs(3),
         }

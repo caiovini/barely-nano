@@ -88,11 +88,14 @@ impl<'a> BlockValidator<'a> {
     pub fn ensure_epoch_block_candidate_is_signed_by_owner_or_epoch_account(
         &self,
     ) -> Result<(), BlockError> {
+        if self.signature_verified || self.block.is_signature_verified() {
+            return Ok(());
+        }
         if let Block::State(state_block) = self.block {
             // Check for possible regular state blocks with epoch link (send subtype)
             if self.has_epoch_link(state_block)
-                && (state_block.verify_signature().is_err()
-                    && self.epochs.validate_epoch_signature(self.block).is_err())
+                && (self.epochs.validate_epoch_signature(self.block).is_err()
+                    && state_block.verify_signature().is_err())
             {
                 tracing::error!(
                     "Validation: BadSignature (Epoch Candidate) - Hash: {}, Account: {}",

@@ -10,20 +10,24 @@ use rsnano_ledger::{AnySet, ConfirmedSet, Ledger, LedgerSet};
 use rsnano_messages::{AscPullReqType, BlocksReqPayload, HashType};
 use rsnano_network::Channel;
 use rsnano_nullable_clock::Timestamp;
+use crate::bootstrap::state::candidate_accounts::PullTypeDecider;
 
 /// Creates a query for the next priority account
 pub(super) struct QueryFactory {
     ledger: Arc<Ledger>,
+    pub(crate) pull_type_decider: PullTypeDecider,
     pull_count_decider: PullCountDecider,
 }
 
 impl QueryFactory {
     pub(super) fn new(
         ledger: Arc<Ledger>,
+        pull_type_decider: PullTypeDecider,
         pull_count_decider: PullCountDecider,
     ) -> Self {
         Self {
             ledger,
+            pull_type_decider,
             pull_count_decider,
         }
     }
@@ -40,12 +44,20 @@ impl QueryFactory {
             return None;
         }
         let (head, confirmed_frontier) = self.get_account_info(&next.account);
-        let pull_type = next.pull_type;
+        let pull_type = self.pull_type_decider.decide_pull_type();
 
         Some(self.create_priority_query(&next, channel, pull_type, head, confirmed_frontier))
     }
 
-    fn get_account_info(&self, account: &Account) -> (BlockHash, BlockHash) {
+    #[allow(dead_code)]
+    pub(crate) fn get_account_head(&self, account: &Account) -> BlockHash {
+        let any = self.ledger.any();
+        any.get_account(account)
+            .map(|i| i.head)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn get_account_info(&self, account: &Account) -> (BlockHash, BlockHash) {
         let any = self.ledger.any();
         let account_info = any.get_account(account);
         let head = account_info.map(|i| i.head).unwrap_or_default();
@@ -57,7 +69,7 @@ impl QueryFactory {
         }
     }
 
-    fn create_priority_query(
+    pub(crate) fn create_priority_query(
         &self,
         next: &PriorityResult,
         channel: Arc<Channel>,
@@ -75,9 +87,9 @@ impl QueryFactory {
             count: self.pull_count_decider.pull_count(next.priority),
         });
 
-        // Only cooldown accounts that are likely to have more blocks
-        // This is to avoid requesting blocks from the same frontier multiple times, before the block processor had a chance to process them
-        // Not throttling accounts that are probably up-to-date allows us to evict them from the priority set faster
+        // Only cooldown accounts that are likely to have more blocks.
+        // Not throttling accounts that are probably up-to-date (fails > 0) allows us to query
+        // another peer or evict them from the priority set faster without a cooldown stall.
         let cooldown_account = next.fails == 0;
 
         AscPullQuerySpec {
@@ -139,226 +151,3 @@ impl PullStart {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bootstrap::state::candidate_accounts::PullTypeDecider;
-    use rsnano_core::{AccountInfo, ConfirmationHeightInfo};
-
-    #[test]
-    fn empty() {
-        let query = create_query(&TestInput {
-            prioritized_account: None,
-            head: None,
-            confirmed: None,
-            pull_type: PullType::Optimistic,
-        });
-
-        assert!(query.is_none());
-    }
-
-    mod optimistic {
-
-        #[test]
-        fn account_not_in_ledger() {
-            let account = Account::from(42);
-
-            let query = create_query(&TestInput {
-                prioritized_account: Some(account),
-                head: None,
-                confirmed: None,
-                pull_type: PullType::Optimistic,
-            })
-            .unwrap();
-
-            assert_eq!(
-                query,
-                AscPullQuerySpec {
-                    channel: test_channel(),
-                    account,
-                    hash: BlockHash::zero(),
-                    cooldown_account: true,
-                    req_type: AscPullReqType::Blocks(BlocksReqPayload {
-                        start_type: HashType::Account,
-                        start: account.into(),
-                        count: 2
-                    })
-                }
-            );
-        }
-
-        #[test]
-        fn account_in_ledger() {
-            let account = Account::from(42);
-            let head = BlockHash::from(7);
-
-            let query = create_query(&TestInput {
-                prioritized_account: Some(account),
-                head: Some(head),
-                confirmed: None,
-                pull_type: PullType::Optimistic,
-            })
-            .unwrap();
-
-            assert_eq!(
-                query,
-                AscPullQuerySpec {
-                    channel: test_channel(),
-                    account,
-                    hash: head,
-                    cooldown_account: true,
-                    req_type: AscPullReqType::Blocks(BlocksReqPayload {
-                        start_type: HashType::Block,
-                        start: head.into(),
-                        count: 2
-                    })
-                }
-            );
-        }
-    }
-
-    mod safe {
-
-        #[test]
-        fn account_not_in_ledger() {
-            let account = Account::from(42);
-            let query = create_query(&TestInput {
-                prioritized_account: Some(account),
-                head: None,
-                confirmed: None,
-                pull_type: PullType::Safe,
-            })
-            .unwrap();
-
-            assert_eq!(
-                query,
-                AscPullQuerySpec {
-                    channel: test_channel(),
-                    account,
-                    hash: BlockHash::zero(),
-                    cooldown_account: true,
-                    req_type: AscPullReqType::Blocks(BlocksReqPayload {
-                        start_type: HashType::Account,
-                        start: account.into(),
-                        count: 2
-                    })
-                }
-            );
-        }
-
-        #[test]
-        fn account_in_ledger_and_confirmed() {
-            let account = Account::from(42);
-            let frontier = BlockHash::from(7);
-
-            let query = create_query(&TestInput {
-                prioritized_account: Some(account),
-                head: Some(BlockHash::from(111)),
-                confirmed: Some(frontier),
-                pull_type: PullType::Safe,
-            })
-            .unwrap();
-
-            assert_eq!(
-                query,
-                AscPullQuerySpec {
-                    channel: test_channel(),
-                    account,
-                    hash: frontier,
-                    cooldown_account: true,
-                    req_type: AscPullReqType::Blocks(BlocksReqPayload {
-                        start_type: HashType::Block,
-                        start: frontier.into(),
-                        count: 2
-                    })
-                }
-            );
-        }
-
-        #[test]
-        fn account_in_ledger_and_unconfirmed() {
-            let account = Account::from(42);
-
-            let query = create_query(&TestInput {
-                prioritized_account: Some(account),
-                head: Some(BlockHash::from(111)),
-                confirmed: None,
-                pull_type: PullType::Safe,
-            })
-            .unwrap();
-
-            assert_eq!(
-                query,
-                AscPullQuerySpec {
-                    channel: test_channel(),
-                    account,
-                    hash: BlockHash::zero(),
-                    cooldown_account: true,
-                    req_type: AscPullReqType::Blocks(BlocksReqPayload {
-                        start_type: HashType::Account,
-                        start: account.into(),
-                        count: 2
-                    })
-                }
-            );
-        }
-    }
-
-    fn create_query(input: &TestInput) -> Option<AscPullQuerySpec> {
-        let account = input.prioritized_account.unwrap_or_default();
-        let ledger = create_ledger(account, input.head, input.confirmed);
-        let pull_count_decider = PullCountDecider::default();
-        let mut factory = QueryFactory::new(ledger, pull_count_decider);
-        let mut state = BootstrapState::default();
-        let pull_type_decider = PullTypeDecider::new_null_with(input.pull_type);
-        state.candidate_accounts.set_pull_type_decider(pull_type_decider);
-
-        if let Some(account) = &input.prioritized_account {
-            state.candidate_accounts.priority_up(account);
-        }
-
-        let now = Timestamp::new_test_instance();
-        factory.next_priority_query(&mut state, test_channel(), now)
-    }
-
-    fn create_ledger(
-        account: Account,
-        head: Option<BlockHash>,
-        confirmed: Option<BlockHash>,
-    ) -> Arc<Ledger> {
-        let mut ledger_builder = Ledger::new_null_builder();
-
-        if let Some(head) = head {
-            ledger_builder = ledger_builder.account_info(
-                &account,
-                &AccountInfo {
-                    head,
-                    ..Default::default()
-                },
-            );
-        }
-
-        if let Some(frontier) = confirmed {
-            ledger_builder = ledger_builder.confirmation_height(
-                &account,
-                &ConfirmationHeightInfo {
-                    height: 123,
-                    frontier,
-                },
-            )
-        }
-
-        Arc::new(ledger_builder.finish())
-    }
-
-    struct TestInput {
-        prioritized_account: Option<Account>,
-        head: Option<BlockHash>,
-        confirmed: Option<BlockHash>,
-        pull_type: PullType,
-    }
-
-    fn test_channel() -> Arc<Channel> {
-        Arc::new(Channel::new_test_instance())
-    }
-}

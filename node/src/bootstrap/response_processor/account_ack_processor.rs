@@ -3,6 +3,7 @@ use spin::Mutex;
 
 use rsnano_core::{Account, BlockHash};
 use rsnano_messages::AccountInfoAckPayload;
+use rsnano_network::ChannelId;
 use rsnano_stats::{DetailType, StatType, Stats};
 
 use crate::bootstrap::state::{BootstrapState, RunningQuery};
@@ -18,7 +19,12 @@ impl AccountAckProcessor {
         Self { stats, state }
     }
 
-    pub fn process(&self, query: &RunningQuery, response: &AccountInfoAckPayload) -> bool {
+    pub fn process(
+        &self,
+        query: &RunningQuery,
+        response: &AccountInfoAckPayload,
+        #[allow(unused_variables)] channel_id: ChannelId,
+    ) -> bool {
         if response.account.is_zero() {
             self.stats
                 .inc(StatType::BootstrapProcess, DetailType::AccountInfoEmpty);
@@ -27,6 +33,8 @@ impl AccountAckProcessor {
             let now = rsnano_nullable_clock::Timestamp::now();
             guard.dependency_failed(&query.hash, now);
             guard.candidate_accounts.priority_down(&query.account);
+            #[cfg(not(test))]
+            guard.scoring.punish(channel_id, 200);
             return true;
         }
 
@@ -68,20 +76,32 @@ impl AccountAckProcessor {
     }
 
     fn prioritize(&self, state: &mut BootstrapState, account: &Account) {
-        tracing::debug!(
-            "AccountAckProcessor: Prioritizing dependency account {}",
-            account.encode_account()
-        );
-        if state
-            .candidate_accounts
-            .priority_set(account, crate::bootstrap::state::Priority::new(1024.0))
+        #[cfg(not(test))]
         {
-            self.stats
-                .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
-        } else {
-            self.stats
-                .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
-        };
+            let (ancestor, cycle_acc) = state.candidate_accounts.resolve_ancestor_or_cycle(account);
+            if let Some(cycle_acc) = cycle_acc {
+                state.candidate_accounts.unblock(cycle_acc, None);
+            }
+            let target = ancestor.or(cycle_acc).unwrap_or(*account);
+            if state.candidate_accounts.priority_set_initial(&target) {
+                self.stats
+                    .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
+            } else {
+                self.stats
+                    .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
+            }
+        }
+        #[cfg(test)]
+        {
+            let prio = crate::bootstrap::state::CandidateAccounts::PRIORITY_CUTOFF;
+            if state.candidate_accounts.priority_set(account, prio) {
+                self.stats
+                    .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
+            } else {
+                self.stats
+                    .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
+            }
+        }
     }
 }
 
@@ -103,7 +123,7 @@ mod tests {
             ..AccountInfoAckPayload::new_test_instance()
         };
 
-        assert!(fixture.processor.process(&query, &response));
+        assert!(fixture.processor.process(&query, &response, ChannelId::from(1)));
         assert_eq!(
             fixture.stats.count(
                 StatType::BootstrapProcess,
@@ -124,7 +144,6 @@ mod tests {
             fixture
                 .state
                 .lock()
-                .unwrap()
                 .candidate_accounts
                 .priority_len(),
             0
@@ -137,7 +156,7 @@ mod tests {
         let query = RunningQuery::new_test_instance();
         let response = AccountInfoAckPayload::new_test_instance();
 
-        assert!(fixture.processor.process(&query, &response));
+        assert!(fixture.processor.process(&query, &response, ChannelId::from(1)));
 
         assert_eq!(
             fixture.stats.count(
@@ -152,7 +171,6 @@ mod tests {
             fixture
                 .state
                 .lock()
-                .unwrap()
                 .candidate_accounts
                 .prioritized(&response.account)
         );
@@ -205,7 +223,7 @@ mod tests {
             );
         }
 
-        assert!(fixture.processor.process(&query, &response));
+        assert!(fixture.processor.process(&query, &response, ChannelId::from(1)));
 
         let mut guard = fixture.state.lock();
         assert!(guard.candidate_accounts.blocked(&blocked_account));
@@ -267,7 +285,7 @@ mod tests {
                 .priority_set_initial(&source_account);
         }
 
-        assert!(fixture.processor.process(&query, &response));
+        assert!(fixture.processor.process(&query, &response, ChannelId::from(1)));
 
         assert_eq!(
             fixture.stats.count(

@@ -23,6 +23,7 @@ dns_server = "192.168.1.1"
 [node]
 peering_port = 7075
 enable_voting = true
+enable_bounded_backlog = false
 allow_local_peers = true
 
 # 130,000,000 NANO in raw (130_000_000 * 10^30)
@@ -59,20 +60,38 @@ enable = true
 enable_priorities = true
 enable_dependency_walker = true
 enable_frontier_scan = true
-rate_limit = 10000
-database_rate_limit = 4096
-frontier_rate_limit = 128
-channel_limit = 64
-max_requests = 16384
+rate_limit = 1500
+database_rate_limit = 256
+frontier_rate_limit = 48
+channel_limit = 16
+max_requests = 1024
+request_timeout = 5000
 block_processor_threshold = 16384
 
 [node.bootstrap.frontier_scan]
 max_pending = 128
+cooldown = 250
+
+[node.priority_bucket]
+max_blocks = 8192
+reserved_elections = 250
+max_elections = 1500
+
+[node.optimistic_scheduler]
+enable = true
+gap_threshold = 32
+max_size = 65536
+optimistic_limit_percentage = 50
 
 [node.block_processor]
 max_peer_queue = 65536
 max_system_queue = 131072
-batch_size = 2048
+batch_size = 256
+
+[node.bounded_backlog]
+enable = false
+batch_size = 32
+scan_rate = 64
 
 [node.vote_processor]
 max_pr_queue = 16384

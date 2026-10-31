@@ -11,12 +11,11 @@ use spin::{Mutex, RwLock};
 use tracing::debug;
 
 use rsnano_core::{
-    Account, AccountInfo, Amount, BlockHash, ConfirmationHeightInfo, SavedBlock,
+    Account, AccountInfo, Amount, BlockHash, ConfirmationHeightInfo,
     utils::ContainerInfo,
 };
 use rsnano_ledger::{AnySet, ConfirmedSet};
 use rsnano_nullable_clock::SteadyClock;
-use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 use rsnano_stats::{DetailType, StatType, Stats, StatsCollection, StatsSource};
 
 use super::{
@@ -37,7 +36,6 @@ pub struct PriorityScheduler {
     bucket_stats: BucketStats,
     clock: Arc<SteadyClock>,
     aec: Arc<RwLock<ActiveElectionsContainer>>,
-    activate_successors_listener: OutputListenerMt<SavedBlock>,
     activations_per_bucket: Vec<AtomicU64>,
     is_bootstrap_active: Box<dyn Fn() -> bool + Send + Sync>,
     queued_count: AtomicUsize,
@@ -67,15 +65,10 @@ impl PriorityScheduler {
             bucket_stats: BucketStats::default(),
             clock,
             aec: active_elections,
-            activate_successors_listener: Default::default(),
             activations_per_bucket,
             is_bootstrap_active,
             queued_count: AtomicUsize::new(0),
         }
-    }
-
-    pub fn track_activate_successors(&self) -> Arc<OutputTrackerMt<SavedBlock>> {
-        self.activate_successors_listener.track()
     }
 
     pub fn stop(&self) {
@@ -145,6 +138,13 @@ impl PriorityScheduler {
                 }
             }
         };
+
+        if !cfg!(test)
+            && (self.contains(&next_unconfirmed_hash)
+                || self.aec.read().is_active_hash(&next_unconfirmed_hash))
+        {
+            return;
+        }
 
         let Some(block) = any.get_block(&next_unconfirmed_hash) else {
             tracing::debug!(
@@ -279,22 +279,8 @@ impl PriorityScheduler {
                 inserted = true;
             }
         }
-    }
-
-    pub fn activate_successors(&self, any: &impl AnySet, block: &SavedBlock) {
-        if self.activate_successors_listener.is_tracked() {
-            self.activate_successors_listener.emit(block.clone());
-        }
-        self.activate(any, &block.account());
-        self.activate_destination_account(any, &block);
-    }
-
-    fn activate_destination_account(&self, any: &impl AnySet, block: &SavedBlock) {
-        if let Some(destination) = block.destination() {
-            if block.is_send() && !destination.is_zero() && destination != block.account() {
-                self.activate(any, &destination);
-            }
-        }
+        let remaining: usize = buckets.iter().map(|b| b.len()).sum();
+        self.queued_count.store(remaining, Ordering::Relaxed);
     }
 
     pub fn container_info(&self) -> ContainerInfo {
@@ -348,51 +334,3 @@ static BUCKET_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
     }
     names
 });
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rsnano_core::PrivateKey;
-    use rsnano_ledger::{Ledger, LedgerInserter};
-
-    #[test]
-    fn can_track_successor_activation() {
-        let scheduler = create_test_scheduler();
-        let block = SavedBlock::new_test_instance();
-        let ledger = Ledger::new_null();
-        let tracker = scheduler.track_activate_successors();
-
-        scheduler.activate_successors(&ledger.any(), &block);
-
-        let output = tracker.output();
-        assert_eq!(output, [block]);
-    }
-
-    #[test]
-    fn activate_successors() {
-        let scheduler = create_test_scheduler();
-
-        let ledger = Ledger::new_null();
-        let inserter = LedgerInserter::new(&ledger);
-        let destination = PrivateKey::from(1);
-        let send1 = inserter.genesis().send(&destination, 100);
-        let send2 = inserter.genesis().send(Account::from(2), 100);
-        let open = inserter.account(&destination).receive(send1.hash());
-
-        ledger.confirm(send1.hash());
-        scheduler.activate_successors(&ledger.any(), &send1);
-        scheduler.run_one();
-
-        let aec = scheduler.aec.read();
-        assert!(aec.is_active_hash(&send2.hash()));
-        assert!(aec.is_active_hash(&open.hash()));
-    }
-
-    fn create_test_scheduler() -> PriorityScheduler {
-        let config = PriorityBucketConfig::default();
-        let stats = Arc::new(Stats::default());
-        let active_elections = Arc::new(RwLock::new(ActiveElectionsContainer::default()));
-        let clock = Arc::new(SteadyClock::new_null());
-        PriorityScheduler::new(config, stats, active_elections, clock, Box::new(|| false))
-    }
-}

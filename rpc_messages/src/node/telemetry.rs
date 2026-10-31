@@ -126,7 +126,7 @@ pub struct RawTelemetryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsnano_core::{to_hex_string, BlockHash, Signature};
+    use rsnano_core::{to_hex_string, utils::UnixMillisTimestamp, BlockHash, Signature};
     use rsnano_messages::TelemetryData;
 
     fn create_test_telemetry_data() -> TelemetryData {

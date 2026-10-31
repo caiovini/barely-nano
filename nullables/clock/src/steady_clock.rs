@@ -76,9 +76,16 @@ impl TimeSource {
     fn now(&self) -> i128 {
         match self {
             TimeSource::Hardware => {
-                // CLINT is 24 MHz, so 1 tick = 41.666 ns
-                // Exact formula: mtime * 1_000_000_000 / 24_000_000 = mtime * 1000 / 24 = mtime * 125 / 3
-                ((kernel_common::clint::mtime() as i128) * 125) / 3
+                #[cfg(target_arch = "riscv64")]
+                {
+                    // CLINT is 24 MHz, so 1 tick = 41.666 ns
+                    // Exact formula: mtime * 1_000_000_000 / 24_000_000 = mtime * 1000 / 24 = mtime * 125 / 3
+                    ((kernel_common::clint::mtime() as i128) * 125) / 3
+                }
+                #[cfg(not(target_arch = "riscv64"))]
+                {
+                    DEFAULT_STUB_DURATION
+                }
             }
             TimeSource::Stub(nows) => {
                 let mut guard = nows.lock();

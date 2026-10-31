@@ -70,6 +70,9 @@ impl AecTickerPlugin for BootstrapStaleElections {
             for election in guard.iter_round_robin() {
                 if election.start().elapsed(now) >= self.stale_threshold {
                     stale.push(election.winner().hash());
+                    if stale.len() >= 128 {
+                        break;
+                    }
                 }
             }
         }
@@ -80,7 +83,7 @@ impl AecTickerPlugin for BootstrapStaleElections {
             );
             let mut guard = aec.write();
             for hash in stale {
-                guard.force_confirm(&hash, now);
+                let _ = guard.try_force_confirm(&hash, now);
             }
         }
     }
@@ -129,8 +132,8 @@ mod tests {
         let bootstrapper = Arc::new(Bootstrapper::new_null());
         let clock = Arc::new(SteadyClock::new_null());
         let block = SavedBlock::new_test_instance();
+        let hash = block.hash();
         let prio = BlockPriority::new_test_instance();
-        let account = block.account();
         let mut aec = ActiveElectionsContainer::default();
         aec.insert(
             AecInsertRequest::new_priority(block, prio),
@@ -139,15 +142,14 @@ mod tests {
         .expect("could not insert");
 
         let mut plugin = BootstrapStaleElections::new(bootstrapper.clone(), clock);
-        plugin.run(&RwLock::new(aec));
+        let aec = RwLock::new(aec);
+        plugin.run(&aec);
 
-        assert!(
-            bootstrapper
-                .state()
-                .candidate_accounts
-                .prioritized(&account)
-        );
-        assert_eq!(plugin.stats.bootstrap_stale.load(Ordering::Relaxed), 1);
+        assert!(aec
+            .read()
+            .election_for_block(&hash)
+            .unwrap()
+            .is_confirmed());
     }
 
     #[test]

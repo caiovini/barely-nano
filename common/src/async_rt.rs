@@ -136,8 +136,13 @@ impl Executor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        // Hart 0 is reserved/skipped on SpacemiT K1, so only schedule on harts 1-7
-        let hart_id = (self.next_spawn_hart.fetch_add(1, Ordering::Relaxed) % 7) + 1;
+        // Hart 0 is reserved/skipped on SpacemiT K1, Hart 1 is dedicated to Network/RPC polling,
+        // Harts 2 & 3 are dedicated to lock-free Crypto (Ed25519) & MessageProcessor draining,
+        // and Hart 6 is dedicated to single-writer Ledger Commit, so schedule async tasks across
+        // worker harts [4, 5, 7].
+        const WORKER_HARTS: [u8; 3] = [4, 5, 7];
+        let idx = (self.next_spawn_hart.fetch_add(1, Ordering::Relaxed) as usize) % WORKER_HARTS.len();
+        let hart_id = WORKER_HARTS[idx];
         
         let task = Arc::new(Task {
             future: Mutex::new(Some(Box::pin(future))),
@@ -162,12 +167,11 @@ impl Executor {
         // crate::uart::putchar(b'{');
         // crate::uart::putchar(b'0' + hart_id as u8);
 
-        task.state.store(STATE_IDLE, Ordering::SeqCst);
-
         let waker = Waker::from(task.clone());
         let mut cx = Context::from_waker(&waker);
 
         let mut future_guard = task.future.lock();
+        task.state.store(STATE_IDLE, Ordering::SeqCst);
         let future = match future_guard.as_mut() {
             Some(f) => f,
             None => {
@@ -210,9 +214,12 @@ impl Executor {
             return Some(task);
         }
 
-        // 3. Work Stealing: Try other queues
-        for i in 1..8 {
-            let victim_id = (hart_id + i) % 8;
+        // 3. Work Stealing: Try other worker queues
+        const WORKER_HARTS: [usize; 3] = [4, 5, 7];
+        for &victim_id in &WORKER_HARTS {
+            if victim_id == hart_id {
+                continue;
+            }
             if let Some(mut victim_queue) = self.local_queues[victim_id].try_lock() {
                 if let Some(task) = victim_queue.pop_back() {
                     task.assigned_hart.store(hart_id as u8, Ordering::Relaxed);

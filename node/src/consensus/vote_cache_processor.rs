@@ -14,6 +14,7 @@ use super::{VoteCache, VoteProcessorConfig, VoteProcessorQueue};
 
 pub struct VoteCacheProcessor {
     state: Arc<Mutex<State>>,
+    pending_count: core::sync::atomic::AtomicUsize,
     condition: Arc<Condvar>,
     stats: Arc<Stats>,
     vote_cache: Arc<Mutex<VoteCache>>,
@@ -34,6 +35,7 @@ impl VoteCacheProcessor {
                 stopped: false,
                 triggered: VecDeque::new(),
             })),
+            pending_count: core::sync::atomic::AtomicUsize::new(0),
             condition: Arc::new(Condvar::new()),
             stats,
             vote_queue,
@@ -48,14 +50,26 @@ impl VoteCacheProcessor {
         // ...
     }
 
-    pub fn run_once(&self) {
+    #[inline]
+    pub fn is_empty_relaxed(&self) -> bool {
+        self.pending_count.load(core::sync::atomic::Ordering::Relaxed) == 0
+    }
+
+    pub fn run_once(&self) -> bool {
+        if self.is_empty_relaxed() {
+            return false;
+        }
         let triggered = {
-            let mut state = self.state.lock();
+            let Some(mut state) = self.state.try_lock() else {
+                return false;
+            };
             if state.stopped || state.triggered.is_empty() {
-                return;
+                self.pending_count.store(0, core::sync::atomic::Ordering::Relaxed);
+                return false;
             }
             let mut triggered = VecDeque::new();
             core::mem::swap(&mut triggered, &mut state.triggered);
+            self.pending_count.store(0, core::sync::atomic::Ordering::Relaxed);
             triggered
         };
 
@@ -75,6 +89,7 @@ impl VoteCacheProcessor {
                     .enqueue(cached_vote, None, VoteSource::Cache, Some(hash));
             }
         }
+        true
     }
 
     pub fn stop(&self) {
@@ -100,6 +115,7 @@ impl VoteCacheProcessor {
                     .inc(StatType::VoteCacheProcessor, DetailType::Overfill);
             }
             state.triggered.push_back(hash);
+            self.pending_count.store(state.triggered.len(), core::sync::atomic::Ordering::Release);
         }
         self.condition.notify_all();
         self.stats

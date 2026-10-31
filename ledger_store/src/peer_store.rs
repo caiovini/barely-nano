@@ -17,14 +17,18 @@ impl BtreePeerStore {
         key
     }
 
-    pub fn put(&self, endpoint: SocketAddrV6, _timestamp: SystemTime) {
+    pub fn put(&self, endpoint: SocketAddrV6, timestamp: SystemTime) {
         let key = self.make_key(&endpoint);
-        let value = &[]; // Just mark existence
+        let secs = timestamp
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let value = secs.to_be_bytes();
         
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.insert(key, value);
+            db.insert(key, &value);
         }
     }
 
@@ -42,7 +46,7 @@ impl BtreePeerStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.search(&key).is_some()
+            db.contains_key(&key)
         } else {
             false
         }
@@ -59,14 +63,25 @@ impl BtreePeerStore {
             let mut lock = SHARDS[i].lock();
             if let Some(db) = lock.as_mut() {
                 let mut it = db.iter(start_key);
-                while let Some((k, _)) = it.next_kv() {
+                while let Some(step) = it.next_kv_with(|k, v| {
                     if k[0] != Self::TABLE_ID {
-                        break;
+                        return Err(());
                     }
                     let ip = core::net::Ipv6Addr::from(<[u8; 16]>::try_from(&k[1..17]).unwrap());
                     let port = u16::from_be_bytes(k[17..19].try_into().unwrap());
                     let endpoint = SocketAddrV6::new(ip, port, 0, 0);
-                    f(endpoint, SystemTime::UNIX_EPOCH); // Placeholder time
+                    let ts = if v.len() >= 8 {
+                        let secs = u64::from_be_bytes(v[0..8].try_into().unwrap());
+                        SystemTime::UNIX_EPOCH + core::time::Duration::from_secs(secs)
+                    } else {
+                        SystemTime::UNIX_EPOCH
+                    };
+                    Ok((endpoint, ts))
+                }) {
+                    match step {
+                        Ok((endpoint, ts)) => f(endpoint, ts),
+                        Err(()) => break,
+                    }
                 }
             }
         }

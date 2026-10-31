@@ -7,6 +7,7 @@ pub struct OptimisticSchedulerToml {
     pub enable: Option<bool>,
     pub gap_threshold: Option<u64>,
     pub max_size: Option<usize>,
+    pub optimistic_limit_percentage: Option<usize>,
 }
 
 impl Default for OptimisticSchedulerToml {
@@ -16,6 +17,7 @@ impl Default for OptimisticSchedulerToml {
             enable: Some(true),
             gap_threshold: Some(config.gap_threshold),
             max_size: Some(config.max_size),
+            optimistic_limit_percentage: Some(config.optimistic_limit_percentage),
         }
     }
 }
@@ -27,6 +29,9 @@ impl OptimisticSchedulerConfig {
         }
         if let Some(max_size) = toml.max_size {
             self.max_size = max_size;
+        }
+        if let Some(optimistic_limit_percentage) = toml.optimistic_limit_percentage {
+            self.optimistic_limit_percentage = optimistic_limit_percentage;
         }
     }
 }

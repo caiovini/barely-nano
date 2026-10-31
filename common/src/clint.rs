@@ -3,9 +3,16 @@ pub const FREQ: u64 = 24_000_000;
 
 /// Read the current time from the `time` CSR virtualised by OpenSBI.
 pub fn mtime_raw() -> u64 {
-    let t: u64;
-    unsafe { core::arch::asm!("csrr {}, time", out(reg) t, options(nostack)) };
-    t
+    #[cfg(target_arch = "riscv64")]
+    {
+        let t: u64;
+        unsafe { core::arch::asm!("csrr {}, time", out(reg) t, options(nostack)) };
+        t
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        0
+    }
 }
 
 pub fn mtime() -> u64 {

@@ -1253,6 +1253,9 @@ pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bo
     
     let mut s_le = [0u8; 32];
     s_le.copy_from_slice(&signature[32..]);
+    if (s_le[31] & 0xE0) != 0 {
+        s_le = Scalar::from_bytes_wide_32(&s_le).to_bytes();
+    }
     
     let sb_minus_ka = Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_table, &k_bytes);
     sb_minus_ka.equals_signature_r((&signature[..32]).try_into().unwrap())
@@ -1300,6 +1303,9 @@ pub fn verify_batch_4(
             
             let mut s_le = [0u8; 32];
             s_le.copy_from_slice(&signatures[i][32..]);
+            if (s_le[31] & 0xE0) != 0 {
+                s_le = Scalar::from_bytes_wide_32(&s_le).to_bytes();
+            }
             
             sb_minus_ka[i] = Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_tables[i], &k_bytes);
         }

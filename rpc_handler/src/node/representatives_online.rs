@@ -85,6 +85,7 @@ impl ResponseBuilder {
 mod tests {
     use super::ResponseBuilder;
     use crate::test_rpc_command;
+    use alloc::{vec, vec::Vec};
     use hashbrown::HashMap;
     use rsnano_core::Account;
     use rsnano_rpc_messages::{
@@ -196,7 +197,7 @@ mod tests {
 
             let response = detailed_response(response);
             assert_eq!(response.len(), 1);
-            assert_eq!(response.get(&rep_key.into()).unwrap().weight, weight);
+            assert_eq!(response.get(&Account::from(rep_key)).unwrap().weight, weight);
         }
     }
 

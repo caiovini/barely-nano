@@ -45,7 +45,7 @@ pub struct ConfirmingSetConfig {
 impl Default for ConfirmingSetConfig {
     fn default() -> Self {
         Self {
-            batch_size: 256,
+            batch_size: 128,
             max_blocks: 2048,
             max_queued_notifications: 8,
             max_deferred: 2048,
@@ -365,49 +365,40 @@ impl ConfirmingSetThread {
     }
 
     fn run_once(&self) {
-        let mut count = 0;
-        loop {
-            let mut guard = self.mutex.lock();
-            if self.stopped.load(Ordering::SeqCst) || guard.set.is_empty() || guard.cool_down {
-                return;
+        let mut guard = self.mutex.lock();
+        if self.stopped.load(Ordering::SeqCst) || guard.set.is_empty() || guard.cool_down {
+            return;
+        }
+
+        self.stats.inc(StatType::ConfirmingSet, DetailType::Loop);
+        let evicted = guard.cleanup(self.clock.now());
+
+        if !evicted.is_empty() {
+            drop(guard);
+            {
+                for entry in evicted {
+                    self.notify(LedgerEvent::ConfirmationFailed(entry.confirmation_root));
+                }
+            }
+            guard = self.mutex.lock();
+        }
+
+        if !guard.set.is_empty() && !guard.cool_down {
+            let batch = guard.next_batch(self.config.batch_size);
+
+            for entry in &batch {
+                guard.current.insert(entry.confirmation_root);
+            }
+            let recovered = guard.near_full && guard.set.len() < guard.recovered_limit;
+            if recovered {
+                guard.near_full = false;
             }
 
-            self.stats.inc(StatType::ConfirmingSet, DetailType::Loop);
-            let evicted = guard.cleanup(self.clock.now());
+            drop(guard);
 
-            if !evicted.is_empty() {
-                drop(guard);
-                {
-                    for entry in evicted {
-                        self.notify(LedgerEvent::ConfirmationFailed(entry.confirmation_root));
-                    }
-                }
-                guard = self.mutex.lock();
-            }
-
-            if !guard.set.is_empty() && !guard.cool_down {
-                let batch = guard.next_batch(self.config.batch_size);
-
-                for entry in &batch {
-                    guard.current.insert(entry.confirmation_root);
-                }
-                let recovered = guard.near_full && guard.set.len() < guard.recovered_limit;
-                if recovered {
-                    guard.near_full = false;
-                }
-
-                drop(guard);
-
-                self.run_batch(batch);
-                if recovered {
-                    self.notify(LedgerEvent::ConfirmingSetRecovered);
-                }
-                count += 1;
-                if count >= 4 {
-                    break;
-                }
-            } else {
-                break;
+            self.run_batch(batch);
+            if recovered {
+                self.notify(LedgerEvent::ConfirmingSetRecovered);
             }
         }
     }
@@ -427,7 +418,7 @@ impl ConfirmingSetThread {
 
     fn notify(&self, event: LedgerEvent) {
         if let Some(sender) = self.event_publisher.lock().as_ref() {
-            sender.send(event).unwrap();
+            let _ = sender.send(event);
         }
     }
 }
@@ -515,8 +506,12 @@ mod tests {
     #[test]
     fn add_exists() {
         let ledger = Arc::new(Ledger::new_null());
-        let confirming_set =
-            ConfirmingSet::new(Default::default(), ledger, Arc::new(Stats::default()));
+        let confirming_set = ConfirmingSet::new(
+            Default::default(),
+            ledger,
+            Arc::new(Stats::default()),
+            Arc::new(SteadyClock::new_null()),
+        );
         let hash = BlockHash::from(1);
         confirming_set.add_block(hash);
         assert!(confirming_set.contains(&hash));

@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use hashbrown::{ HashMap };
 
@@ -6,7 +7,7 @@ use rsnano_core::BlockHash;
 
 pub(crate) struct ConfirmedElectionsCache {
     max_len: usize,
-    elections: HashMap<BlockHash, ConfirmedElection>,
+    elections: HashMap<BlockHash, Box<ConfirmedElection>>,
     sequential: VecDeque<BlockHash>,
 }
 
@@ -14,10 +15,11 @@ impl ConfirmedElectionsCache {
     const DEFAULT_MAX_LEN: usize = 4096;
 
     pub fn with_max_len(max_len: usize) -> Self {
+        let cap = max_len.min(Self::DEFAULT_MAX_LEN);
         Self {
             max_len,
-            elections: HashMap::new(),
-            sequential: VecDeque::new(),
+            elections: HashMap::with_capacity(cap),
+            sequential: VecDeque::with_capacity(cap),
         }
     }
 
@@ -32,12 +34,12 @@ impl ConfirmedElectionsCache {
     }
 
     pub fn get(&self, winner_hash: &BlockHash) -> Option<&ConfirmedElection> {
-        self.elections.get(winner_hash)
+        self.elections.get(winner_hash).map(|b| b.as_ref())
     }
 
     pub fn insert(&mut self, election: ConfirmedElection) {
         let winner_hash = election.winner.hash();
-        let old = self.elections.insert(winner_hash, election);
+        let old = self.elections.insert(winner_hash, Box::new(election));
         if old.is_some() {
             return;
         }
@@ -136,7 +138,11 @@ mod tests {
         let winner_hash = block.hash();
         (
             winner_hash,
-            ConfirmedElection::new(block, ConfirmationType::InactiveConfirmationHeight),
+            ConfirmedElection::new(
+                block,
+                ConfirmationType::InactiveConfirmationHeight,
+                rsnano_nullable_clock::Timestamp::new_test_instance(),
+            ),
         )
     }
 }

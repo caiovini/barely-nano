@@ -1,11 +1,10 @@
 use alloc::vec::Vec;
 use crate::RpcCommandHandler;
-use indexmap::IndexMap;
 use rsnano_core::BlockHash;
 use rsnano_ledger::{AnySet, ConfirmedSet};
 use rsnano_rpc_messages::{
     AccountsReceivableResponse, AccountsReceivableSimple, AccountsReceivableSource,
-    AccountsReceivableThreshold, SourceInfo, WalletReceivableArgs,
+    AccountsReceivableThreshold, IndexMap, SourceInfo, WalletReceivableArgs,
 };
 
 impl RpcCommandHandler {
@@ -22,13 +21,13 @@ impl RpcCommandHandler {
         let accounts = self.node.wallets.get_accounts_of_wallet(&args.wallet)?;
         let any = self.node.ledger.any();
 
-        let mut pending_source = IndexMap::new();
-        let mut pending_threshold = IndexMap::new();
-        let mut pending_default = IndexMap::new();
+        let mut pending_source = IndexMap::default();
+        let mut pending_threshold = IndexMap::default();
+        let mut pending_default = IndexMap::default();
 
         for account in accounts {
-            let mut block_source = IndexMap::new();
-            let mut block_threshold = IndexMap::new();
+            let mut block_source = IndexMap::default();
+            let mut block_threshold = IndexMap::default();
             let mut block_default = Vec::new();
 
             for (key, info) in any

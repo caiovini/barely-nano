@@ -14,8 +14,15 @@ impl BareMetalRpcServer {
     }
 
     pub fn handle_request(&self, request: &str) -> Option<String> {
-        if let Some(body_start) = request.find("\r\n\r\n") {
-            let body = &request[body_start + 4..];
+        let body_opt = if let Some(body_start) = request.find("\r\n\r\n") {
+            Some(&request[body_start + 4..])
+        } else if let Some(body_start) = request.find("\n\n") {
+            Some(&request[body_start + 2..])
+        } else {
+            None
+        };
+        if let Some(body) = body_opt {
+            let body = body.trim();
             if !body.is_empty() {
                 match serde_json::from_str::<RpcCommand>(body) {
                     Ok(command) => {

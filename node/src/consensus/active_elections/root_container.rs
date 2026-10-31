@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use core::cmp::Ordering;
 use alloc::vec::Vec;
@@ -53,23 +54,27 @@ impl PartialOrd for BucketEntry {
 
 /// Contains elections and their qualified roots
 pub(crate) struct RootContainer {
-    by_root: FxHashMap<QualifiedRoot, Entry>,
+    by_root: FxHashMap<QualifiedRoot, Box<Entry>>,
     buckets: Vec<BTreeSet<BucketEntry>>,
     pub vote_router: VoteRouter,
 }
 
 impl Default for RootContainer {
     fn default() -> Self {
-        Self {
-            by_root: Default::default(),
-            vote_router: Default::default(),
-            buckets: vec![BTreeSet::new(); bucket_count()],
-        }
+        Self::with_capacity(0)
     }
 }
 
 impl RootContainer {
     pub const ELEMENT_SIZE: usize = size_of::<QualifiedRoot>() * 2 + size_of::<Election>();
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            by_root: FxHashMap::with_capacity(capacity),
+            vote_router: VoteRouter::with_capacity(capacity),
+            buckets: vec![BTreeSet::new(); bucket_count()],
+        }
+    }
 
     pub fn insert(&mut self, entry: Entry) {
         let root = entry.root.clone();
@@ -79,16 +84,16 @@ impl RootContainer {
             priority: entry.priority.clone(),
         };
         self.buckets[entry.bucket()].insert(bucket_entry);
-        self.by_root.insert(root.clone(), entry);
+        self.by_root.insert(root.clone(), Box::new(entry));
         self.vote_router.connect(hash, root.clone());
     }
 
     pub fn get(&self, root: &QualifiedRoot) -> Option<&Entry> {
-        self.by_root.get(root)
+        self.by_root.get(root).map(|b| b.as_ref())
     }
 
     pub fn get_mut(&mut self, root: &QualifiedRoot) -> Option<&mut Entry> {
-        self.by_root.get_mut(root)
+        self.by_root.get_mut(root).map(|b| b.as_mut())
     }
 
     pub fn election_for_root(&self, root: &QualifiedRoot) -> Option<&Election> {
@@ -168,7 +173,7 @@ impl RootContainer {
     }
 
     pub fn erase(&mut self, root: &QualifiedRoot) -> Option<Entry> {
-        let erased = self.by_root.remove(root);
+        let erased = self.by_root.remove(root).map(|b| *b);
         if let Some(entry) = &erased {
             self.vote_router.disconnect_election(&entry.election);
             self.buckets[entry.bucket()].remove(&BucketEntry {
@@ -195,13 +200,13 @@ impl RootContainer {
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Entry> {
-        self.by_root.values_mut()
+        self.by_root.values_mut().map(|b| b.as_mut())
     }
 
     pub fn iter_bucket(&self, bucket_id: usize) -> impl Iterator<Item = &Entry> {
         self.buckets[bucket_id]
             .iter()
-            .map(|i| self.by_root.get(&i.root).unwrap())
+            .map(|i| self.by_root.get(&i.root).unwrap().as_ref())
     }
 
     pub fn bucket_len(&self, bucket_id: usize) -> usize {
@@ -260,7 +265,7 @@ impl<'a> Iterator for RoundRobinIterator<'a> {
             }
 
             if let Some(item) = item {
-                return self.roots.by_root.get(&item.root);
+                return self.roots.by_root.get(&item.root).map(|b| b.as_ref());
             }
         }
 

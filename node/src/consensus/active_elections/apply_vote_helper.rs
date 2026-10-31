@@ -142,7 +142,7 @@ impl<'a> ApplyVoteToElectionHelper<'a> {
         if winner_changed {
             self.notify(AecEvent::WinnerChanged(
                 old_winner,
-                self.election.winner().clone().into(),
+                alloc::boxed::Box::new(self.election.winner().clone().into()),
             ));
         }
     }
@@ -154,7 +154,7 @@ impl<'a> ApplyVoteToElectionHelper<'a> {
             .election
             .into_confirmed_election(self.args.now, ConfirmationType::ActiveConfirmedQuorum);
 
-        self.notify(AecEvent::ElectionConfirmed(confirmed_election));
+        self.notify(AecEvent::ElectionConfirmed(alloc::boxed::Box::new(confirmed_election)));
     }
 
     fn insert_recently_confirmed(&mut self) {
@@ -315,7 +315,7 @@ mod tests {
             panic!("not a winner changed event");
         };
         assert_eq!(old_winner, &block.hash());
-        assert_eq!(new_winner, &fork);
+        assert_eq!(new_winner.as_ref(), &fork);
     }
 
     #[test]
@@ -483,7 +483,7 @@ mod tests {
                 .apply_vote()
             };
 
-            while let Ok(ev) = rx.recv() {
+            while let Ok(ev) = rx.try_recv() {
                 self.events.push(ev);
             }
 

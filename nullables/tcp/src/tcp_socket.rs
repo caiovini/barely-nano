@@ -1,7 +1,7 @@
 use crate::TcpStream;
 use core::net::SocketAddr;
 use kernel_common::net::async_tcp::AsyncTcpStream;
-use kernel_common::net::NET;
+use kernel_common::net::lock_net_worker;
 
 pub struct TcpSocket {
     strategy: Strategy,
@@ -10,7 +10,7 @@ pub struct TcpSocket {
 impl TcpSocket {
     pub fn new_v6() -> anyhow::Result<Self> {
         let handle = {
-            if let Some(ref mut ctx) = *NET.lock() {
+            if let Some(ref mut ctx) = *lock_net_worker() {
                 ctx.create_tcp_socket()
             } else {
                 return Err(anyhow::anyhow!("No network context"));
@@ -57,7 +57,7 @@ impl TcpSocket {
                 impl Drop for SocketCleanupGuard {
                     fn drop(&mut self) {
                         if let Some(h) = self.0.take() {
-                            if let Some(ref mut ctx) = *NET.lock() {
+                            if let Some(ref mut ctx) = *lock_net_worker() {
                                 ctx.remove_tcp_socket(h);
                             }
                         }
@@ -82,7 +82,7 @@ impl Drop for TcpSocket {
     fn drop(&mut self) {
         match &mut self.strategy {
             Strategy::Real(Some(handle)) => {
-                if let Some(ref mut ctx) = *NET.lock() {
+                if let Some(ref mut ctx) = *lock_net_worker() {
                     ctx.remove_tcp_socket(*handle);
                 }
             }

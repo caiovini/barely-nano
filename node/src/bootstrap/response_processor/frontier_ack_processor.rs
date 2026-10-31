@@ -148,7 +148,6 @@ mod tests {
             fixture
                 .state
                 .lock()
-                .unwrap()
                 .frontier_scan
                 .total_requests_completed(),
             1
@@ -188,7 +187,6 @@ mod tests {
             fixture
                 .state
                 .lock()
-                .unwrap()
                 .frontier_scan
                 .total_requests_completed(),
             0

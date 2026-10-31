@@ -13,6 +13,12 @@ pub(crate) struct VoteRouter {
 }
 
 impl VoteRouter {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            elections: HashMap::with_capacity(capacity),
+        }
+    }
+
     /// Add a route for 'hash' to an election by its qualified root
     /// Existing routes will be replaced
     pub fn connect(&mut self, hash: BlockHash, root: QualifiedRoot) {

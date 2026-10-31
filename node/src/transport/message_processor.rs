@@ -56,10 +56,8 @@ impl MessageProcessor {
     }
 
     pub fn start(&mut self) {
-        let state = self.state.clone();
-        kernel_common::async_rt::spawn(async move {
-            state.run().await;
-        });
+        // Dedicated worker harts (Harts 2 & 3) drive `run_batch` directly so inbound message
+        // processing never blocks the network polling hart (Hart 1) on the shared async executor.
     }
 
     pub fn stop(&mut self) {
@@ -88,6 +86,27 @@ impl MessageProcessor {
         }
     }
 
+    /// Pops and processes one batch without holding the outer `MessageProcessor` mutex during
+    /// `handle_batch`, allowing multiple worker harts (Harts 2 & 3) to process in parallel.
+    pub fn run_batch(mp: &spin::Mutex<Self>) -> bool {
+        let state = {
+            let guard = mp.lock();
+            if guard.state.inbound_queue.is_empty_fast() {
+                return false;
+            }
+            guard.state.clone()
+        };
+        if state.stopped.load(Ordering::Relaxed) {
+            return false;
+        }
+        let batch = state.inbound_queue.next_batch(State::MAX_BATCH_SIZE);
+        if batch.is_empty() {
+            return false;
+        }
+        state.handle_batch(batch);
+        true
+    }
+
     pub fn queue_len(&self) -> usize {
         self.state.inbound_queue.size()
     }
@@ -103,6 +122,24 @@ impl Drop for MessageProcessor {
     }
 }
 
+/// Diagnostics: per message class [AscPullAck, Publish, ConfirmAck, ConfirmReq, Keepalive,
+/// AscPullReq, other]: entries 0..7 are counts, 7..14 are CLINT ticks spent in `process`.
+pub static MSG_PROF: [core::sync::atomic::AtomicU64; 14] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 14];
+
+fn msg_class(t: &rsnano_messages::Message) -> usize {
+    use rsnano_messages::Message;
+    match t {
+        Message::AscPullAck(_) => 0,
+        Message::Publish(_) => 1,
+        Message::ConfirmAck(_) => 2,
+        Message::ConfirmReq(_) => 3,
+        Message::Keepalive(_) => 4,
+        Message::AscPullReq(_) => 5,
+        _ => 6,
+    }
+}
+
 struct State {
     stopped: AtomicBool,
     realtime_handler: Arc<RealtimeMessageHandler>,
@@ -111,13 +148,15 @@ struct State {
 }
 
 impl State {
-    const MAX_BATCH_SIZE: usize = 1024 * 4;
+    const MAX_BATCH_SIZE: usize = 64;
 
+    #[allow(dead_code)]
     async fn run(&self) {
         while !self.stopped.load(Ordering::SeqCst) {
             let batch = self.inbound_queue.next_batch(Self::MAX_BATCH_SIZE);
             if !batch.is_empty() {
                 self.handle_batch(batch);
+                kernel_common::async_rt::yield_now().await;
             } else {
                 kernel_common::async_rt::sleep(core::time::Duration::from_millis(10)).await;
             }
@@ -128,14 +167,15 @@ impl State {
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
         let _start = kernel_common::clint::mtime();
         let batch_size = batch.len();
-        
-        kernel_common::uart::putchar(b'~');
 
         for (_, (message, channel)) in batch {
+            let class = msg_class(&message);
+            let t0 = kernel_common::clint::mtime();
             self.realtime_handler.process(message, &channel);
+            let dt = kernel_common::clint::mtime() - t0;
+            MSG_PROF[class].fetch_add(1, Ordering::Relaxed);
+            MSG_PROF[7 + class].fetch_add(dt, Ordering::Relaxed);
         }
         self.total_processed.fetch_add(batch_size as u64, Ordering::Relaxed);
-        
-        kernel_common::uart::putchar(b'}');
     }
 }

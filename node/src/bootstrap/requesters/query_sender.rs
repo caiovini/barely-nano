@@ -76,6 +76,7 @@ impl QuerySender {
                 .try_send(&spec.channel, &message, TrafficType::BootstrapRequests);
 
         if sent {
+
             self.stats.inc(StatType::Bootstrap, DetailType::Request);
             self.stats
                 .inc(StatType::BootstrapRequest, query_type.into());
@@ -126,7 +127,7 @@ mod tests {
 
         let output = fixture.send_tracker.output();
         assert_eq!(output.len(), 1, "no message sent!");
-        assert_eq!(output[0].channel_id, channel_id);
+        assert_eq!(output[0].channel_id, channel_id.into());
         assert_eq!(output[0].traffic_type, TrafficType::BootstrapRequests);
         let Message::AscPullReq(_) = &output[0].message else {
             panic!("no asc pull req!")

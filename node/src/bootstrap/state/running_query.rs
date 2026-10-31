@@ -409,6 +409,7 @@ mod tests {
     }
 
     mod verify_frontiers {
+        use super::*;
 
         #[test]
         fn empty_frontiers() {
@@ -439,6 +440,7 @@ mod tests {
         }
 
         mod error_cases {
+            use super::*;
 
             #[test]
             fn invalid_query_type() {
@@ -489,6 +491,7 @@ mod tests {
     }
 
     mod verify_blocks {
+        use super::*;
         use alloc::collections::VecDeque;
 
         use rsnano_core::{Block, TestBlockBuilder};

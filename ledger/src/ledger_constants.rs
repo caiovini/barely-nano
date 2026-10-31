@@ -165,12 +165,76 @@ pub static DEV_GENESIS_BLOCK: Lazy<Block> = Lazy::new(|| {
 });
 
 #[cfg(test)]
+pub(crate) static LEDGER_CONSTANTS_STUB: Lazy<LedgerConstants> =
+    Lazy::new(|| LedgerConstants::new(WorkThresholds::none(), Networks::NanoDevNetwork));
+
+#[cfg(test)]
+pub(crate) static IMPOSSIBLE_WORK: Lazy<WorkThresholds> =
+    Lazy::new(|| WorkThresholds::impossible());
+
+#[cfg(test)]
 mod tests {
+    use rsnano_core::{BlockType, Epoch};
+
     use super::*;
 
     #[test]
-    fn test_print_live_genesis_hash() {
-        let constants = LedgerConstants::new(rsnano_work::WorkThresholds::none(), Networks::NanoLiveNetwork);
-        std::println!("LIVE GENESIS HASH: {}", constants.genesis_block.hash().encode_hex());
+    fn test_parse_block() {
+        let block_str = r###"{"type": "open", "source": "37FCEA4DA94F1635484EFCBA57483C4C654F573B435C09D8AACE1CB45E63FFB1", "representative": "nano_1fzwxb8tkmrp8o66xz7tcx65rm57bxdmpitw39ecomiwpjh89zxj33juzt6p", "account": "nano_1fzwxb8tkmrp8o66xz7tcx65rm57bxdmpitw39ecomiwpjh89zxj33juzt6p", "work": "ef0547d86748c71b", "signature": "13E33D1ADA50A79B64741C5159C0C0AFE0515581B47ABD73676FE02A1D600CDB637050D37BF92C9629649AE92949814BB57C6B5B0A44BF76E2F33043A3DF2D01"}"###;
+        let block = parse_block_from_genesis_data(block_str).unwrap();
+        assert_eq!(block.block_type(), BlockType::LegacyOpen);
+    }
+
+    #[test]
+    fn live_genesis_constants() {
+        let constants = LedgerConstants::live();
+        assert_eq!(
+            constants.genesis_block.hash().encode_hex(),
+            "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948"
+        );
+        assert_eq!(
+            constants.genesis_account.encode_account(),
+            "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3"
+        );
+        assert_eq!(constants.genesis_amount, Amount::MAX);
+        assert_eq!(constants.burn_account, Account::zero());
+        assert_eq!(
+            constants.epochs.signer(Epoch::Epoch1),
+            Some(&PublicKey::from(constants.genesis_account))
+        );
+        let expected_v2_signer = Account::decode_account(
+            "nano_3qb6o6i1tkzr6jwr5s7eehfxwg9x6eemitdinbpi7u8bjjwsgqfj4wzser3x",
+        )
+        .unwrap();
+        assert_eq!(
+            constants.epochs.signer(Epoch::Epoch2),
+            Some(&PublicKey::from(expected_v2_signer))
+        );
+    }
+
+    #[test]
+    fn dev_genesis_constants() {
+        let constants = LedgerConstants::dev();
+        assert_eq!(constants.genesis_account, DEV_GENESIS_KEY.account());
+        assert_eq!(constants.genesis_block.hash(), DEV_GENESIS_BLOCK.hash());
+        assert_eq!(
+            constants.epochs.signer(Epoch::Epoch1),
+            Some(&DEV_GENESIS_KEY.public_key())
+        );
+        assert_eq!(
+            constants.epochs.signer(Epoch::Epoch2),
+            Some(&DEV_GENESIS_KEY.public_key())
+        );
+    }
+
+    #[test]
+    fn beta_genesis_constants() {
+        let constants = LedgerConstants::beta();
+        assert_eq!(
+            constants.genesis_account.encode_account(),
+            "nano_1betag7az9wk6rbis38s1d35hdsycz1bi95xg4g4j148p6afjk7embcurda4"
+        );
+        assert_eq!(constants.genesis_block.height(), 1);
+        assert_eq!(constants.genesis_block.balance(), Amount::MAX);
     }
 }

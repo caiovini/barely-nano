@@ -6,9 +6,10 @@ use core::time::Duration;
 
 
 use rsnano_core::{
-    utils::{ContainerInfo, ContainerInfoProvider, Peer}, Root, WorkNonce,
+    utils::{ContainerInfo, ContainerInfoProvider, Peer},
+    Difficulty, DifficultyV1, Root, WorkNonce,
 };
-use rsnano_output_tracker::OutputTrackerMt;
+use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 use rsnano_work::{WorkPool, WorkPoolBuilder};
 
 use super::distributed_work_client::DistributedWorkClient;
@@ -28,15 +29,19 @@ impl WorkRequest {
         Self::new(Root::from(100), 0)
     }
 
-    pub fn is_valid_work(&self, _work: WorkNonce) -> bool {
-        true
+    pub fn is_valid_work(&self, work: WorkNonce) -> bool {
+        self.difficulty_of(work) >= self.difficulty
+    }
+
+    pub fn difficulty_of(&self, work: WorkNonce) -> u64 {
+        DifficultyV1 {}.get_difficulty(&self.root, work)
     }
 }
 
 pub struct WorkFactory {
     pub local_work_pool: WorkPool,
-    #[allow(dead_code)]
     work_peers: Mutex<Vec<Peer>>,
+    cancel_listener: OutputListenerMt<Root>,
     stopped: AtomicBool,
 }
 
@@ -50,6 +55,7 @@ impl WorkFactory {
         Self {
             local_work_pool: work_pool,
             work_peers: Mutex::new(work_peers),
+            cancel_listener: OutputListenerMt::new(),
             stopped: AtomicBool::new(false),
         }
     }
@@ -66,6 +72,7 @@ impl WorkFactory {
     }
 
     pub fn cancel(&self, root: Root) {
+        self.cancel_listener.emit(root);
         self.local_work_pool.cancel(&root);
     }
 
@@ -78,7 +85,19 @@ impl WorkFactory {
     }
 
     pub fn track_cancellations(&self) -> Arc<OutputTrackerMt<Root>> {
-        Arc::new(OutputTrackerMt::new())
+        self.cancel_listener.track()
+    }
+
+    pub fn peers(&self) -> Vec<Peer> {
+        self.work_peers.lock().clone()
+    }
+
+    pub fn add_peer(&self, peer: Peer) {
+        self.work_peers.lock().push(peer);
+    }
+
+    pub fn clear_peers(&self) {
+        self.work_peers.lock().clear();
     }
 }
 

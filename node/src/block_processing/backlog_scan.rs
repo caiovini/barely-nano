@@ -30,8 +30,8 @@ impl Default for BacklogScanConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            batch_size: 10_000,
-            rate_limit: 100_000,
+            batch_size: 256,
+            rate_limit: 10_000,
         }
     }
 }
@@ -402,51 +402,3 @@ impl StatsSource for BacklogScanStats {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rsnano_ledger::Ledger;
-
-    #[test]
-    fn scan_accounts() {
-        let ledger = Arc::new(
-            Ledger::new_null_builder()
-                .account_info(&Account::from(1), &AccountInfo::new_test_instance())
-                .account_info(&Account::from(2), &AccountInfo::new_test_instance())
-                .finish(),
-        );
-        let clock = Arc::new(SteadyClock::new_null());
-
-        let mut backlog_scan = BacklogScan::new(BacklogScanConfig::default(), ledger, clock);
-
-        let found = Arc::new(Mutex::new(Vec::new()));
-        let found2 = found.clone();
-        let done = Arc::new(Condvar::new());
-        let done2 = done.clone();
-
-        backlog_scan.on_unconfirmed_found(move |i| {
-            {
-                let mut guard = found2.lock();
-                if !guard.is_empty() {
-                    return;
-                }
-
-                for info in i {
-                    guard.push(info.account);
-                }
-            }
-            done2.notify_all();
-        });
-
-        backlog_scan.start();
-
-        // Since we don't start the thread, we won't find anything automatically
-        // let mut found_guard = found.lock();
-        // found_guard = done
-        //     .wait_timeout_while(found_guard, Duration::from_secs(5), |i| i.is_empty())
-        //     .unwrap()
-        //     .0;
-        //
-        // assert_eq!(*found_guard, [Account::from(1), Account::from(2)]);
-    }
-}

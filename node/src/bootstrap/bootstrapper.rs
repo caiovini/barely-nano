@@ -66,18 +66,26 @@ impl Default for BootstrapConfig {
             channel_limit: 16,
             rate_limit: 500,
             database_rate_limit: 256,
-            frontier_rate_limit: 8,
+            frontier_rate_limit: 32,
             database_warmup_ratio: 10,
             max_pull_count: BlocksAckPayload::MAX_BLOCKS,
+            #[cfg(not(test))]
+            request_timeout: Duration::from_secs(5),
+            #[cfg(test)]
             request_timeout: Duration::from_secs(15),
             throttle_coefficient: 8 * 1024,
             throttle_wait: Duration::from_millis(100),
             block_processor_theshold: 16384,
             min_protocol_version: 0x14, // TODO don't hard code
             max_requests: 1024,
-            optimistic_request_percentage: 10,
+            optimistic_request_percentage: 75,
             candidate_accounts: Default::default(),
-            frontier_scan: Default::default(),
+            frontier_scan: FrontierScanConfig {
+                parallelism: 32,
+                consideration_count: 2,
+                candidates: 1000,
+                cooldown: Duration::from_secs(2),
+            },
             max_pending_frontier_responses: 16,
         }
     }
@@ -221,11 +229,11 @@ impl Bootstrapper {
 
     pub fn run_once(&self) {
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
-        let mut state = self.state.lock();
-        cleanup.cleanup(&mut state);
-        let blocked_dependencies = state.candidate_accounts.blocked_dependencies();
-        self.prune_banned_peers(&mut state);
-        drop(state);
+        let blocked_dependencies = {
+            let mut state = self.state.lock();
+            cleanup.cleanup(&mut state);
+            state.candidate_accounts.blocked_dependencies()
+        };
 
         let fulfilled = blocked_dependencies
             .into_iter()
@@ -249,16 +257,21 @@ impl Bootstrapper {
             }
         }
 
-        let prio_len = {
-            let state = self.state.lock();
-            state.candidate_accounts.priority_len()
-        };
-
-        if prio_len < 16 {
-            for (account, _) in self.ledger.any().iter_accounts() {
-                self.prioritize_account(&account);
-            }
+        {
+            let mut state = self.state.lock();
+            state.candidate_accounts.sync_dependencies();
         }
+
+        let prio_len = self.state.lock().candidate_accounts.priority_len();
+        // Diagnostics: samples (every ~2 s) at which the priority queue was empty / low.
+        self.stats.inc(StatType::BootstrapAccountSets, DetailType::Update);
+        if prio_len == 0 {
+            self.stats.inc(StatType::BootstrapAccountSets, DetailType::NextNone);
+        } else if prio_len < 256 {
+            self.stats.inc(StatType::BootstrapAccountSets, DetailType::Deprioritize);
+        }
+        // RSNano does not reseed accounts here: candidates come from the frontier scan,
+        // block-driven priority_up, dependency/fork handling and startup only.
 
         self.state_changed.notify_all();
     }
@@ -269,9 +282,10 @@ impl Bootstrapper {
         let mut state = self.state.lock();
         while !state.stopped {
             cleanup.cleanup(&mut state);
-            self.prune_banned_peers(&mut state);
+            drop(state);
             self.state_changed.notify_all();
 
+            state = self.state.lock();
             state = self
                 .state_changed
                 .wait_timeout_while(state, Duration::from_secs(1), |s| !s.stopped)
@@ -282,14 +296,44 @@ impl Bootstrapper {
     async fn run_timeouts_async(self: Arc<Self>) {
         tracing::info!("Bootstrap timeout loop started");
         let mut cleanup = BootstrapCleanup::new(self.clock.clone(), self.stats.clone());
+        let mut dep_cursor = rsnano_core::BlockHash::zero();
         loop {
-            {
+            let (stopped, sampled_deps) = {
                 let mut state = self.state.lock();
                 if state.stopped {
-                    break;
+                    (true, alloc::vec::Vec::new())
+                } else {
+                    cleanup.cleanup(&mut state);
+                    let (deps, next_cursor) = state.candidate_accounts.sample_dependencies(dep_cursor, 4096);
+                    dep_cursor = next_cursor;
+                    (false, deps)
                 }
-                cleanup.cleanup(&mut state);
-                self.prune_banned_peers(&mut state);
+            };
+            if stopped {
+                break;
+            }
+            if !sampled_deps.is_empty() {
+                let any = self.ledger.any();
+                let fulfilled: alloc::vec::Vec<_> = sampled_deps
+                    .into_iter()
+                    .filter(|dep| rsnano_ledger::block_may_exist(dep) && any.block_exists(dep))
+                    .collect();
+                drop(any);
+
+                if !fulfilled.is_empty() {
+                    let mut state = self.state.lock();
+                    let mut unblocked = 0;
+                    for dep in fulfilled {
+                        unblocked += state.candidate_accounts.unblock_hash(&dep);
+                    }
+                    if unblocked > 0 {
+                        self.stats.add(
+                            StatType::BootstrapAccountSets,
+                            DetailType::PriorityUnblocked,
+                            unblocked as u64,
+                        );
+                    }
+                }
             }
             kernel_common::async_rt::sleep(Duration::from_secs(1)).await;
         }
@@ -304,6 +348,11 @@ impl Bootstrapper {
                 self.stats.inc(StatType::Bootstrap, DetailType::Reply);
                 self.stats
                     .inc(StatType::BootstrapReply, info.query_type.into());
+                self.stats.add(
+                    StatType::Bootstrap,
+                    DetailType::ProcessMs,
+                    info.response_time.as_millis() as u64,
+                );
                 self.stats.sample(
                     Sample::BootstrapTagDuration,
                     info.response_time.as_millis() as i64,
@@ -332,16 +381,6 @@ impl Bootstrapper {
     fn priority_insertion_failed(&self) {
         self.stats
             .inc(StatType::BootstrapAccountSets, DetailType::PrioritizeFailed);
-    }
-
-    fn prune_banned_peers(&self, state: &mut BootstrapState) {
-        let banned = state.scoring.banned_channels();
-        if !banned.is_empty() {
-            let mut network = self.requesters.network.write();
-            for id in banned {
-                network.remove(id);
-            }
-        }
     }
 
     pub fn inspect_blocks(&self, batch: &[ProcessedResult]) {

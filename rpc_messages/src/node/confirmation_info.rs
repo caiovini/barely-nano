@@ -95,7 +95,8 @@ mod tests {
                     representatives_final: None,
                 },
             )]
-            .into(),
+            .into_iter()
+            .collect(),
         };
 
         let json = serde_json::to_string(&response).unwrap();

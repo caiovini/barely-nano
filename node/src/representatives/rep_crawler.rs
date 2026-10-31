@@ -166,7 +166,9 @@ impl RepCrawler {
 
     /// Attempt to determine if the peer manages one or more representative accounts
     pub fn query(&self, target_channels: Vec<Arc<Channel>>) {
-        if !target_channels.is_empty() {}
+        if target_channels.is_empty() {
+            return;
+        }
         let hash_root = self.prepare_query_target();
 
         let mut guard = self.rep_crawler_impl.lock();
@@ -626,51 +628,6 @@ impl OrderedQueries {
     }
 }
 
-struct RepCrawlerFuture {
-    rep_crawler: Arc<RepCrawler>,
-}
-
-impl core::future::Future for RepCrawlerFuture {
-    type Output = ();
-
-    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
-        let this = &self.rep_crawler;
-        
-        *this.waker.lock() = Some(cx.waker().clone());
-        
-        if this.rep_crawler_impl.lock().stopped {
-            return core::task::Poll::Ready(());
-        }
-
-        this.run();
-
-        let guard = this.rep_crawler_impl.lock();
-        let sufficient_weight = {
-            let reps = this.online_reps.lock();
-            let current_total_weight = reps.peered_weight();
-            current_total_weight > reps.quorum_delta()
-        };
-        let interval = this.query_interval(sufficient_weight);
-        let elapsed = match guard.last_query {
-            Some(last) => this.steady_clock.now() - last,
-            None => Duration::ZERO,
-        };
-        let sleep_duration = if elapsed >= interval {
-            Duration::ZERO
-        } else {
-            interval - elapsed
-        };
-        
-        let waker = cx.waker().clone();
-        kernel_common::async_rt::spawn(async move {
-            kernel_common::async_rt::sleep(sleep_duration).await;
-            waker.wake();
-        });
-
-        core::task::Poll::Pending
-    }
-}
-
 pub trait RepCrawlerExt {
     fn start(&self);
 }
@@ -678,6 +635,32 @@ pub trait RepCrawlerExt {
 impl RepCrawlerExt for Arc<RepCrawler> {
     fn start(&self) {
         let rep_crawler = self.clone();
-        kernel_common::async_rt::spawn(RepCrawlerFuture { rep_crawler });
+        kernel_common::async_rt::spawn(async move {
+            loop {
+                if rep_crawler.rep_crawler_impl.lock().stopped {
+                    break;
+                }
+
+                rep_crawler.run();
+
+                let sufficient_weight = {
+                    let reps = rep_crawler.online_reps.lock();
+                    let current_total_weight = reps.peered_weight();
+                    current_total_weight > reps.quorum_delta()
+                };
+                let interval = rep_crawler.query_interval(sufficient_weight);
+                let elapsed = match rep_crawler.rep_crawler_impl.lock().last_query {
+                    Some(last) => rep_crawler.steady_clock.now() - last,
+                    None => Duration::ZERO,
+                };
+                let sleep_duration = if elapsed >= interval {
+                    Duration::from_millis(500)
+                } else {
+                    interval - elapsed
+                };
+
+                kernel_common::async_rt::sleep(sleep_duration).await;
+            }
+        });
     }
 }

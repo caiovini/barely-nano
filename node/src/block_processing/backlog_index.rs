@@ -4,7 +4,6 @@ use rsnano_core::{
     utils::{ContainerInfo, TimePriority},
     Account, BlockHash,
 };
-use hashbrown::{ HashMap };
 
 #[derive(Clone)]
 pub(super) struct BacklogEntry {
@@ -28,7 +27,7 @@ impl BacklogEntry {
 
 pub(super) struct BacklogIndex {
     by_hash: BTreeMap<BlockHash, BacklogEntry>,
-    by_account: HashMap<Account, Vec<BlockHash>>,
+    by_account: BTreeMap<Account, Vec<BlockHash>>,
     /// indexed by bucket index!
     by_priority: Vec<BTreeMap<TimePriority, Vec<BlockHash>>>,
     bucket_lens: Vec<usize>,

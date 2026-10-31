@@ -349,7 +349,7 @@ impl<'a> From<EpochBlockArgs<'a>> for Block {
             signature,
             hash,
             work: value.work,
-            signature_verified: AtomicBool::new(true),
+            signature_verified: AtomicBool::new(false),
         })
     }
 }

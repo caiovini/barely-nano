@@ -9,10 +9,17 @@ impl SystemTime {
     pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::from_secs(0));
 
     pub fn now() -> Self {
-        let ticks = kernel_common::clint::mtime();
-        let uptime_nanos = (ticks as u128 * 1_000_000_000 / kernel_common::clint::FREQ as u128) as u64;
-        let offset_nanos = kernel_common::clint::get_time_offset_ns();
-        SystemTime(Duration::from_nanos(uptime_nanos + offset_nanos))
+        #[cfg(target_arch = "riscv64")]
+        {
+            let ticks = kernel_common::clint::mtime();
+            let uptime_nanos = (ticks as u128 * 1_000_000_000 / kernel_common::clint::FREQ as u128) as u64;
+            let offset_nanos = kernel_common::clint::get_time_offset_ns();
+            SystemTime(Duration::from_nanos(uptime_nanos + offset_nanos))
+        }
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            SystemTime(Duration::from_secs(60 * 60 * 24 * 365 * 50))
+        }
     }
 
     pub fn duration_since(&self, earlier: SystemTime) -> Result<Duration, ()> {

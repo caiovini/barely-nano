@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use rsnano_core::{Account, AccountInfo, BlockHash, PendingInfo, PendingKey};
+use rsnano_core::{Account, AccountInfo};
 use rsnano_ledger::OwningAnySet;
 
 pub(super) struct DatabaseCrawler<'a, T>
@@ -9,6 +9,8 @@ where
     source: T,
     it: Option<Box<dyn Iterator<Item = (Account, T::Value)> + 'a>>,
     pub current: Option<(Account, T::Value)>,
+    end: Option<Account>,
+    exhausted: bool,
 }
 
 const SEQUENTIAL_ATTEMPTS: usize = 10;
@@ -22,21 +24,30 @@ where
             it: None,
             current: None,
             source,
+            end: None,
+            exhausted: false,
         }
     }
 
+    pub fn set_end(&mut self, end: Option<Account>) {
+        self.end = end;
+        self.exhausted = false;
+    }
+
     pub fn seek(&mut self, target: Account) {
-        let mut it = self.source.iter(target);
+        let mut it = self.source.iter(target, self.end);
         self.current = it.next();
-        self.it = if self.current.is_some() {
-            Some(it)
+        if self.current.is_some() {
+            self.it = Some(it);
+            self.exhausted = false;
         } else {
-            None
-        };
+            self.it = None;
+            self.exhausted = true;
+        }
     }
 
     pub fn advance_to(&mut self, target: Account) {
-        if Self::target_reached(&self.current, &target) {
+        if self.exhausted || Self::target_reached(&self.current, &target) {
             return;
         }
 
@@ -71,6 +82,7 @@ where
 
             if self.current.is_none() {
                 self.it = None;
+                self.exhausted = true;
                 return true;
             }
         }
@@ -81,7 +93,11 @@ where
 
 pub(crate) trait CrawlSource<'a> {
     type Value;
-    fn iter(&self, start: Account) -> Box<dyn Iterator<Item = (Account, Self::Value)> + 'a>;
+    fn iter(
+        &self,
+        start: Account,
+        end: Option<Account>,
+    ) -> Box<dyn Iterator<Item = (Account, Self::Value)> + 'a>;
 }
 
 pub(crate) struct AccountCrawlSource<'a> {
@@ -97,61 +113,60 @@ impl<'a> AccountCrawlSource<'a> {
 impl<'a> CrawlSource<'a> for AccountCrawlSource<'a> {
     type Value = AccountInfo;
 
-    fn iter(&self, start: Account) -> Box<dyn Iterator<Item = (Account, AccountInfo)> + 'a> {
-        Box::new(self.any.iter_account_range(start..))
-    }
-}
-
-pub(crate) struct PendingCrawlSource<'a> {
-    any: &'a OwningAnySet<'a>,
-}
-
-impl<'a> PendingCrawlSource<'a> {
-    pub(crate) fn new(any: &'a OwningAnySet<'a>) -> Self {
-        Self { any }
-    }
-}
-
-impl<'a> CrawlSource<'a> for PendingCrawlSource<'a> {
-    type Value = PendingInfo;
-
-    fn iter(&self, start: Account) -> Box<dyn Iterator<Item = (Account, PendingInfo)> + 'a> {
-        let start_key = PendingKey::new(start, BlockHash::zero());
-        Box::new(
-            self.any
-                .iter_pending_range(start_key..).into_iter()
-                .map(|(k, v)| (k.receiving_account, v)),
-        )
+    fn iter(
+        &self,
+        start: Account,
+        end: Option<Account>,
+    ) -> Box<dyn Iterator<Item = (Account, AccountInfo)> + 'a> {
+        if let Some(end_acc) = end {
+            Box::new(self.any.iter_account_range(start..=end_acc))
+        } else {
+            Box::new(self.any.iter_account_range(start..))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use rsnano_ledger::{Ledger, LedgerSet, DEV_GENESIS_ACCOUNT};
-
     use super::*;
+    use alloc::vec::Vec;
 
-    #[test]
-    fn empty_ledger() {
-        let ledger = Ledger::new_null();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
-        crawler.seek(Account::from(1));
-        let info = ledger.any().get_account(&DEV_GENESIS_ACCOUNT).unwrap();
-        assert_eq!(crawler.current, Some((*DEV_GENESIS_ACCOUNT, info)));
+    struct VecCrawlSource {
+        items: Vec<(Account, AccountInfo)>,
+    }
+
+    impl VecCrawlSource {
+        fn new(mut items: Vec<(Account, AccountInfo)>) -> Self {
+            items.sort_by_key(|(acc, _)| *acc);
+            Self { items }
+        }
+    }
+
+    impl<'a> CrawlSource<'a> for &'a VecCrawlSource {
+        type Value = AccountInfo;
+
+        fn iter(
+            &self,
+            start: Account,
+            end: Option<Account>,
+        ) -> Box<dyn Iterator<Item = (Account, AccountInfo)> + 'a> {
+            Box::new(
+                self.items
+                    .iter()
+                    .filter(move |(acc, _)| {
+                        *acc >= start && end.map_or(true, |end_acc| *acc <= end_acc)
+                    })
+                    .cloned(),
+            )
+        }
     }
 
     #[test]
     fn seek_exact() {
         let account = Account::from(1);
         let info = AccountInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder()
-            .account_info(&account, &info)
-            .finish();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(alloc::vec![(account, info.clone())]);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(account);
         assert_eq!(crawler.current, Some((account, info)));
     }
@@ -160,12 +175,8 @@ mod tests {
     fn seek_before() {
         let account = Account::from(2);
         let info = AccountInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder()
-            .account_info(&account, &info)
-            .finish();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(alloc::vec![(account, info.clone())]);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(Account::from(1));
         assert_eq!(crawler.current, Some((account, info)));
     }
@@ -174,12 +185,8 @@ mod tests {
     fn seek_after() {
         let account = Account::from(1);
         let info = AccountInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder()
-            .account_info(&account, &info)
-            .finish();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(alloc::vec![(account, info)]);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(Account::from(2));
         assert_eq!(crawler.current, None);
     }
@@ -188,12 +195,8 @@ mod tests {
     fn advance_not_found() {
         let account = Account::from(1);
         let info = AccountInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder()
-            .account_info(&account, &info)
-            .finish();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(alloc::vec![(account, info)]);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(Account::from(2));
         crawler.advance_to(Account::from(99999));
         assert_eq!(crawler.current, None);
@@ -204,13 +207,11 @@ mod tests {
         let account1 = Account::from(1);
         let account2 = Account::from(2);
         let info = AccountInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder()
-            .account_info(&account1, &info)
-            .account_info(&account2, &info)
-            .finish();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(alloc::vec![
+            (account1, info.clone()),
+            (account2, info.clone())
+        ]);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(account1);
         crawler.advance_to(account2);
         assert_eq!(crawler.current, Some((account2, info)));
@@ -220,17 +221,14 @@ mod tests {
     fn advance_seek() {
         let first_account = Account::from(1);
         let info = AccountInfo::new_test_instance();
-        let mut ledger_builder = Ledger::new_null_builder().account_info(&first_account, &info);
+        let mut items = alloc::vec![(first_account, info.clone())];
 
         for i in 0..SEQUENTIAL_ATTEMPTS + 1 {
-            ledger_builder = ledger_builder.account_info(&Account::from(i as u64 + 2), &info);
+            items.push((Account::from(i as u64 + 2), info.clone()));
         }
 
-        let ledger = ledger_builder.finish();
-
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(items);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(first_account);
         let target = Account::from(SEQUENTIAL_ATTEMPTS as u64 + 2);
         crawler.advance_to(target);
@@ -241,12 +239,8 @@ mod tests {
     fn advance_noop() {
         let account = Account::from(1);
         let info = AccountInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder()
-            .account_info(&account, &info)
-            .finish();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(alloc::vec![(account, info.clone())]);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(account);
         crawler.advance_to(account);
         assert_eq!(crawler.current, Some((account, info)));
@@ -256,27 +250,13 @@ mod tests {
     fn advance_after_nothing_found() {
         let account = Account::from(1);
         let info = AccountInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder()
-            .account_info(&account, &info)
-            .finish();
-        let any = ledger.any();
-        let source = AccountCrawlSource::new(&any);
-        let mut crawler = DatabaseCrawler::new(source);
+        let source = VecCrawlSource::new(alloc::vec![(account, info)]);
+        let mut crawler = DatabaseCrawler::new(&source);
         crawler.seek(account);
         crawler.advance_to(account.inc_or_max());
         assert_eq!(crawler.current, None);
         crawler.advance_to(account.inc_or_max());
         assert_eq!(crawler.current, None);
     }
-
-    #[test]
-    fn pending_crawler() {
-        let key = PendingKey::new_test_instance();
-        let info = PendingInfo::new_test_instance();
-        let ledger = Ledger::new_null_builder().pending(&key, &info).finish();
-        let any = ledger.any();
-        let mut crawler = DatabaseCrawler::new(PendingCrawlSource::new(&any));
-        crawler.seek(key.receiving_account);
-        assert_eq!(crawler.current, Some((key.receiving_account, info)));
-    }
 }
+

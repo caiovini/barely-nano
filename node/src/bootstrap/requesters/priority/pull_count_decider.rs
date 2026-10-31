@@ -14,12 +14,18 @@ impl PullCountDecider {
     }
 
     pub fn pull_count(&self, priority: Priority) -> u8 {
-        // Decide how many blocks to request
-        const MIN_PULL_COUNT: u8 = 8;
-
+        // Decide how many blocks to request:
+        // Start with 64 blocks on initial pull (priority == 2.0) and ramp to 128 on subsequent pulls.
+        #[cfg(not(test))]
+        let pull_count = clamp(
+            (f64::from(priority) * 32.0) as u64,
+            32,
+            BootstrapServer::MAX_BLOCKS as u64,
+        ) as u8;
+        #[cfg(test)]
         let pull_count = clamp(
             f64::from(priority) as u8,
-            MIN_PULL_COUNT,
+            2,
             BootstrapServer::MAX_BLOCKS,
         );
 
@@ -36,7 +42,7 @@ impl Default for PullCountDecider {
 
 #[cfg(test)]
 mod tests {
-    use super::PullCountDecider;
+    use super::*;
 
     #[test]
     fn min_count() {

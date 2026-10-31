@@ -2,7 +2,7 @@ use core::time::Duration;
 
 use rsnano_core::{Difficulty, DifficultyV1, Root, WorkNonce};
 
-use super::{WorkGenerator, WorkRng, WorkTicket, XorShift1024Star};
+use super::{WorkGenerator, WorkRng, XorShift1024Star};
 
 pub(crate) trait Sleeper {
     fn sleep(&mut self, duration: Duration);
@@ -80,12 +80,6 @@ where
     Diff: Difficulty,
     Sleep: Sleeper,
 {
-    fn next(&mut self, item: &Root) -> (WorkNonce, u64) {
-        let work = WorkNonce::from(self.rng.next_work());
-        let difficulty = self.difficulty.get_difficulty(item, work);
-        (work, difficulty)
-    }
-
     /// Tries to create PoW in a batch of iterations
     fn try_create_batch(&mut self, item: &Root, min_difficulty: u64) -> Option<WorkNonce> {
         let mut iteration = self.iteration_size;
@@ -118,22 +112,16 @@ where
     Diff: Difficulty,
     Sleep: Sleeper,
 {
-    fn create(
-        &mut self,
-        item: &Root,
-        min_difficulty: u64,
-        work_ticket: &WorkTicket,
-    ) -> Option<WorkNonce> {
-        while !work_ticket.expired() {
+    fn create(&mut self, item: &Root, min_difficulty: u64) -> Option<WorkNonce> {
+        loop {
             let result = self.try_create_batch(item, min_difficulty);
             if result.is_some() {
-                return result.map(|i| i.into());
+                return result;
             }
 
             if !self.rate_limiter.is_zero() {
                 self.sleeper.sleep(self.rate_limiter);
             }
         }
-        None
     }
 }

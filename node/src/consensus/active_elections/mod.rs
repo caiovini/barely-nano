@@ -40,16 +40,16 @@ impl Default for ActiveElectionsConfig {
 #[derive(Debug, Clone)]
 pub enum AecEvent {
     ElectionStarted(BlockHash, QualifiedRoot),
-    ElectionConfirmed(ConfirmedElection),
+    ElectionConfirmed(alloc::boxed::Box<ConfirmedElection>),
 
     /// Ended ether confirmed or unconfirmed
-    ElectionEnded(Election),
+    ElectionEnded(alloc::boxed::Box<Election>),
 
     BlockAddedToElection(BlockHash),
-    BlockDiscarded(Block),
-    BlockConfirmed(SavedBlock, ConfirmedElection),
+    BlockDiscarded(alloc::boxed::Box<Block>),
+    BlockConfirmed(alloc::boxed::Box<SavedBlock>, alloc::boxed::Box<ConfirmedElection>),
     /// old winner + new winner block
-    WinnerChanged(BlockHash, Block),
+    WinnerChanged(BlockHash, alloc::boxed::Box<Block>),
 
     VoteProcessed(
         ReceivedVote,

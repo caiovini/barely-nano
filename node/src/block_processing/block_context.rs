@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use alloc::boxed::Box;
 
-use rsnano_core::{Block, SavedBlock};
+use rsnano_core::{Account, Block, SavedBlock};
 use rsnano_ledger::BlockError;
 use rsnano_network::ChannelId;
 
@@ -12,10 +12,11 @@ pub type BlockProcessorCallback = Box<dyn Fn(Result<(), BlockError>) + Send + Sy
 
 pub struct BlockContext {
     pub block: Block,
+    pub account: Option<Account>,
     pub saved_block: Mutex<Option<SavedBlock>>,
     pub source: BlockSource,
     pub callback: Option<BlockProcessorCallback>,
-    pub waiter: Arc<BlockProcessorWaiter>,
+    pub waiter: Option<Arc<BlockProcessorWaiter>>,
     pub channel_id: ChannelId,
 }
 
@@ -23,10 +24,11 @@ impl BlockContext {
     pub fn new(block: Block, source: BlockSource, channel_id: ChannelId) -> Self {
         Self {
             block,
+            account: None,
             saved_block: Mutex::new(None),
             source,
             callback: None,
-            waiter: Arc::new(BlockProcessorWaiter::new()),
+            waiter: None,
             channel_id,
         }
     }
@@ -39,12 +41,34 @@ impl BlockContext {
     ) -> Self {
         Self {
             block,
+            account: None,
             saved_block: Mutex::new(None),
             source,
             callback: Some(callback),
-            waiter: Arc::new(BlockProcessorWaiter::new()),
+            waiter: None,
             channel_id,
         }
+    }
+
+    pub fn with_account(mut self, account: Account) -> Self {
+        if !account.is_zero() {
+            self.account = Some(account);
+        }
+        self
+    }
+
+    pub fn new_blocking(block: Block, source: BlockSource, channel_id: ChannelId) -> (Self, Arc<BlockProcessorWaiter>) {
+        let waiter = Arc::new(BlockProcessorWaiter::new());
+        let ctx = Self {
+            block,
+            account: None,
+            saved_block: Mutex::new(None),
+            source,
+            callback: None,
+            waiter: Some(waiter.clone()),
+            channel_id,
+        };
+        (ctx, waiter)
     }
 
     pub fn new_test_instance() -> Self {
@@ -56,17 +80,17 @@ impl BlockContext {
     }
 
     pub fn set_result(&self, result: Result<(), BlockError>) {
-        self.waiter.set_result(result);
-    }
-
-    pub fn get_waiter(&self) -> Arc<BlockProcessorWaiter> {
-        self.waiter.clone()
+        if let Some(waiter) = &self.waiter {
+            waiter.set_result(result);
+        }
     }
 }
 
 impl Drop for BlockContext {
     fn drop(&mut self) {
-        self.waiter.cancel()
+        if let Some(waiter) = &self.waiter {
+            waiter.cancel();
+        }
     }
 }
 

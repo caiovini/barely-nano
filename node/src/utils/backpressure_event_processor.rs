@@ -30,10 +30,20 @@ pub(crate) fn spawn_backpressure_processor<T, I>(
                 previous_cooldown_state = current_cooldown;
             }
 
-            if let Ok(event) = receiver.try_recv() {
-                processor.process(event);
-            } else {
+            let batch_limit = if current_cooldown { 128 } else { 64 };
+            let mut processed = 0usize;
+            while processed < batch_limit {
+                if let Ok(event) = receiver.try_recv() {
+                    processor.process(event);
+                    processed += 1;
+                } else {
+                    break;
+                }
+            }
+            if processed > 0 {
                 async_rt::yield_now().await;
+            } else {
+                async_rt::sleep(core::time::Duration::from_millis(10)).await;
             }
         }
     });

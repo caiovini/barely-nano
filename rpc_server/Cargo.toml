@@ -22,8 +22,3 @@ indexmap = { version = "2", default-features = false, features = ["serde"] }
 
 [features]
 default = []
-
-
-[dev-dependencies]
-test_helpers = { path = "../tools/test_helpers" }
-rsnano_stats = { path = "../stats" }

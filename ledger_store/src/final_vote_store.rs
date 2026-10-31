@@ -34,8 +34,14 @@ impl BtreeFinalVoteStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            if let Some(value) = db.search(&key) {
-                return Some(BlockHash::from_bytes(value[0..32].try_into().unwrap()));
+            if let Some(res) = db.get_with(&key, |value| {
+                if value.len() >= 32 {
+                    Some(BlockHash::from_bytes(value[0..32].try_into().unwrap()))
+                } else {
+                    None
+                }
+            }) {
+                return res;
             }
         }
         None

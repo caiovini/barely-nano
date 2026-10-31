@@ -186,28 +186,11 @@ impl<T> SharedState<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::time::Duration;
 
     #[test]
     fn empty_queue() {
         let fixture = create_fixture();
         assert_eq!(fixture.queue.len(), 0);
-    }
-
-    #[test]
-    fn process_one() {
-        // let fixture = create_fixture();
-        // fixture.queue.add(1);
-        // fixture.wait_until_process_count_is(1);
-    }
-
-    #[test]
-    fn process_many() {
-        // let fixture = create_fixture();
-        // for _ in 0..10 {
-        //     fixture.queue.add(1);
-        // }
-        // fixture.wait_until_process_count_is(10);
     }
 
     #[test]
@@ -224,20 +207,6 @@ mod tests {
         _processed: Arc<Mutex<usize>>,
         _condition: Arc<Condvar>,
         queue: ProcessingQueue<i32>,
-    }
-
-    impl TestFixture {
-        #[allow(dead_code)]
-        fn wait_until_process_count_is(&self, expected: usize) {
-            // let guard = self.processed.lock();
-            // if *guard != expected {
-            //     let (guard, result) = self
-            //         .condition
-            //         .wait_timeout_while(guard, Duration::from_secs(5), |count| *count == expected)
-            //         .unwrap();
-            //     assert_eq!(result.timed_out(), false, "timeout! count was {}", *guard);
-            // }
-        }
     }
 
     const MAX_TEST_QUEUE_LEN: usize = 16;
@@ -270,3 +239,4 @@ mod tests {
         }
     }
 }
+

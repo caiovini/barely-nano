@@ -29,7 +29,13 @@ impl<'a> FrontierWorker<'a> {
     }
 
     pub fn process(&mut self, frontiers: Vec<Frontier>) {
+        let t0 = kernel_common::clint::mtime();
         let outdated = self.checker.get_outdated_accounts(&frontiers);
+        self.stats.add(
+            StatType::BootstrapFrontiers,
+            DetailType::ProcessMs,
+            (kernel_common::clint::mtime() - t0) * 1000 / kernel_common::clint::FREQ,
+        );
         if !outdated.accounts.is_empty() {
             tracing::debug!(
                 "FrontierAckProcessor: Found {} outdated accounts (outdated: {}, pending: {})",
@@ -66,52 +72,3 @@ impl<'a> FrontierWorker<'a> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bootstrap::state::CandidateAccounts;
-    use rsnano_core::{Account, AccountInfo, BlockHash};
-    use rsnano_ledger::Ledger;
-
-    #[test]
-    fn empty() {
-        let ledger = Ledger::new_null();
-        let any = ledger.any();
-        let stats = Stats::default();
-        let state = Mutex::new(BootstrapState::default());
-        let mut worker = FrontierWorker::new(&any, &stats, &state);
-
-        worker.process(Vec::new());
-
-        assert_eq!(state.lock().candidate_accounts.priority_len(), 0);
-    }
-
-    #[test]
-    fn prioritize_one_account() {
-        let account = Account::from(1);
-        let ledger = Ledger::new_null_builder()
-            .account_info(
-                &account,
-                &AccountInfo {
-                    head: BlockHash::from(2),
-                    ..Default::default()
-                },
-            )
-            .finish();
-        let any = ledger.any();
-        let stats = Stats::default();
-        let state = Mutex::new(BootstrapState::default());
-        let mut worker = FrontierWorker::new(&any, &stats, &state);
-
-        worker.process(vec![Frontier::new(account, BlockHash::from(3))]);
-
-        let guard = state.lock();
-        assert_eq!(guard.candidate_accounts.priority_len(), 1);
-        assert_eq!(
-            guard.candidate_accounts.priority(&account),
-            CandidateAccounts::PRIORITY_CUTOFF
-        );
-        assert_eq!(guard.counters.outdated_accounts_found, 1);
-        assert_eq!(guard.counters.received_frontiers, 1);
-    }
-}

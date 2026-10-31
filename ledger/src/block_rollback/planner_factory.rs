@@ -22,13 +22,15 @@ impl<'a> RollbackPlannerFactory<'a> {
 
     pub(crate) fn create_planner(&self) -> Result<RollbackPlanner<'a>, RollbackError> {
         let account = self.get_account(self.head_block);
+        let previous = self.load_previous_block()?;
+        let previous_representative = self.get_previous_representative(&previous);
         let planner = RollbackPlanner {
             epochs: &self.ledger.constants.epochs,
             head_block: self.head_block.clone(),
             account,
             current_account_info: self.load_account(&account),
-            previous_representative: self.get_previous_representative(),
-            previous: self.load_previous_block()?,
+            previous_representative,
+            previous,
             linked_account: self.load_linked_account(),
             pending_receive: self.load_pending_receive(),
             latest_block_for_destination: self.latest_block_for_destination(),
@@ -87,23 +89,22 @@ impl<'a> RollbackPlannerFactory<'a> {
         self.any.get_account(account).unwrap_or_default()
     }
 
-    fn get_previous_representative(&self) -> Option<PublicKey> {
-        let previous = self.head_block.previous();
-        let rep_block_hash = if !previous.is_zero() {
-            self.any.representative_block_hash(&previous)
-        } else {
-            BlockHash::zero()
+    fn get_previous_representative(&self, previous: &Option<SavedBlock>) -> Option<PublicKey> {
+        let Some(prev_block) = previous else {
+            return None;
         };
-
-        let previous_rep = if !rep_block_hash.is_zero() {
+        if let Some(rep) = prev_block.representative_field() {
+            return Some(rep);
+        }
+        let rep_block_hash = self.any.representative_block_hash(&prev_block.hash());
+        if !rep_block_hash.is_zero() {
             let rep_block = self
                 .load_block(&rep_block_hash)
                 .expect("Could not load representative block!");
             Some(rep_block.representative_field().unwrap_or_default())
         } else {
             None
-        };
-        previous_rep
+        }
     }
 
     fn load_block(&self, block_hash: &BlockHash) -> anyhow::Result<SavedBlock> {

@@ -225,6 +225,7 @@ mod tests {
     }
 
     mod entry_container_tests {
+        use super::*;
 
         #[test]
         fn trim() {

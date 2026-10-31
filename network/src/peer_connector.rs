@@ -45,11 +45,6 @@ impl PeerConnector {
 
     /// Establish a network connection to the given peer
     pub fn connect_to(&self, peer: SocketAddrV6) -> Result<(), NetworkError> {
-        kernel_common::uart::print(b"[peer] Reachout to ");
-        let mut ip_str = alloc::string::String::new();
-        let _ = core::fmt::write(&mut ip_str, format_args!("{}", peer));
-        kernel_common::uart::print(ip_str.as_bytes());
-        kernel_common::uart::print(b"\n");
         self.connect_listener.emit(peer);
 
         if self.cancel_token.is_cancelled() {
@@ -67,38 +62,26 @@ impl PeerConnector {
 
         let network_l = self.network_adapter.clone();
         let cancel_token = self.cancel_token.clone();
+        let connect_timeout = self.connect_timeout;
 
         async_rt::spawn_named(async move {
             // Add a timeout to the connection attempt to prevent task leaks
             let mut connect_fut = Box::pin(connect_impl(peer, &network_l));
             let mut cancel_fut = Box::pin(cancel_token.cancelled());
+            let mut timeout_fut = Box::pin(async_rt::sleep(connect_timeout));
 
-            let start = kernel_common::clint::mtime();
-            let timeout_ticks = 5 * kernel_common::clint::FREQ;
-
-            loop {
-                let mtime = kernel_common::clint::mtime();
-                if mtime - start > timeout_ticks {
-                    break;
+            poll_fn(|cx| {
+                if let Poll::Ready(_) = Pin::new(&mut cancel_fut).poll(cx) {
+                    return Poll::Ready(());
                 }
-
-                // Try polling the futures once
-                let is_done = poll_fn(|cx| {
-                    if let Poll::Ready(_) = Pin::new(&mut cancel_fut).poll(cx) {
-                        return Poll::Ready(true);
-                    }
-                    if let Poll::Ready(_) = Pin::new(&mut connect_fut).poll(cx) {
-                        return Poll::Ready(true);
-                    }
-                    Poll::Ready(false)
-                }).await;
-
-                if is_done {
-                    break;
+                if let Poll::Ready(_) = Pin::new(&mut connect_fut).poll(cx) {
+                    return Poll::Ready(());
                 }
-
-                async_rt::yield_now().await;
-            }
+                if let Poll::Ready(_) = Pin::new(&mut timeout_fut).poll(cx) {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            }).await;
 
             network_l.remove_attempt(&peer);
         }, Some("Peer Connection"));
@@ -117,11 +100,6 @@ async fn connect_impl(peer: SocketAddrV6, network_adapter: &TcpNetworkAdapter) {
             let _ = network_adapter.add(stream, ChannelDirection::Outbound);
         }
         Err(e) => {
-            kernel_common::uart::print(b"[peer] Connect failed to ");
-            let mut ip_str = alloc::string::String::new();
-            let _ = core::fmt::write(&mut ip_str, format_args!("{}", peer));
-            kernel_common::uart::print(ip_str.as_bytes());
-            kernel_common::uart::print(b"\n");
             network_adapter.connect_error(peer, e);
         }
     }

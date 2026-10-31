@@ -1,14 +1,23 @@
+#[cfg(target_arch = "riscv64")]
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_arch = "riscv64")]
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicU64;
 
+#[cfg(target_arch = "riscv64")]
 use crate::uart;
 
 // ---- tick counter -------------------------------------------------------
 
 pub static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "riscv64")]
+static PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "riscv64")]
+static PROBE_FAULTED: AtomicBool = AtomicBool::new(false);
 
 // ---- CSR helpers --------------------------------------------------------
 
+#[cfg(target_arch = "riscv64")]
 macro_rules! csrw {
     ($csr:literal, $val:expr) => {
         unsafe {
@@ -21,6 +30,7 @@ macro_rules! csrw {
     };
 }
 
+#[cfg(target_arch = "riscv64")]
 macro_rules! csrs {
     ($csr:literal, $val:expr) => {
         unsafe {
@@ -33,6 +43,7 @@ macro_rules! csrs {
     };
 }
 
+#[cfg(target_arch = "riscv64")]
 macro_rules! csrr {
     ($csr:literal) => {{
         let val: usize;
@@ -52,6 +63,7 @@ macro_rules! csrr {
 // S-mode uses `sret`.
 // .align 2 → 4-byte alignment required by stvec direct mode (bits[1:0] = 0b00).
 
+#[cfg(target_arch = "riscv64")]
 global_asm!(
     ".align 2",
     ".option arch, +d",
@@ -128,31 +140,71 @@ global_asm!(
 
 // ---- init ---------------------------------------------------------------
 
+#[cfg(target_arch = "riscv64")]
 extern "C" {
     fn trap_vector();
 }
 
 /// Set up S-mode trap vector and enable FP/Vector CSR bits.
 pub fn init() {
-    let tv = trap_vector as *const () as usize;
+    #[cfg(target_arch = "riscv64")]
+    {
+        let tv = trap_vector as *const () as usize;
 
-    // S-mode CSRs: stvec, sie, sstatus
-    // We set up stvec to capture exceptions, but we do NOT configure or enable
-    // timer interrupts, because the SpacemiT K1 processor's OpenSBI firmware
-    // has a buggy/unimplemented sbi_set_timer ecall that hangs the CPU.
-    // The node's scheduler and Sleep futures use rdtime cooperative yielding
-    // and do not require preemption, and the watchdog is already continuously
-    // kicked in the main loop.
-    uart::print(b"[trap] S-mode trap vector init\n");
-    csrw!("stvec", tv);
-    
-    // Enable FS (bits 14:13) and VS (bits 10:9) for vector/floating-point/SIMD ops
-    csrs!("sstatus", (3usize << 13) | (3usize << 9));
-    uart::print(b"[trap] S-mode trap vector init done\n");
+        // S-mode CSRs: stvec, sie, sstatus
+        // We set up stvec to capture exceptions, but we do NOT configure or enable
+        // timer interrupts, because the SpacemiT K1 processor's OpenSBI firmware
+        // has a buggy/unimplemented sbi_set_timer ecall that hangs the CPU.
+        // The node's scheduler and Sleep futures use rdtime cooperative yielding
+        // and do not require preemption, and the watchdog is already continuously
+        // kicked in the main loop.
+        uart::print(b"[trap] S-mode trap vector init\n");
+        csrw!("stvec", tv);
+        
+        // Enable FS (bits 14:13) and VS (bits 10:9) for vector/floating-point/SIMD ops
+        csrs!("sstatus", (3usize << 13) | (3usize << 9));
+        uart::print(b"[trap] S-mode trap vector init done\n");
+    }
+}
+
+/// Trap-safe 64-bit read/write memory probe.
+/// Returns `true` if `addr` is accessible in S-mode (no PMP/bus/page fault) and holds written data.
+pub fn probe_rw_u64(addr: usize) -> bool {
+    #[cfg(target_arch = "riscv64")]
+    {
+        PROBE_FAULTED.store(false, Ordering::SeqCst);
+        PROBE_ACTIVE.store(true, Ordering::SeqCst);
+        let pattern: u64 = 0xA55A_F00F_DEAD_BEEF ^ (addr as u64);
+        let mut readback: u64 = 0;
+        // SAFETY: `PROBE_ACTIVE` instructs `rust_trap_handler` to catch any load/store access fault
+        // on the 4-byte `.option norvc` `sd`/`ld` instructions and advance `sepc + 4`.
+        unsafe {
+            core::arch::asm!(
+                ".option push",
+                ".option norvc",
+                "sd {pat}, 0({ptr})",
+                "fence rw, rw",
+                "ld {out}, 0({ptr})",
+                ".option pop",
+                ptr = in(reg) addr,
+                pat = in(reg) pattern,
+                out = inout(reg) readback,
+                options(nostack)
+            );
+        }
+        PROBE_ACTIVE.store(false, Ordering::SeqCst);
+        !PROBE_FAULTED.load(Ordering::SeqCst) && readback == pattern
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let _ = addr;
+        false
+    }
 }
 
 // ---- Rust trap handler --------------------------------------------------
 
+#[cfg(target_arch = "riscv64")]
 #[no_mangle]
 pub extern "C" fn rust_trap_handler(_regs: *const usize) {
     let xcause = csrr!("scause");
@@ -160,6 +212,13 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
     // MSB = interrupt flag; lower bits = cause code
     let is_interrupt = (xcause >> 63) != 0;
     let cause = xcause & !(1usize << 63);
+
+    if !is_interrupt && PROBE_ACTIVE.load(Ordering::SeqCst) {
+        PROBE_FAULTED.store(true, Ordering::SeqCst);
+        let sepc = csrr!("sepc");
+        csrw!("sepc", sepc + 4);
+        return;
+    }
 
     // Timer interrupt cause: 5 in S-mode
     let timer_cause = 5usize;
@@ -182,20 +241,22 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
         
         // Use no_lock to avoid deadlocking if the hart was already holding the UART lock
         uart::print_no_lock(b"?");
-        if hart_id < 10 {
-            uart::putchar(hart_id as u8 + b'0');
-        } else {
-            uart::print_usize_no_lock(hart_id);
-        }
+        uart::print_usize_no_lock(hart_id);
         uart::print_no_lock(b"C=");
         uart::print_hex_no_lock(xcause);
         
         let sepc = csrr!("sepc");
+        let stval = csrr!("stval");
         let ra = unsafe { *_regs.add(0) }; // Saved x1 (ra)
+        let orig_sp = unsafe { *_regs.add(1) }; // Saved x2 (sp)
         uart::print_no_lock(b" P=");
         uart::print_hex_no_lock(sepc);
         uart::print_no_lock(b" RA=");
         uart::print_hex_no_lock(ra);
+        uart::print_no_lock(b" TV=");
+        uart::print_hex_no_lock(stval);
+        uart::print_no_lock(b" SP=");
+        uart::print_hex_no_lock(orig_sp);
         if sepc == 0 {
             uart::print_no_lock(b" (NULL JUMP!)\n");
             loop {}
@@ -203,9 +264,31 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
         uart::print_no_lock(b"\n");
         
         // If it's a critical exception, we must stop
-        // 0: Instruction Address Misaligned, 1: Instruction Access Fault, 2: Illegal Instruction, 5: Load Access Fault, 12-15: Page Faults
-        if xcause == 0 || xcause == 1 || xcause == 2 || xcause == 5 || xcause >= 12 {
-             loop {}
+        // 0: Instruction Address Misaligned, 1: Instruction Access Fault, 2: Illegal Instruction,
+        // 3: Breakpoint, 4: Load Address Misaligned, 5: Load Access Fault,
+        // 6: Store/AMO Address Misaligned, 7: Store/AMO Access Fault, 12-15: Page Faults
+        if xcause <= 7 || xcause >= 12 {
+            let mut last_print = crate::clint::mtime();
+            loop {
+                let now = crate::clint::mtime();
+                if now.saturating_sub(last_print) > 15 * crate::clint::FREQ {
+                    last_print = now;
+                    uart::print_no_lock(b"[TRAP] hart=");
+                    uart::print_usize_no_lock(hart_id);
+                    uart::print_no_lock(b" scause=");
+                    uart::print_hex_no_lock(xcause);
+                    uart::print_no_lock(b" sepc=");
+                    uart::print_hex_no_lock(sepc);
+                    uart::print_no_lock(b" ra=");
+                    uart::print_hex_no_lock(ra);
+                    uart::print_no_lock(b" stval=");
+                    uart::print_hex_no_lock(stval);
+                    uart::print_no_lock(b" sp=");
+                    uart::print_hex_no_lock(orig_sp);
+                    uart::print_no_lock(b"\n");
+                }
+                core::hint::spin_loop();
+            }
         }
     }
 }

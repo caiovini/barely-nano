@@ -32,6 +32,10 @@ impl TcpNetworkAdapter {
         }
     }
 
+    pub fn listening_port(&self) -> u16 {
+        self.network.read().listening_port()
+    }
+
     pub async fn wait_for_available_inbound_slot(&self) {
         let mut last_log = self.clock.now();
         let log_interval = Duration::from_secs(15);
@@ -88,80 +92,80 @@ impl TcpNetworkAdapter {
             .lock()
             .insert(channel_id, channel_adapter.clone());
 
-        let network_l = self.network.clone();
         let adapters_l = self.channel_adapters.clone();
         let adapter_l = channel_adapter.clone();
         let clock_l = self.clock.clone();
         async_rt::spawn_named(async move {
-            kernel_common::uart::putchar(b'[');
             let channel_l = adapter_l.channel.clone();
-            let mut buffer = [0u8; 1024];
+            let mut buffer = [0u8; 4096];
+            let mut consecutive_reads = 0usize;
 
             loop {
                 if channel_l.is_closed() {
-                    kernel_common::uart::print(b"[X]");
                     break;
                 }
+                if consecutive_reads >= 4 {
+                    consecutive_reads = 0;
+                    async_rt::yield_now().await;
+                }
 
-                // Wait for data or cancellation
-                let mut readable_fut = core::pin::pin!(adapter_l.readable());
-                let mut cancel_fut = core::pin::pin!(channel_l.cancelled());
-                
-                let ready = core::future::poll_fn(|cx| {
-                    if let core::task::Poll::Ready(r) = readable_fut.as_mut().poll(cx) {
-                        return core::task::Poll::Ready(Some(r));
-                    }
-                    if let core::task::Poll::Ready(_) = cancel_fut.as_mut().poll(cx) {
-                        return core::task::Poll::Ready(None);
-                    }
-                    core::task::Poll::Pending
-                }).await;
+                // Wait for data or cancellation in a single NET.lock() acquisition
+                let read_result = {
+                    let mut read_fut = core::pin::pin!(adapter_l.read_chunk(&mut buffer));
+                    let mut cancel_fut = core::pin::pin!(channel_l.cancelled());
+                    
+                    let mut polled_once = false;
+                    core::future::poll_fn(|cx| {
+                        if let core::task::Poll::Ready(r) = read_fut.as_mut().poll(cx) {
+                            if !polled_once {
+                                consecutive_reads += 1;
+                            } else {
+                                consecutive_reads = 0;
+                            }
+                            return core::task::Poll::Ready(Some(r));
+                        }
+                        if let core::task::Poll::Ready(_) = cancel_fut.as_mut().poll(cx) {
+                            return core::task::Poll::Ready(None);
+                        }
+                        polled_once = true;
+                        consecutive_reads = 0;
+                        core::task::Poll::Pending
+                    }).await
+                };
 
-                let Some(readable_res) = ready else { 
-                    kernel_common::uart::print(b"[C]");
+                let Some(read_res) = read_result else { 
                     break; 
                 };
                 
-                match readable_res {
-                    Ok(()) => {
-                        let read_result = adapter_l.try_read(&mut buffer);
-                        match read_result {
-                            Ok(read_count) => {
-                                if read_count == 0 {
-                                    kernel_common::uart::print(b"[0]");
+                match read_res {
+                    Ok(read_count) => {
+                        if read_count == 0 {
+                            break;
+                        }
+
+                        adapter_l.channel.set_last_activity(clock_l.now());
+                        let new_data = &buffer[..read_count];
+                        match receiver.receive(new_data) {
+                            ReceiveResult::Continue => {}
+                            ReceiveResult::Abort => {
+                                break;
+                            }
+                            ReceiveResult::Pause => loop {
+                                async_rt::sleep(core::time::Duration::from_millis(50)).await;
+                                if channel_l.is_cancelled() {
                                     break;
                                 }
-
-                                kernel_common::uart::putchar(b'd');
-                                adapter_l.channel.set_last_activity(clock_l.now());
-                                let new_data = &buffer[..read_count];
-                                match receiver.receive(new_data) {
-                                    ReceiveResult::Continue => {
-                                        kernel_common::uart::putchar(b'm');
-                                    }
-                                    ReceiveResult::Abort => {
-                                        kernel_common::uart::print(b"[A]");
-                                        break;
-                                    }
-                                    ReceiveResult::Pause => loop {
-                                        async_rt::sleep(core::time::Duration::from_millis(50)).await;
-                                        if channel_l.is_cancelled() {
-                                            kernel_common::uart::print(b"{C}");
-                                            break;
-                                        }
-                                        match receiver.try_unpause() {
+                                match receiver.try_unpause() {
                                             ReceiveResult::Continue => {
                                                 match receiver.receive(&[]) {
                                                     ReceiveResult::Continue => break,
                                                     ReceiveResult::Abort => {
-                                                        kernel_common::uart::print(b"{A}");
                                                         break;
                                                     }
                                                     ReceiveResult::Pause => {} 
                                                 }
                                             }
                                             ReceiveResult::Abort => {
-                                                kernel_common::uart::print(b"{A}");
                                                 break;
                                             }
                                             ReceiveResult::Pause => {}
@@ -169,21 +173,12 @@ impl TcpNetworkAdapter {
                                     },
                                 }
                             }
-                            Err(_) => {
-                                kernel_common::uart::print(b"[E]");
-                                break;
-                            }
-                        }
-                    }
                     Err(_) => {
-                        kernel_common::uart::print(b"[E]");
                         break;
                     }
                 }
             }
-            kernel_common::uart::putchar(b']');
             channel_l.close();
-            network_l.write().remove(channel_id);
             adapters_l.lock().remove(&channel_id);
         }, Some("TcpChannel Read"));
 

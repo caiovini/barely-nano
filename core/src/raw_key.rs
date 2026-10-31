@@ -52,6 +52,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "AES-256-CTR wallet key encryption is disabled in bare-metal no_std build"]
     fn encrypt() {
         let clear_text = RawKey::from(1);
         let key = RawKey::from(2);

@@ -2,17 +2,16 @@ use crate::{
     block_cementer::BlockCementer,
     block_insertion::{BlockInserter, BlockValidatorFactory},
     vote_verifier::VoteVerifier,
-    AnySet, BlockRollbackPerformer, GenerateCacheFlags, LedgerConstants, LedgerSet, OwningAnySet,
-    OwningConfirmedSet, OwningUnconfirmedSet, RepWeightCache, RepWeightsUpdater, RollbackError,
+    AnySet, BlockRollbackPerformer, LedgerConstants, LedgerSet, OwningAnySet, OwningConfirmedSet,
+    OwningUnconfirmedSet, RepWeightCache, RepWeightsUpdater, RollbackError,
 };
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use rsnano_core::{
-    utils::SocketAddrV6, Account, AccountInfo, Amount, Block, BlockHash, ConfirmationHeightInfo,
-    Epoch, Link, PendingInfo, PendingKey, PublicKey, QualifiedRoot, Root, SavedBlock,
+    Account, AccountInfo, Amount, Block, BlockHash, Epoch, Link, PublicKey, QualifiedRoot, Root,
+    SavedBlock,
 };
 use rsnano_ledger_store::BtreeStore;
-use rsnano_nullable_clock::Timestamp;
 use rsnano_stats::{DetailType, StatType, Stats};
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, EnumCount, EnumIter, IntoStaticStr)]
@@ -90,6 +89,20 @@ impl From<BlockError> for DetailType {
     }
 }
 
+/// Profiling (CLINT ticks): [0]=create_validator, [1]=validate, [2]=insert.
+pub static LEDGER_PROF: [core::sync::atomic::AtomicU64; 10] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
 pub struct Ledger {
     pub store: BtreeStore,
     pub rep_weights_updater: RepWeightsUpdater,
@@ -99,70 +112,35 @@ pub struct Ledger {
     pub(crate) stats: Arc<Stats>,
 }
 
-pub struct NullLedgerBuilder {
-    min_rep_weight: Amount,
-}
-
-impl NullLedgerBuilder {
-    fn new() -> Self {
+impl Ledger {
+    pub fn new_null() -> Self {
+        let mut store = BtreeStore::new();
+        let rep_weights = Arc::new(RepWeightCache::new());
+        store.set_cache(rep_weights.ledger_cache.clone());
+        store.cache.account_count.store(1, Ordering::SeqCst);
+        store.cache.block_count.store(1, Ordering::SeqCst);
+        store.cache.confirmed_count.store(1, Ordering::SeqCst);
+        let rep_weights_updater =
+            RepWeightsUpdater::new(store.rep_weight.clone(), Amount::zero(), &rep_weights);
         Self {
-            min_rep_weight: Amount::zero(),
+            rep_weights,
+            rep_weights_updater,
+            store,
+            constants: LedgerConstants::unit_test(),
+            pruning: AtomicBool::new(false),
+            stats: Arc::new(Stats::default()),
         }
     }
 
-    pub fn block(self, _block: &SavedBlock) -> Self {
-        // Mock for now
-        self
+    pub fn simulate_block_count(&self, count: u64) {
+        self.store.cache.block_count.store(count, Ordering::SeqCst);
     }
 
-    pub fn blocks<'a>(self, _blocks: impl IntoIterator<Item = &'a SavedBlock>) -> Self {
-        self
-    }
-
-    pub fn peers(self, _peers: impl IntoIterator<Item = (SocketAddrV6, Timestamp)>) -> Self {
-        self
-    }
-
-    pub fn confirmation_height(self, _account: &Account, _info: &ConfirmationHeightInfo) -> Self {
-        self
-    }
-
-    pub fn account_info(self, _account: &Account, _info: &AccountInfo) -> Self {
-        self
-    }
-
-    pub fn pending(self, _key: &PendingKey, _info: &PendingInfo) -> Self {
-        self
-    }
-
-    pub fn pruned(self, _hash: &BlockHash) -> Self {
-        self
-    }
-
-    pub fn finish(self) -> Ledger {
-        Ledger::new(
-            BtreeStore::new(),
-            LedgerConstants::unit_test(),
-            self.min_rep_weight,
-            Arc::new(RepWeightCache::new()),
-            Arc::new(Stats::default()),
-            1,
-        )
-        .unwrap()
-    }
-}
-
-impl Ledger {
-    pub fn new_null() -> Self {
-        Self::new(
-            BtreeStore::new(),
-            LedgerConstants::unit_test(),
-            Amount::zero(),
-            Arc::new(RepWeightCache::new()),
-            Arc::new(Stats::default()),
-            1,
-        )
-        .unwrap()
+    pub fn simulate_confirmed_count(&self, count: u64) {
+        self.store
+            .cache
+            .confirmed_count
+            .store(count, Ordering::SeqCst);
     }
 
     pub fn store_vendor(&self) -> &'static str {
@@ -174,15 +152,11 @@ impl Ledger {
     }
 
     pub fn pruned_count(&self) -> usize {
-        self.store.cache.pruned_count.load(Ordering::SeqCst) as usize
+        self.store.cache.pruned_count.load(Ordering::Relaxed) as usize
     }
 
     pub fn genesis(&self) -> &Block {
         &self.constants.genesis_block
-    }
-
-    pub fn new_null_builder() -> NullLedgerBuilder {
-        NullLedgerBuilder::new()
     }
 
     pub(crate) fn new(
@@ -193,7 +167,7 @@ impl Ledger {
         stats: Arc<Stats>,
         thread_count: usize,
     ) -> anyhow::Result<Self> {
-        store.cache = rep_weights.ledger_cache.clone();
+        store.set_cache(rep_weights.ledger_cache.clone());
 
         let rep_weights_updater =
             RepWeightsUpdater::new(store.rep_weight.clone(), min_rep_weight, &rep_weights);
@@ -207,16 +181,12 @@ impl Ledger {
             stats,
         };
 
-        ledger.initialize(thread_count, &GenerateCacheFlags::new())?;
+        ledger.initialize(thread_count)?;
 
         Ok(ledger)
     }
 
-    fn initialize(
-        &mut self,
-        _thread_count: usize,
-        _generate_cache: &GenerateCacheFlags,
-    ) -> anyhow::Result<()> {
+    fn initialize(&mut self, _thread_count: usize) -> anyhow::Result<()> {
         kernel_common::watchdog::kick();
         kernel_common::uart::print(b"[ledger] Initializing ledger...\n");
         let genesis = self.constants.genesis_block.clone();
@@ -225,6 +195,9 @@ impl Ledger {
         for attempt in 0..2 {
             kernel_common::watchdog::kick();
             self.store.generate_cache();
+            self.store
+                .rep_weight
+                .for_each(|rep, weight| self.rep_weights_updater.representation_put(rep, weight));
 
             // 1. Ensure genesis block exists
             let exists = self.any().block_exists_or_pruned(&genesis.hash());
@@ -325,10 +298,6 @@ impl Ledger {
         let _info = self.any().get_account(&genesis_account).unwrap();
         kernel_common::uart::print(b"[ledger] Fetching genesis account info done.\n");
 
-        kernel_common::uart::print(b"[ledger] Iterating accounts...\n");
-        let _accounts = self.any().iter_accounts();
-        kernel_common::uart::print(b"[ledger] Iterating accounts done.\n");
-
         kernel_common::uart::print(b"[ledger] Tracing block successors...\n");
         let mut current = genesis.hash();
         let mut count = 0;
@@ -402,15 +371,15 @@ impl Ledger {
     }
 
     pub fn account_count(&self) -> usize {
-        self.store.cache.account_count.load(Ordering::SeqCst) as usize
+        self.store.cache.account_count.load(Ordering::Relaxed) as usize
     }
 
     pub fn block_count(&self) -> usize {
-        self.store.cache.block_count.load(Ordering::SeqCst) as usize
+        self.store.cache.block_count.load(Ordering::Relaxed) as usize
     }
 
     pub fn confirmed_count(&self) -> usize {
-        self.store.cache.confirmed_count.load(Ordering::SeqCst) as usize
+        self.store.cache.confirmed_count.load(Ordering::Relaxed) as usize
     }
 
     pub fn is_epoch_link(&self, link: &Link) -> bool {
@@ -482,7 +451,14 @@ impl Ledger {
                 self.store.pruned.put(&hash);
                 hash = block.previous();
                 pruned_count += 1;
+                // `store.block.del` decrements `cache.block_count`; restore it because in
+                // RSNano `cache.block_count` is total blocks (`unpruned + pruned`), while
+                // `store.block.count()` is `cache.block_count - cache.pruned_count`.
+                self.store.cache.block_count.fetch_add(1, Ordering::SeqCst);
                 self.store.cache.pruned_count.fetch_add(1, Ordering::SeqCst);
+                if pruned_count % 256 == 0 {
+                    kernel_common::watchdog::kick();
+                }
             } else if self.store.pruned.exists(&hash) {
                 hash = BlockHash::zero();
             } else {
@@ -588,62 +564,165 @@ impl Ledger {
         &self,
         batch: impl IntoIterator<Item = (&'a Block, bool)>,
     ) -> BatchProcessResult {
-        let mut processed = Vec::new();
-        let mut failed_accounts = alloc::collections::BTreeSet::new();
+        let items: Vec<(&'a Block, bool)> = batch.into_iter().collect();
+        let len = items.len();
+        let mut processed = Vec::with_capacity(len);
+        let mut failed_hashes = alloc::collections::BTreeSet::new();
+        let mut deferred_blocks: alloc::collections::BTreeMap<BlockHash, SavedBlock> =
+            alloc::collections::BTreeMap::new();
+        let mut deferred_successors: alloc::collections::BTreeMap<BlockHash, BlockHash> =
+            alloc::collections::BTreeMap::new();
+        let mut deferred_accounts: alloc::collections::BTreeMap<Account, (AccountInfo, AccountInfo)> =
+            alloc::collections::BTreeMap::new();
 
-        for (block, signature_verified) in batch.into_iter() {
+        for (idx, &(block, signature_verified)) in items.iter().enumerate() {
+            if idx + 4 < len {
+                let (ahead, _) = items[idx + 4];
+                self.store.block.prefetch_may_exist(&ahead.hash());
+                self.store.block.prefetch_may_exist(&ahead.previous());
+                self.store.block.prefetch_may_exist(&ahead.source_or_link());
+            }
             let hash = block.hash();
+            let prev_hash = block.previous();
 
-            // Fast-path: if an earlier block of this account failed in this batch,
-            // this block's predecessor cannot exist. Reject immediately as GapPrevious.
-            if let Some(account) = block.account_field() {
-                if failed_accounts.contains(&account) {
-                    processed.push((Err(BlockError::GapPrevious), None));
-                    continue;
-                }
+            // Fast-path: if the exact predecessor block failed earlier in this batch,
+            // or is absent from both deferred_blocks and the block Cuckoo filter,
+            // this block's predecessor cannot exist in the ledger. Reject immediately as GapPrevious.
+            if !prev_hash.is_zero()
+                && (failed_hashes.contains(&prev_hash)
+                    || (!cfg!(test)
+                        && !deferred_blocks.contains_key(&prev_hash)
+                        && !self.store.block.may_exist(&prev_hash)))
+            {
+                failed_hashes.insert(hash);
+                processed.push((Err(BlockError::GapPrevious), None));
+                continue;
             }
 
             tracing::debug!("Ledger: validating block {}", hash);
 
+            let tp0 = kernel_common::clint::mtime();
+            let in_batch_exists = deferred_blocks.contains_key(&hash);
+            let in_batch_prev = if !prev_hash.is_zero() {
+                deferred_blocks.get(&prev_hash).cloned()
+            } else {
+                None
+            };
+            let candidate_account = block
+                .account_field()
+                .or_else(|| in_batch_prev.as_ref().map(|p| p.account()));
+            let in_batch_account = candidate_account
+                .and_then(|acc| deferred_accounts.get(&acc).map(|(_, latest)| latest.clone()));
+            let source_hash = block.source_or_link();
+            let in_batch_source_exists =
+                !source_hash.is_zero() && deferred_blocks.contains_key(&source_hash);
+
             let any = OwningAnySet::new(&self.store, &self.constants);
-            let validator =
-                BlockValidatorFactory::new(&any, &self.constants, block).create_validator(signature_verified);
+            let validator = BlockValidatorFactory::new(&any, &self.constants, block)
+                .create_validator_with_batch_cache(
+                    signature_verified,
+                    in_batch_exists,
+                    in_batch_prev,
+                    in_batch_account,
+                    in_batch_source_exists,
+                );
+            let tp1 = kernel_common::clint::mtime();
             let result = validator.validate();
+            let tp2 = kernel_common::clint::mtime();
+            LEDGER_PROF[0].fetch_add(tp1 - tp0, core::sync::atomic::Ordering::Relaxed);
+            LEDGER_PROF[1].fetch_add(tp2 - tp1, core::sync::atomic::Ordering::Relaxed);
 
             match result {
                 Ok(instructions) => {
-                    if let Some(saved_block) =
-                        BlockInserter::new(self, &mut (), block, &instructions).insert()
-                    {
-                        tracing::debug!(
-                            "Ledger: processed block {} (Account: {}, Height: {})",
-                            saved_block.hash(),
-                            saved_block.account().encode_account(),
-                            saved_block.height()
-                        );
+                    let tp3 = kernel_common::clint::mtime();
+                    let inserted = BlockInserter::new(self, &mut (), block, &instructions)
+                        .insert_with_options(true);
+                    LEDGER_PROF[2].fetch_add(
+                        kernel_common::clint::mtime() - tp3,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    if let Some(saved_block) = inserted {
+                        if !prev_hash.is_zero() {
+                            deferred_successors.insert(prev_hash, hash);
+                        }
+                        deferred_accounts
+                            .entry(instructions.account)
+                            .and_modify(|(_, latest)| {
+                                *latest = instructions.set_account_info.clone();
+                            })
+                            .or_insert_with(|| {
+                                (
+                                    instructions.old_account_info.clone(),
+                                    instructions.set_account_info.clone(),
+                                )
+                            });
+                        deferred_blocks.insert(hash, saved_block.clone());
                         processed.push((Ok(()), Some(saved_block)));
                     } else {
-                        if let Some(account) = block.account_field() {
-                            failed_accounts.insert(account);
-                        }
+                        failed_hashes.insert(hash);
                         tracing::debug!("Ledger: conflict for block {}", block.hash());
                         processed.push((Err(BlockError::Conflict), None));
                     }
                 }
                 Err(err) => {
-                    if let Some(account) = block.account_field() {
-                        failed_accounts.insert(account);
+                    if err != BlockError::Old {
+                        failed_hashes.insert(hash);
                     }
-                    tracing::debug!("Ledger: validation failed for block {}! Error: {:?}", hash, err);
-
                     tracing::debug!(
                         "Ledger: validation failed for block {}! Error: {:?}",
-                        block.hash(),
+                        hash,
                         err
                     );
                     processed.push((Err(err), None));
                 }
             }
+        }
+
+        // Flush coalesced, key-sorted B-Tree writes sequentially by ascending key / shard order
+        if !deferred_blocks.is_empty() {
+            let tp3 = kernel_common::clint::mtime();
+            for (_, saved_block) in &deferred_blocks {
+                self.store.block.put(saved_block);
+            }
+            for (prev, succ) in &deferred_successors {
+                self.store.successors.put(prev, succ);
+            }
+            for (account, (first_old_info, final_new_info)) in &deferred_accounts {
+                if !final_new_info.head.is_zero() {
+                    if !first_old_info.head.is_zero() && first_old_info.epoch != final_new_info.epoch
+                    {
+                        self.store.account.del(account);
+                    }
+                    self.store.account.put(account, final_new_info);
+                } else {
+                    self.store.account.del(account);
+                    self.store.cache.account_count.fetch_sub(1, Ordering::SeqCst);
+                }
+
+                if !first_old_info.head.is_zero() {
+                    if first_old_info.representative != final_new_info.representative
+                        || first_old_info.balance != final_new_info.balance
+                    {
+                        self.rep_weights_updater.representation_add_dual(
+                            &mut (),
+                            first_old_info.representative,
+                            Amount::zero().wrapping_sub(first_old_info.balance),
+                            final_new_info.representative,
+                            final_new_info.balance,
+                        );
+                    }
+                } else if !final_new_info.balance.is_zero() {
+                    self.rep_weights_updater.representation_add(
+                        &mut (),
+                        final_new_info.representative,
+                        final_new_info.balance,
+                    );
+                }
+            }
+            LEDGER_PROF[2].fetch_add(
+                kernel_common::clint::mtime() - tp3,
+                core::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         BatchProcessResult { processed }

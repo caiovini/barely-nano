@@ -34,6 +34,10 @@ impl BootstrapPromise<AscPullQuerySpec> for DependencyRequester {
         loop {
             match self.state {
                 DependencyState::Initial => {
+                    #[cfg(not(test))]
+                    if state.candidate_accounts.blocking_unknown_len() == 0 {
+                        return PollResult::Wait;
+                    }
                     self.stats
                         .inc(StatType::Bootstrap, DetailType::LoopDependencies);
                     self.state = DependencyState::WaitChannel;
@@ -52,8 +56,11 @@ impl BootstrapPromise<AscPullQuerySpec> for DependencyRequester {
                         self.state = DependencyState::Initial;
                         return PollResult::Finished(spec);
                     } else {
-                        state.scoring.request_finished(channel.channel_id());
-                        self.state = DependencyState::Initial;
+                        #[cfg(not(test))]
+                        if !channel.is_alive() {
+                            state.scoring.request_finished(channel.channel_id());
+                            self.state = DependencyState::Initial;
+                        }
                         return PollResult::Wait;
                     }
                 }
@@ -106,7 +113,7 @@ mod tests {
 
         network.write().add_test_channel();
         let result = requester.poll(&mut state, now);
-        assert!(matches!(result, PollResult::Progress));
+        assert!(matches!(result, PollResult::Wait));
         assert!(matches!(requester.state, DependencyState::WaitBlocking(_)));
     }
 

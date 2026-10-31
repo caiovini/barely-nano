@@ -183,11 +183,6 @@ max_pruning_age = 172800 # Retain 48 hours of history (in seconds)
 max_pruning_depth = 0    # Maximum blocks per account (0 = unlimited depth, age-only)
 ```
 
-#### Important: The Safe Wipe
-When `enable_pruning` is set to `true`, the node is programmed to **automatically wipe the existing database** on startup. This is done to:
-1.  **Ensure Format Compatibility**: Pruning requires a specific B-Tree metadata format (Page 0) to manage the free-list.
-2.  **Optimize Storage**: Starting from a clean pruned state (0 GB) is significantly more efficient than trying to prune a full 100GB+ ledger in place on bare-metal hardware.
-
 Once initialized, the B-Tree will automatically reuse space from pruned blocks on the NVMe SSD indefinitely.
 
 ### Representative Discovery on Bare-Metal

@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(peers.peers.len(), 1);
         let peer_info = peers
             .peers
-            .get(&"[::ffff:172.17.0.1]:7075".parse().unwrap())
+            .get(&"[::ffff:172.17.0.1]:7075".parse::<SocketAddrV6>().unwrap())
             .unwrap();
         assert_eq!(peer_info.protocol_version, 18.into());
         assert_eq!(

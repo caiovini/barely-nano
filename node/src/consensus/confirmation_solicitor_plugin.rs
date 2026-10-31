@@ -1,6 +1,5 @@
 use core::any::Any;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use spin::{ Mutex, RwLock };
 // // // // // // // use std::{    any::Any    }; // TODO: fix this
 
@@ -47,19 +46,17 @@ impl AecTickerPlugin for ConfirmationSolicitorPlugin {
          * Elections extending the soft config.size limit are flushed after a certain time-to-live cutoff
          * Flushed elections are later re-activated via frontier confirmation
          */
-        let elections: Vec<_> = aec
-            .read()
-            .iter_round_robin()
-            .filter(|e: &&Election| e.state() == ElectionState::Active)
-            .cloned()
-            .collect();
-
-        for election in &elections {
-            self.winner_block_broadcaster
-                .lock()
-                .try_broadcast_winner(&election.winner().clone(), election.votes());
-            self.confirm_req_sender
-                .send_confirm_req(&mut solicitor, &election);
+        {
+            let guard = aec.read();
+            let mut broadcaster = self.winner_block_broadcaster.lock();
+            for election in guard
+                .iter_round_robin()
+                .filter(|e: &&Election| e.state() == ElectionState::Active)
+            {
+                broadcaster.try_broadcast_winner(election.winner(), election.votes());
+                self.confirm_req_sender
+                    .send_confirm_req(&mut solicitor, election);
+            }
         }
 
         solicitor.flush();

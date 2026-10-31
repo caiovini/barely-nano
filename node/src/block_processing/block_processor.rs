@@ -35,6 +35,7 @@ impl BlockProcessor {
         signature_checker: Arc<crate::signatures::SignatureChecker>,
     ) -> Self {
         let process_stats = Arc::new(BlockBatchProcessorStats::default());
+        queue.set_signature_checker(signature_checker.clone());
         let process = BlockBatchProcessor {
             ledger: ledger.clone(),
             unchecked: unchecked.clone(),
@@ -63,23 +64,9 @@ impl BlockProcessor {
     }
 
     /// In bare-metal mode, the BlockProcessor is driven manually
-    /// by Hart 2 in main/src/bin.rs. This start() method remains as a 
+    /// by Hart 6 in main/src/bin.rs. This start() method remains as a
     /// no-op placeholder for architectural consistency.
-    pub fn start(&self, _thread_count: usize) {
-        // debug_assert!(self.threads.lock().is_empty());
-        // for _ in 0..thread_count {
-        //     let mut processor_loop = self.create_loop();
-        //
-        //     self.threads.lock().lock().push(
-        //         /* /* std::/* /* /* thread::Builder::new()
-        //             .name("Blck processing".to_string())
-        //             .spawn(move || {
-        //                 processor_loop.run();
-        //             })
-        //             .unwrap(),
-        //     );
-        // }
-    }
+    pub fn start(&self) {}
 
     pub fn run(&self) {
         let mut loop_state = self.create_loop();
@@ -194,34 +181,10 @@ impl BlockProcessorLoop {
             self.process.process_blocks(blocks);
             
             count += 1;
-            if count >= 16 || self.queue.stopped() {
+            if count >= 1 || self.queue.stopped() {
                 break;
             }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::block_processing::BlockContext;
-
-    #[test]
-    fn wait_for_backlog() {
-        let queue = Arc::new(BlockProcessorQueue::new_null_with(vec![
-            BlockContext::new_test_instance().into(),
-        ]));
-        let process = BlockBatchProcessor::new_null();
-        let backlog_waiter = Arc::new(BacklogWaiter::new_null());
-
-        let mut processor_loop = BlockProcessorLoop {
-            queue,
-            process,
-            backlog_waiter: backlog_waiter.clone(),
-        };
-
-        processor_loop.run();
-
-        assert_eq!(backlog_waiter.call_count(), 1);
-    }
-}

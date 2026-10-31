@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::net::{SocketAddrV6, SocketAddr, Ipv6Addr, SocketAddrV4, Ipv4Addr};
 use embedded_io_async::{Read, Write, ErrorType};
 use kernel_common::net::async_tcp::{AsyncTcpStream, TcpError};
-use kernel_common::net::NET;
+use kernel_common::net::lock_net_worker;
 use smoltcp::socket::tcp::Socket as SmolTcpSocket;
 use core::future::poll_fn;
 use kernel_common::uart;
@@ -53,11 +53,46 @@ impl TcpStream {
         }
     }
 
+    pub async fn read_chunk(&self, buf: &mut [u8]) -> anyhow::Result<usize> {
+        match &self.stream {
+            StreamType::Real(stream) => {
+                poll_fn(|cx| {
+                    if let Some(ref mut ctx) = *lock_net_worker() {
+                        let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
+                        if socket.can_recv() {
+                            match socket.recv_slice(buf) {
+                                Ok(n) => Poll::Ready(Ok(n)),
+                                Err(_) => Poll::Ready(Err(anyhow::anyhow!("Read error"))),
+                            }
+                        } else {
+                            let state = socket.state();
+                            if state == smoltcp::socket::tcp::State::Closed || 
+                               state == smoltcp::socket::tcp::State::CloseWait ||
+                               state == smoltcp::socket::tcp::State::Closing ||
+                               state == smoltcp::socket::tcp::State::TimeWait ||
+                               state == smoltcp::socket::tcp::State::LastAck {
+                                return Poll::Ready(Err(anyhow::anyhow!("Socket closed (state: {:?})", state)));
+                            }
+                            socket.register_recv_waker(cx.waker());
+                            Poll::Pending
+                        }
+                    } else {
+                        Poll::Ready(Err(anyhow::anyhow!("No network context")))
+                    }
+                }).await
+            }
+            StreamType::Stub(stream) => {
+                stream.readable().map_err(|e| anyhow::anyhow!(e))?;
+                stream.try_read(buf).map_err(|e| anyhow::anyhow!(e))
+            }
+        }
+    }
+
     pub async fn readable(&self) -> anyhow::Result<()> {
         match &self.stream {
             StreamType::Real(stream) => {
                 poll_fn(|cx| {
-                    if let Some(ref mut ctx) = *NET.lock() {
+                    if let Some(ref mut ctx) = *lock_net_worker() {
                         let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                         if socket.can_recv() {
                             uart::putchar(b'(');
@@ -87,7 +122,7 @@ impl TcpStream {
     pub fn try_read(&self, buf: &mut [u8]) -> anyhow::Result<usize> {
         match &self.stream {
             StreamType::Real(stream) => {
-                if let Some(ref mut ctx) = *NET.lock() {
+                if let Some(ref mut ctx) = *lock_net_worker() {
                     let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                     if socket.can_recv() {
                         socket.recv_slice(buf).map_err(|_| anyhow::anyhow!("Read error"))
@@ -105,7 +140,7 @@ impl TcpStream {
     pub fn local_addr(&self) -> anyhow::Result<SocketAddr> {
         match &self.stream {
             StreamType::Real(stream) => {
-                if let Some(ref ctx) = *NET.lock() {
+                if let Some(ref ctx) = *lock_net_worker() {
                     let socket = ctx.sockets.get::<SmolTcpSocket>(stream.handle());
                     let endpoint = socket.local_endpoint().ok_or_else(|| anyhow::anyhow!("No local endpoint"))?;
                     match endpoint.addr {
@@ -137,7 +172,7 @@ impl TcpStream {
     pub fn peer_addr(&self) -> anyhow::Result<SocketAddr> {
         match &self.stream {
             StreamType::Real(stream) => {
-                if let Some(ref ctx) = *NET.lock() {
+                if let Some(ref ctx) = *lock_net_worker() {
                     let socket = ctx.sockets.get::<SmolTcpSocket>(stream.handle());
                     let endpoint = socket.remote_endpoint().ok_or_else(|| anyhow::anyhow!("No remote endpoint"))?;
                     match endpoint.addr {
@@ -166,11 +201,46 @@ impl TcpStream {
         }
     }
 
+    pub async fn write_chunk(&self, buf: &[u8]) -> anyhow::Result<usize> {
+        match &self.stream {
+            StreamType::Real(stream) => {
+                poll_fn(|cx| {
+                    if let Some(ref mut ctx) = *lock_net_worker() {
+                        let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
+                        if socket.can_send() {
+                            match socket.send_slice(buf) {
+                                Ok(n) => Poll::Ready(Ok(n)),
+                                Err(_) => Poll::Ready(Err(anyhow::anyhow!("Write error"))),
+                            }
+                        } else {
+                            let state = socket.state();
+                            if state == smoltcp::socket::tcp::State::Closed || 
+                               state == smoltcp::socket::tcp::State::CloseWait ||
+                               state == smoltcp::socket::tcp::State::Closing ||
+                               state == smoltcp::socket::tcp::State::TimeWait ||
+                               state == smoltcp::socket::tcp::State::LastAck {
+                                return Poll::Ready(Err(anyhow::anyhow!("Socket closed (state: {:?})", state)));
+                            }
+                            socket.register_send_waker(cx.waker());
+                            Poll::Pending
+                        }
+                    } else {
+                        Poll::Ready(Err(anyhow::anyhow!("No network context")))
+                    }
+                }).await
+            }
+            StreamType::Stub(stream) => {
+                stream.writable().await.map_err(|e| anyhow::anyhow!(e))?;
+                stream.try_write(buf).map_err(|e| anyhow::anyhow!(e))
+            }
+        }
+    }
+
     pub async fn writable(&self) -> anyhow::Result<()> {
         match &self.stream {
             StreamType::Real(stream) => {
                 poll_fn(|cx| {
-                    if let Some(ref mut ctx) = *NET.lock() {
+                    if let Some(ref mut ctx) = *lock_net_worker() {
                         let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                         if socket.can_send() {
                             uart::putchar(b'{');
@@ -200,7 +270,7 @@ impl TcpStream {
     pub fn try_write(&self, buf: &[u8]) -> anyhow::Result<usize> {
         match &self.stream {
             StreamType::Real(stream) => {
-                if let Some(ref mut ctx) = *NET.lock() {
+                if let Some(ref mut ctx) = *lock_net_worker() {
                     let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                     if socket.can_send() {
                         socket.send_slice(buf).map_err(|_| anyhow::anyhow!("Write error"))

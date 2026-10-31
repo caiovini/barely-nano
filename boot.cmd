@@ -13,5 +13,6 @@ if fatload mmc 0:1 0x10F00000 config.toml; then
     setenv config_size ${filesize}
 fi
 
-fatload mmc 0:1 0x11000000 barely-nano.bin
-go 0x11000000
+if fatload mmc 0:1 0x11000000 barely-nano.bin; then
+    go 0x11000000
+fi

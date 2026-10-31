@@ -19,11 +19,12 @@ scratch/
 test-results/
 .agents/
 .cargo/
+.claude/
 env
 
 # IDE
 .vscode/
 
 # Tools
-tools/nanospam/target/
+tools/nano-stress/target/
 

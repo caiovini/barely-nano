@@ -8,4 +8,6 @@ rand = { version = "0.9", default-features = false }
 rand_chacha = { version = "0.9", default-features = false }
 rand_core_06 = { package = "rand_core", version = "0.6", default-features = false }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
 kernel-common = { path = "../../common" }

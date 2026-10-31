@@ -134,3 +134,62 @@ impl RepWeightCache {
         [("rep_weights", self.len(), size_of::<(Account, Amount)>())].into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_cache() {
+        let cache = RepWeightCache::new();
+        let rep = PublicKey::from(1);
+        assert_eq!(cache.weight(&rep), Amount::zero());
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.use_bootstrap_weights());
+    }
+
+    #[test]
+    fn set_and_get_weight() {
+        let cache = RepWeightCache::new();
+        let rep = PublicKey::from(42);
+        let weight = Amount::nano(1_000);
+        cache.set(rep, weight);
+        assert_eq!(cache.weight(&rep), weight);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn bootstrap_weights_fallback_until_max_blocks() {
+        let rep = PublicKey::from(7);
+        let live_weight = Amount::nano(100);
+        let boot_weight = Amount::nano(500);
+
+        let mut boot_weights = RepWeights::new();
+        boot_weights.insert(rep, boot_weight);
+
+        let ledger_cache = Arc::new(LedgerCache::new());
+        let cache = RepWeightCache::with_bootstrap_weights(
+            BootstrapWeights {
+                weights: boot_weights,
+                max_blocks: 1000,
+            },
+            ledger_cache.clone(),
+        );
+        cache.set(rep, live_weight);
+
+        // Below max_blocks -> returns bootstrap weight
+        ledger_cache.block_count.store(500, Ordering::SeqCst);
+        assert!(cache.use_bootstrap_weights());
+        assert_eq!(cache.weight(&rep), boot_weight);
+
+        // Reaches max_blocks -> permanently switches to live weights
+        ledger_cache.block_count.store(1000, Ordering::SeqCst);
+        assert!(!cache.use_bootstrap_weights());
+        assert_eq!(cache.weight(&rep), live_weight);
+
+        // Even if block_count drops below max_blocks later, bootstrap weights stay disabled
+        ledger_cache.block_count.store(10, Ordering::SeqCst);
+        assert!(!cache.use_bootstrap_weights());
+        assert_eq!(cache.weight(&rep), live_weight);
+    }
+}

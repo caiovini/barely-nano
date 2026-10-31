@@ -2,7 +2,7 @@ use crate::RpcCommandHandler;
 use rsnano_core::Amount;
 use rsnano_ledger::{AnySet, ConfirmedSet, LedgerSet};
 use rsnano_rpc_messages::{WalletInfoResponse, WalletRpcMessage};
-use rsnano_store_lmdb::KeyType;
+use rsnano_node::wallets::KeyType;
 
 impl RpcCommandHandler {
     pub(crate) fn wallet_info(&self, args: WalletRpcMessage) -> anyhow::Result<WalletInfoResponse> {

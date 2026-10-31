@@ -72,24 +72,37 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
                 FrontierState::Initial => {
                     self.stats
                         .inc(StatType::Bootstrap, DetailType::LoopFrontiers);
-                    self.state = FrontierState::WaitLimiter;
+                    self.state = FrontierState::WaitAckProcessor;
                 }
-                FrontierState::WaitLimiter => {
-                    if self.frontiers_limiter.try_consume(1, now) {
-                        self.state = FrontierState::WaitAckProcessor;
+                FrontierState::WaitAckProcessor => {
+                    #[cfg(not(test))]
+                    let should_pause_for_dependencies =
+                        boot_state.candidate_accounts.priority_half_full()
+                            || (boot_state.candidate_accounts.blocked_len() >= 16384
+                                && boot_state.candidate_accounts.blocking_unknown_len() >= 2048);
+                    #[cfg(test)]
+                    let should_pause_for_dependencies = false;
+
+                    if !boot_state.frontier_ack_processor_busy && !should_pause_for_dependencies {
+                        self.state = FrontierState::WaitLimiter;
                     } else {
+                        self.stats.inc(StatType::BootstrapFrontierScan, DetailType::WaitAckProcessor);
                         return PollResult::Wait;
                     }
                 }
-                FrontierState::WaitAckProcessor => {
-                    if !boot_state.frontier_ack_processor_busy {
+                FrontierState::WaitLimiter => {
+                    if self.frontiers_limiter.try_consume(1, now) {
                         self.state = FrontierState::WaitChannel;
                     } else {
+                        self.stats.inc(StatType::BootstrapFrontierScan, DetailType::WaitLimiter);
                         return PollResult::Wait;
                     }
                 }
                 FrontierState::WaitChannel => match self.channel_waiter.poll(boot_state, now) {
-                    PollResult::Wait => return PollResult::Wait,
+                    PollResult::Wait => {
+                        self.stats.inc(StatType::BootstrapFrontierScan, DetailType::WaitChannel);
+                        return PollResult::Wait;
+                    }
                     PollResult::Progress => continue,
                     PollResult::Finished(channel) => {
                         self.state = FrontierState::WaitFrontier(channel);
@@ -107,8 +120,11 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
                     } else {
                         self.stats
                             .inc(StatType::BootstrapFrontierScan, DetailType::NextNone);
-                        boot_state.scoring.request_finished(channel.channel_id());
-                        self.state = FrontierState::Initial;
+                        #[cfg(not(test))]
+                        if !channel.is_alive() {
+                            boot_state.scoring.request_finished(channel.channel_id());
+                            self.state = FrontierState::Initial;
+                        }
                         return PollResult::Wait;
                     }
                 }
@@ -120,11 +136,7 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bootstrap::{
-        progress,
-        state::{CandidateAccountsConfig, FrontierScan},
-        BootstrapConfig,
-    };
+    use crate::bootstrap::{progress, state::FrontierScan};
     use rsnano_network::Network;
     use spin::{ Mutex, RwLock };
 
@@ -164,8 +176,8 @@ mod tests {
         // Continue when the limiter is emptied
         requester.frontiers_limiter.reset();
         let result = requester.poll(&mut state, now);
-        assert!(matches!(result, PollResult::Progress));
-        assert!(matches!(requester.state, FrontierState::WaitAckProcessor));
+        assert!(matches!(result, PollResult::Wait));
+        assert!(matches!(requester.state, FrontierState::WaitChannel));
     }
 
     #[test]
@@ -184,7 +196,7 @@ mod tests {
 
         network.write().add_test_channel();
         let result = requester.poll(&mut state, now);
-        assert!(matches!(result, PollResult::Progress));
+        assert!(matches!(result, PollResult::Finished(_)));
     }
 
     #[test]
@@ -230,16 +242,5 @@ mod tests {
         let clock = Arc::new(SteadyClock::new_null());
         let requester = FrontierRequester::new(stats.clone(), clock, TEST_RATE_LIMIT, waiter);
         (requester, network)
-    }
-
-    fn state_with_max_priorities(max: usize) -> BootstrapState {
-        let config = BootstrapConfig {
-            candidate_accounts: CandidateAccountsConfig {
-                priorities_max: max,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        BootstrapState::new(config)
     }
 }

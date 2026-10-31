@@ -98,7 +98,6 @@ mod tests {
         ticker
             .active_elections
             .write()
-            .unwrap()
             .insert(
                 AecInsertRequest::new_manual(block.clone(), BlockPriority::new_test_instance()),
                 now,

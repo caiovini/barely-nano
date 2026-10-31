@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-kernel-common = { path = "../../common", features = ["smode"] }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+kernel-common = { path = "../../common", features = ["smode"] }

@@ -81,7 +81,6 @@ fn calculate_new_limiter_rate(current_rate: f64, cps: f64, cps_limit: f64) -> f6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ntest::{assert_false, assert_true};
 
     #[test]
     fn vote_when_below_cps_threshold() {
@@ -89,8 +88,8 @@ mod tests {
         const CPS_LIMIT: usize = 1000;
         let now = Timestamp::new_test_instance();
         let mut limiter = CpsLimiter::new(block_rates, CPS_LIMIT);
-        assert_true!(limiter.try_vote(now));
-        assert_true!(limiter.try_vote(now));
+        assert!(limiter.try_vote(now));
+        assert!(limiter.try_vote(now));
     }
 
     #[test]
@@ -99,18 +98,18 @@ mod tests {
         const CPS_LIMIT: usize = 1;
         let now = Timestamp::new_test_instance();
         let mut limiter = CpsLimiter::new(block_rates.clone(), CPS_LIMIT);
-        assert_true!(limiter.try_vote(now));
+        assert!(limiter.try_vote(now));
 
         block_rates.set_cps(1000);
-        assert_false!(limiter.try_vote(now));
+        assert!(!limiter.try_vote(now));
     }
 
     #[test]
     fn unlimited() {
         let mut limiter = CpsLimiter::unlimited();
         let now = Timestamp::new_test_instance();
-        assert_true!(limiter.try_vote(now));
-        assert_true!(limiter.try_vote(now));
-        assert_true!(limiter.try_vote(now));
+        assert!(limiter.try_vote(now));
+        assert!(limiter.try_vote(now));
+        assert!(limiter.try_vote(now));
     }
 }
