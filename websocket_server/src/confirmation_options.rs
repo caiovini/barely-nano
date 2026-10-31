@@ -3,6 +3,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::collections::BTreeSet;
 use rsnano_core::Account;
+use rsnano_node::wallets::Wallets;
 use rsnano_websocket_messages::ConfirmationJsonOptions;
 use serde_json::Value;
 use tracing::warn;
@@ -104,7 +105,7 @@ impl ConfirmationOptions {
      * @param message_a the message to be checked
      * @return false if the message should be broadcasted, true if it should be filtered
      */
-    pub fn should_filter(&self, message_content: &Value) -> bool {
+    pub fn should_filter(&self, message_content: &Value, wallets: &Wallets) -> bool {
         let mut should_filter_conf_type = true;
 
         if let Some(serde_json::Value::String(type_text)) = message_content.get("confirmation_type")
@@ -127,7 +128,13 @@ impl ConfirmationOptions {
                     Some(serde_json::Value::String(s)) => s.as_str(),
                     _ => "",
                 };
-                // Local account check removed for no_std for now
+                if self.all_local_accounts {
+                    let source = Account::decode_account(source_text).unwrap_or_default();
+                    let destination = Account::decode_account(destination_text).unwrap_or_default();
+                    if wallets.exists(&source.into()) || wallets.exists(&destination.into()) {
+                        should_filter_account = false;
+                    }
+                }
                 if self.accounts.contains(source_text) || self.accounts.contains(destination_text) {
                     should_filter_account = false;
                 }
@@ -185,5 +192,103 @@ impl ConfirmationOptions {
         {
             warn!("Provided options resulted in an empty account confirmation filter");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use rsnano_core::WalletId;
+
+    #[test]
+    fn filter_by_confirmation_type() {
+        let wallets = Wallets::new_null();
+        let opts = ConfirmationOptions::new(ConfirmationJsonOptions {
+            confirmation_type: Some("active_quorum".to_string()),
+            ..Default::default()
+        });
+
+        let msg_quorum = serde_json::json!({
+            "confirmation_type": "active_quorum"
+        });
+        let msg_inactive = serde_json::json!({
+            "confirmation_type": "inactive"
+        });
+
+        assert!(!opts.should_filter(&msg_quorum, &wallets));
+        assert!(opts.should_filter(&msg_inactive, &wallets));
+    }
+
+    #[test]
+    fn filter_by_accounts_and_update() {
+        let wallets = Wallets::new_null();
+        let acc1 = Account::from(1).encode_account();
+        let acc2 = Account::from(2).encode_account();
+        let acc3 = Account::from(3).encode_account();
+
+        let mut opts = ConfirmationOptions::new(ConfirmationJsonOptions {
+            accounts: Some(vec![acc1.clone()]),
+            ..Default::default()
+        });
+
+        let msg_acc1 = serde_json::json!({
+            "confirmation_type": "active_quorum",
+            "account": acc1,
+            "block": { "link_as_account": acc3 }
+        });
+        let msg_acc2 = serde_json::json!({
+            "confirmation_type": "active_quorum",
+            "account": acc2,
+            "block": { "link_as_account": acc3 }
+        });
+
+        assert!(!opts.should_filter(&msg_acc1, &wallets));
+        assert!(opts.should_filter(&msg_acc2, &wallets));
+
+        // Update: add acc2, delete acc1
+        let update_val = serde_json::json!({
+            "accounts_add": [acc2],
+            "accounts_del": [acc1]
+        });
+        opts.update(&update_val);
+
+        assert!(opts.should_filter(&msg_acc1, &wallets));
+        assert!(!opts.should_filter(&msg_acc2, &wallets));
+    }
+
+    #[test]
+    fn filter_by_all_local_accounts() {
+        use alloc::sync::Arc;
+        use rsnano_node::wallets::WalletsExt;
+        let wallets = Arc::new(Wallets::new_null());
+        let wallet_id = WalletId::from(1);
+        wallets.create(wallet_id);
+        let raw = [7u8; 32];
+        let local_acc = wallets
+            .insert_adhoc2(&wallet_id, &raw, false)
+            .unwrap()
+            .as_account()
+            .encode_account();
+        let other_acc = Account::from(99).encode_account();
+
+        let opts = ConfirmationOptions::new(ConfirmationJsonOptions {
+            all_local_accounts: Some(true),
+            ..Default::default()
+        });
+
+        let msg_local = serde_json::json!({
+            "confirmation_type": "active_quorum",
+            "account": local_acc,
+            "block": { "link_as_account": other_acc }
+        });
+        let msg_other = serde_json::json!({
+            "confirmation_type": "active_quorum",
+            "account": other_acc,
+            "block": { "link_as_account": other_acc }
+        });
+
+        assert!(!opts.should_filter(&msg_local, &wallets));
+        assert!(opts.should_filter(&msg_other, &wallets));
     }
 }

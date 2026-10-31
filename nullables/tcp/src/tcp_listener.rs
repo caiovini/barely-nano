@@ -1,6 +1,6 @@
 use crate::TcpStream;
 use core::net::SocketAddr;
-use kernel_common::net::NET;
+use kernel_common::net::lock_net_worker;
 use smoltcp::socket::tcp::Socket as TcpSocket;
 use core::future::poll_fn;
 use core::task::Poll;
@@ -18,7 +18,7 @@ impl TcpListener {
 
     pub async fn accept(&self) -> anyhow::Result<(TcpStream, SocketAddr)> {
         poll_fn(|cx| {
-            if let Some(ref mut ctx) = *NET.lock() {
+            if let Some(ref mut ctx) = *lock_net_worker() {
                 let socket = ctx.sockets.get_mut::<TcpSocket>(ctx.tcp_handle);
                 
                 if !socket.is_active() && !socket.is_open() {

@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
@@ -257,4 +257,78 @@ pub struct JsonVoteSummary {
     pub timestamp: String,
     pub hash: String,
     pub weight: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_conversion() {
+        assert_eq!(to_topic("confirmation"), Topic::Confirmation);
+        assert_eq!(to_topic("started_election"), Topic::StartedElection);
+        assert_eq!(to_topic("stopped_election"), Topic::StoppedElection);
+        assert_eq!(to_topic("vote"), Topic::Vote);
+        assert_eq!(to_topic("ack"), Topic::Ack);
+        assert_eq!(to_topic("work"), Topic::Work);
+        assert_eq!(to_topic("bootstrap"), Topic::Bootstrap);
+        assert_eq!(to_topic("telemetry"), Topic::Telemetry);
+        assert_eq!(to_topic("new_unconfirmed_block"), Topic::NewUnconfirmedBlock);
+        assert_eq!(to_topic("unknown"), Topic::Invalid);
+    }
+
+    #[test]
+    fn message_envelope_ack() {
+        let env = MessageEnvelope::new_ack(Some("req-1".to_string()), "subscribe".to_string());
+        assert_eq!(env.id.as_deref(), Some("req-1"));
+        assert_eq!(env.ack.as_deref(), Some("subscribe"));
+        assert!(env.topic.is_none());
+        assert!(env.message.is_none());
+    }
+
+    #[test]
+    fn new_block_arrived() {
+        let block = SavedBlock::new_test_instance();
+        let env = new_block_arrived_message(&block);
+        assert_eq!(env.topic, Some(Topic::NewUnconfirmedBlock));
+        assert_eq!(env.hash, Some(block.hash()));
+        assert!(env.message.is_some());
+    }
+
+    #[test]
+    fn work_generation_completed_and_cancelled() {
+        let root = BlockHash::from(123);
+        let work = WorkNonce::from(456);
+        let env_ok = work_generation_message(
+            &root,
+            work,
+            0xfffffff800000000,
+            0xfffffff800000000,
+            Duration::from_millis(25),
+            "local",
+            &[],
+            true,
+            false,
+        );
+        assert_eq!(env_ok.topic, Some(Topic::Work));
+        let msg_ok = env_ok.message.unwrap();
+        assert_eq!(msg_ok.get("success").and_then(|v| v.as_str()), Some("true"));
+        assert!(msg_ok.get("result").is_some());
+
+        let env_cancel = work_generation_message(
+            &root,
+            work,
+            0xfffffff800000000,
+            0xfffffff800000000,
+            Duration::from_millis(10),
+            "local",
+            &["127.0.0.1:7076".to_string()],
+            false,
+            true,
+        );
+        let msg_cancel = env_cancel.message.unwrap();
+        assert_eq!(msg_cancel.get("success").and_then(|v| v.as_str()), Some("false"));
+        assert_eq!(msg_cancel.get("reason").and_then(|v| v.as_str()), Some("cancelled"));
+        assert!(msg_cancel.get("result").is_none());
+    }
 }

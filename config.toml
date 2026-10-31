@@ -105,6 +105,11 @@ enable_pruning = false
 max_pruning_age = 172800
 max_pruning_depth = 0
 
+[node.websocket]
+enable = true
+port = 7078
+address = "192.168.1.200"
+
 [rpc]
 enable = true
 port = 7076

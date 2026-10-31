@@ -9,7 +9,7 @@ use crate::{
     config::{
         DaemonConfig, NetworkParams, NodeConfig, NodeFlags,
     },
-    Node, NodeArgs,
+    Node, NodeArgs, NodeEvent,
 };
 
 #[derive(Default)]
@@ -68,7 +68,7 @@ pub struct NodeBuilder {
     flags: Option<NodeFlags>,
     callbacks: Option<NodeCallbacks>,
     resolver: Option<Arc<dyn rsnano_network::AsyncDnsResolver>>,
-    // event_sink: Option<SyncSender<NodeEvent>>,
+    event_sink: Option<Arc<dyn Fn(NodeEvent) + Send + Sync>>,
 }
 
 impl NodeBuilder {
@@ -80,6 +80,7 @@ impl NodeBuilder {
             flags: None,
             callbacks: None,
             resolver: None,
+            event_sink: None,
         }
     }
 
@@ -108,10 +109,10 @@ impl NodeBuilder {
         self
     }
 
-    // pub fn event_sink(mut self, sender: SyncSender<NodeEvent>) -> Self {
-    //     self.event_sink = Some(sender);
-    //     self
-    // }
+    pub fn event_sink(mut self, sender: Arc<dyn Fn(NodeEvent) + Send + Sync>) -> Self {
+        self.event_sink = Some(sender);
+        self
+    }
 
     pub fn finish(self) -> anyhow::Result<Node> {
         let network_params = self
@@ -142,7 +143,7 @@ impl NodeBuilder {
             network_params,
             flags,
             callbacks,
-            event_sender: None,
+            event_sender: self.event_sink,
             resolver,
         };
 

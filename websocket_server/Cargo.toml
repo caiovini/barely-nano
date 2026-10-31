@@ -8,12 +8,14 @@ rsnano_core = { path = "../core" }
 rsnano_websocket_messages = { path = "../websocket_messages" }
 rsnano_ledger = { path = "../ledger" }
 rsnano_messages = { path = "../messages" }
+rsnano_node = { path = "../node" }
 embedded-websocket = { version = "0.9.4", default-features = false }
 serde = { version = "=1.0.210", default-features = false, features = ["derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 anyhow = { version = "1", default-features = false }
 rsnano_nullable_tcp = { path = "../nullables/tcp" }
 rsnano_nullable_random = { path = "../nullables/random" }
+rsnano_nullable_clock = { path = "../nullables/clock" }
 kernel-common = { path = "../common" }
 spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock", "once"] }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "alloc"] }

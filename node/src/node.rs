@@ -1653,13 +1653,23 @@ pub trait NodeEventHandler {
 }
 
 pub struct CompositeNodeEventHandler {
-    receiver: Receiver<NodeEvent>,
+    receiver: Option<Receiver<NodeEvent>>,
     handlers: Vec<Box<dyn NodeEventHandler + Send>>,
 }
+
+impl Default for CompositeNodeEventHandler {
+    fn default() -> Self {
+        Self {
+            receiver: None,
+            handlers: Vec::new(),
+        }
+    }
+}
+
 impl CompositeNodeEventHandler {
     pub fn new(receiver: Receiver<NodeEvent>) -> Self {
         Self {
-            receiver,
+            receiver: Some(receiver),
             handlers: Vec::new(),
         }
     }
@@ -1668,10 +1678,18 @@ impl CompositeNodeEventHandler {
         self.handlers.push(Box::new(handler));
     }
 
+    pub fn handle(&mut self, event: &NodeEvent) {
+        for handler in self.handlers.iter_mut() {
+            handler.handle(event);
+        }
+    }
+
     pub fn run(&mut self) {
-        while let Ok(event) = self.receiver.recv() {
-            for handler in self.handlers.iter_mut() {
-                handler.handle(&event);
+        if let Some(receiver) = &self.receiver {
+            while let Ok(event) = receiver.recv() {
+                for handler in self.handlers.iter_mut() {
+                    handler.handle(&event);
+                }
             }
         }
     }

@@ -612,7 +612,12 @@ pub fn update_status(peers: usize, blocks: usize, confirmed: usize, bps: usize, 
         l3[n_bps + 1] = b'S';
     }
     l3[7..10].copy_from_slice(b"DB:");
-    if db_kb >= 1024 {
+    if db_kb >= 1024 * 1024 {
+        let n_db = fmt_usize(db_kb / (1024 * 1024), &mut l3[10..14]);
+        if 10 + n_db < LINE_CHARS {
+            l3[10 + n_db] = b'G';
+        }
+    } else if db_kb >= 1024 {
         let n_db = fmt_usize(db_kb / 1024, &mut l3[10..14]);
         if 10 + n_db < LINE_CHARS {
             l3[10 + n_db] = b'M';

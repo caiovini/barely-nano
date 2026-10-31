@@ -83,3 +83,38 @@ impl VoteOptions {
         should_filter_l
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn filter_votes_by_type_and_representative() {
+        let rep1 = Account::from(10).encode_account();
+        let rep2 = Account::from(20).encode_account();
+
+        let opts = VoteOptions::new(VoteJsonOptions {
+            include_replays: Some(false),
+            include_indeterminate: Some(false),
+            representatives: Some(vec![rep1.clone()]),
+        });
+
+        let vote_ok = serde_json::json!({
+            "type": "vote",
+            "account": rep1,
+        });
+        let vote_replay = serde_json::json!({
+            "type": "replay",
+            "account": rep1,
+        });
+        let vote_other_rep = serde_json::json!({
+            "type": "vote",
+            "account": rep2,
+        });
+
+        assert!(!opts.should_filter(&vote_ok));
+        assert!(opts.should_filter(&vote_replay));
+        assert!(opts.should_filter(&vote_other_rep));
+    }
+}

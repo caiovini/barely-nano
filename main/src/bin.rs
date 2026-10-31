@@ -714,15 +714,39 @@ fn boot_hart_main(hart_id: usize) {
         }
         flags.enable_voting = config.enable_voting;
 
+        let event_handlers = alloc::sync::Arc::new(spin::Mutex::new(
+            rsnano_node::CompositeNodeEventHandler::default(),
+        ));
+        let event_sink = {
+            let eh = event_handlers.clone();
+            alloc::sync::Arc::new(move |event| {
+                eh.lock().handle(&event);
+            })
+        };
+
         let mut node = rsnano_node::NodeBuilder::new(network)
             .resolver(alloc::sync::Arc::new(BareMetalDnsResolver))
+            .event_sink(event_sink)
             .flags(flags.clone())
             .config(config)
             .finish()
             .expect("Failed to initialize node");
 
+        let websocket_server = rsnano_websocket_server::create_websocket_server(
+            node.config.websocket_config.clone(),
+            &node,
+            &mut event_handlers.lock(),
+        );
+
         kernel_common::uart::print(b"[boot] node.start() starting...\n");
         node.start();
+        if let Some(ws) = &websocket_server {
+            use rsnano_websocket_server::WebsocketListenerExt;
+            ws.start();
+            kernel_common::uart::print(b"[boot] websocket server started on port ");
+            kernel_common::uart::print_usize(ws.listening_port() as usize);
+            kernel_common::uart::print(b"\n");
+        }
         kernel_common::uart::print(b"[boot] node.start() completed!\n");
 
         // Connect immediately and persist any IPv4 preconfigured_peers from config.toml

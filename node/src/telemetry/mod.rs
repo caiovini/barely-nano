@@ -32,6 +32,8 @@ pub struct Telemetry {
     network: Arc<RwLock<Network>>,
     message_sender: Mutex<MessageSender>,
     pub startup_time: Instant,
+    telemetry_processed_callbacks:
+        Mutex<alloc::vec::Vec<Box<dyn Fn(&TelemetryData, &SocketAddrV6) + Send + Sync>>>,
     clock: Arc<SteadyClock>,
     genesis_hash: BlockHash,
 }
@@ -61,6 +63,7 @@ impl Telemetry {
                 telemetries: Default::default(),
                 last_broadcast: None,
             }),
+            telemetry_processed_callbacks: Mutex::new(alloc::vec::Vec::new()),
             startup_time: clock.now(),
             clock,
             genesis_hash,
@@ -73,11 +76,20 @@ impl Telemetry {
 
     pub fn on_telemetry_processed(
         &self,
-        _f: Box<dyn Fn(&TelemetryData, &SocketAddrV6) + Send + Sync>,
+        f: Box<dyn Fn(&TelemetryData, &SocketAddrV6) + Send + Sync>,
     ) {
+        self.telemetry_processed_callbacks.lock().push(f);
     }
 
-    pub fn process(&self, _telemetry: &TelemetryAck, _channel: &Channel) {}
+    pub fn process(&self, telemetry: &TelemetryAck, channel: &Channel) {
+        if let Some(data) = &telemetry.0 {
+            let peer_addr = channel.peer_addr();
+            let callbacks = self.telemetry_processed_callbacks.lock();
+            for callback in callbacks.iter() {
+                (callback)(data, &peer_addr);
+            }
+        }
+    }
     pub fn len(&self) -> usize { 0 }
     pub fn local_telemetry(&self) -> TelemetryData { self.telemetry_factory.get_telemetry() }
     pub fn get_telemetry(&self, _endpoint: &SocketAddrV6) -> Option<TelemetryData> { None }

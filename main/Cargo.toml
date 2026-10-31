@@ -45,6 +45,7 @@ spin = { version = "0.9", default-features = false, features = [
 rsnano_rpc_handler = { path = "../rpc_handler" }
 rsnano_rpc_messages = { path = "../rpc_messages" }
 rsnano_rpc_server = { path = "../rpc_server", default-features = false }
+rsnano_websocket_server = { path = "../websocket_server" }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }
 rsnano_sha = { path = "../nullables/sha" }

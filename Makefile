@@ -2,7 +2,7 @@ CARGO ?= cargo
 OBJCOPY ?= $(or $(shell which llvm-objcopy 2>/dev/null),$(shell find $(HOME)/.rustup -name llvm-objcopy 2>/dev/null | head -n1),riscv64-linux-gnu-objcopy)
 MKIMAGE ?= mkimage
 
-.PHONY: build build-smode build-block-test build-spammer boot-scr run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests run-picocom run-stress build-stress stress clean
+.PHONY: build build-smode build-block-test build-spammer boot-scr run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests run-websocket-messages-tests run-websocket-client-tests run-websocket-server-tests run-picocom run-stress build-stress stress clean
 
 boot.scr: boot.cmd
 	$(MKIMAGE) -C none -A riscv -T script -d boot.cmd boot.scr
@@ -62,7 +62,16 @@ run-rpc-messages-tests:
 run-rpc-handler-tests:
 	RUSTFLAGS="" $(CARGO) test -p rsnano_rpc_handler --target x86_64-unknown-linux-gnu
 
-run-tests: run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests
+run-websocket-messages-tests:
+	RUSTFLAGS="" $(CARGO) test -p rsnano_websocket_messages --target x86_64-unknown-linux-gnu
+
+run-websocket-client-tests:
+	RUSTFLAGS="" $(CARGO) test -p rsnano_websocket_client --target x86_64-unknown-linux-gnu
+
+run-websocket-server-tests:
+	RUSTFLAGS="" $(CARGO) test -p rsnano_websocket_server --target x86_64-unknown-linux-gnu
+
+run-tests: run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests run-websocket-messages-tests run-websocket-client-tests run-websocket-server-tests
 
 run-picocom:
 	sudo picocom -b 115200 /dev/ttyUSB0 > orpi.log

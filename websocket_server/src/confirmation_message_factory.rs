@@ -1,8 +1,9 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::borrow::ToOwned;
-use rsnano_core::{Amount, BlockType, SavedBlock, ConfirmedElection};
+use rsnano_core::{Amount, BlockType, SavedBlock};
 use rsnano_ledger::{AnySet, Ledger};
+use rsnano_node::consensus::election::ConfirmedElection;
 use rsnano_websocket_messages::{
     BlockConfirmed, ElectionInfo, JsonSideband, MessageEnvelope, Topic,
 };
@@ -94,5 +95,79 @@ impl ConfirmationMessageFactory<'_> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rsnano_node::consensus::election::ConfirmationType;
+    use rsnano_nullable_clock::Timestamp;
+    use rsnano_websocket_messages::ConfirmationJsonOptions;
+
+    use super::*;
+
+    #[test]
+    fn default_options() {
+        let ledger = Ledger::new_null();
+        let options = ConfirmationOptions::new(ConfirmationJsonOptions::default());
+        let block = SavedBlock::new_test_instance();
+        let amount = Amount::nano(123);
+        let mut election = ConfirmedElection::new(
+            block.clone(),
+            ConfirmationType::InactiveConfirmationHeight,
+            Timestamp::new_test_instance(),
+        );
+        election.confirmation_type = ConfirmationType::InactiveConfirmationHeight;
+        let factory = ConfirmationMessageFactory {
+            ledger: &ledger,
+            options: &options,
+            block: &block,
+            amount: &amount,
+            election: &election,
+        };
+
+        let message = factory.create_message();
+
+        assert_eq!(message.topic, Some(Topic::Confirmation));
+        let payload: BlockConfirmed = serde_json::from_value(message.message.unwrap()).unwrap();
+        assert_eq!(payload.amount, amount.to_string_dec());
+        assert_eq!(payload.hash, block.hash().to_string());
+        assert_eq!(payload.confirmation_type, "inactive");
+        assert!(payload.election_info.is_none());
+        assert!(payload.block.is_some());
+        assert!(payload.sideband.is_none());
+        assert!(payload.linked_account.is_none());
+    }
+
+    #[test]
+    fn linked_account() {
+        let ledger = Ledger::new_null();
+        let options = ConfirmationOptions::new(ConfirmationJsonOptions {
+            include_block: Some(true),
+            include_linked_account: Some(true),
+            ..Default::default()
+        });
+        let block = SavedBlock::new_test_send_block();
+        let amount = Amount::nano(123);
+        let factory = ConfirmationMessageFactory {
+            ledger: &ledger,
+            options: &options,
+            block: &block,
+            amount: &amount,
+            election: &ConfirmedElection::new(
+                block.clone(),
+                ConfirmationType::InactiveConfirmationHeight,
+                Timestamp::new_test_instance(),
+            ),
+        };
+
+        let message = factory.create_message();
+
+        let payload: BlockConfirmed = serde_json::from_value(message.message.unwrap()).unwrap();
+
+        assert_eq!(
+            payload.linked_account,
+            Some(block.destination_or_link().encode_account())
+        );
     }
 }
