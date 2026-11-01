@@ -681,11 +681,14 @@ impl Ledger {
         // Flush coalesced, key-sorted B-Tree writes sequentially by ascending key / shard order
         if !deferred_blocks.is_empty() {
             let tp3 = kernel_common::clint::mtime();
-            for (_, saved_block) in &deferred_blocks {
-                self.store.block.put(saved_block);
+            for (hash, saved_block) in &deferred_blocks {
+                let succ = deferred_successors.get(hash).copied().unwrap_or_default();
+                self.store.block.put_with_successor(saved_block, &succ);
             }
             for (prev, succ) in &deferred_successors {
-                self.store.successors.put(prev, succ);
+                if !deferred_blocks.contains_key(prev) {
+                    self.store.successors.put(prev, succ);
+                }
             }
             for (account, (first_old_info, final_new_info)) in &deferred_accounts {
                 if !final_new_info.head.is_zero() {
@@ -894,4 +897,115 @@ impl RollbackResults {
 
 pub trait CementingObserver {
     fn batch_confirmed(&mut self, blocks: Vec<(SavedBlock, BlockHash)>);
+}
+
+#[cfg(test)]
+mod slotted_btree_tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use kernel_common::storage::bpm::BufferPool;
+    use kernel_common::storage::btree::{BTree, KEY_SIZE};
+    use kernel_common::storage::StorageContext;
+    use rsnano_core::{BlockHash, SavedBlock};
+    use spin::Mutex;
+
+    #[test]
+    fn slotted_btree_insert_iter_suffix_and_delete() {
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));
+        let bpm = BufferPool::new(storage, 256, 1);
+        let mut tree = BTree::new(bpm);
+
+        let count = 400usize;
+        let mut keys = Vec::with_capacity(count);
+        for i in 0..count {
+            let mut k = [0u8; KEY_SIZE];
+            k[0] = ((i % 4) + 1) as u8;
+            let h = ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_be_bytes();
+            k[1..9].copy_from_slice(&h);
+            k[9..17].copy_from_slice(&(i as u64).to_be_bytes());
+            if i % 3 == 0 {
+                // 65-byte key (like PendingStore)
+                k[33..41].copy_from_slice(&h);
+            }
+            let val_len = match i % 4 {
+                0 => 40,  // ConfirmationHeight
+                1 => 129, // AccountInfo
+                2 => 248, // SavedBlock + 32B successor
+                _ => 65,  // PendingInfo
+            };
+            let val = alloc::vec![(i & 0xFF) as u8; val_len];
+            assert!(tree.insert(k, &val));
+            keys.push((k, val));
+        }
+
+        // Verify all keys and test in-place suffix updates on 248B entries
+        for (i, (k, val)) in keys.iter().enumerate() {
+            let got = tree.search(k).expect("key must exist");
+            assert_eq!(&got, val);
+            if val.len() == 248 {
+                let suffix = [(i as u8).wrapping_add(1); 32];
+                assert!(tree.update_suffix_32(k, &suffix));
+                let updated = tree.search(k).unwrap();
+                assert_eq!(&updated[..216], &val[..216]);
+                assert_eq!(&updated[216..248], &suffix);
+
+                // Re-insert with preserve_tail_32 = true and zero tail; suffix must be preserved
+                assert!(!tree.insert_preserving_suffix_32(*k, val, true));
+                let preserved = tree.search(k).unwrap();
+                assert_eq!(&preserved[216..248], &suffix);
+            }
+        }
+
+        // Verify sorted iteration returns exactly `count` keys in strictly ascending order
+        let mut iter_keys = Vec::new();
+        let mut it = tree.iter([0u8; KEY_SIZE]);
+        while let Some(k) = it.next_key() {
+            iter_keys.push(k);
+        }
+        assert_eq!(iter_keys.len(), count);
+        for w in iter_keys.windows(2) {
+            assert!(w[0] < w[1]);
+        }
+
+        // Delete all keys in pseudo-random order and verify remaining keys at steps
+        for step in 0..count {
+            let idx = (step * 173 + 19) % count;
+            let (k, _) = &keys[idx];
+            tree.delete(*k);
+            assert!(!tree.contains_key(k));
+        }
+        let mut it_after = tree.iter([0u8; KEY_SIZE]);
+        assert_eq!(it_after.next_key(), None);
+    }
+
+    #[test]
+    fn embedded_block_successor_roundtrip() {
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 64);
+            *kernel_common::storage::SHARDS[i].lock() = Some(BTree::new(bpm));
+        }
+
+        let store = rsnano_ledger_store::BtreeStore::new();
+        let block = SavedBlock::new_test_instance();
+        let hash = block.hash();
+        let succ = BlockHash::from(42);
+
+        store.block.put(&block);
+        assert_eq!(store.block.get(&hash).as_ref(), Some(&block));
+        assert_eq!(store.successors.get(&hash), None);
+
+        store.successors.put(&hash, &succ);
+        assert_eq!(store.successors.get(&hash), Some(succ));
+        assert_eq!(store.block.get(&hash).as_ref(), Some(&block));
+
+        // Re-putting block with zero successor preserves existing successor
+        store.block.put(&block);
+        assert_eq!(store.successors.get(&hash), Some(succ));
+
+        // Clearing successor resets tail to None without corrupting block
+        store.successors.del(&hash);
+        assert_eq!(store.successors.get(&hash), None);
+        assert_eq!(store.block.get(&hash).as_ref(), Some(&block));
+    }
 }

@@ -420,6 +420,10 @@ impl BtreeBlockStore {
     }
 
     pub fn put(&self, block: &SavedBlock) {
+        self.put_with_successor(block, &BlockHash::zero());
+    }
+
+    pub fn put_with_successor(&self, block: &SavedBlock, successor: &BlockHash) {
         let hash = block.hash();
         get_block_bloom().insert(hash.as_bytes());
         let key = self.make_key(&hash);
@@ -427,12 +431,14 @@ impl BtreeBlockStore {
         let mut adapter = MutStreamAdapter::new(&mut buffer);
         block.serialize(&mut adapter);
         let len = adapter.bytes_written();
-        
+        buffer[len..len + 32].copy_from_slice(successor.as_bytes());
+        let total_len = len + 32;
+
         let shard_idx = get_shard_index(&key);
         tracing::debug!("BlockStore: putting block {} into shard {}", hash, shard_idx);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            if db.insert(key, &buffer[0..len]) {
+            if db.insert_preserving_suffix_32(key, &buffer[0..total_len], successor.is_zero()) {
                 BLOCK_COUNT.fetch_add(1, Ordering::Relaxed);
                 self.cache.block_count.fetch_add(1, Ordering::Relaxed);
             }

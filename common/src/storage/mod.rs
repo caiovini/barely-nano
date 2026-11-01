@@ -485,7 +485,7 @@ pub fn init_uboot_blk() {
     }
 }
 
-const STORAGE_MAGIC: u64 = 0x5348415244534833; // "SHARDSH3": header v3 (adds the WAL region)
+const STORAGE_MAGIC: u64 = 0x5348415244534834; // "SHARDSH4": header v4 (slotted-page B-Tree + embedded successor)
 const HEADER_PAGE: usize = 0;
 
 fn write_header(

@@ -1,16 +1,18 @@
 use rsnano_core::BlockHash;
 use kernel_common::storage::{SHARDS, get_shard_index};
 use kernel_common::storage::btree::KEY_SIZE;
+use crate::BtreeBlockStore;
 
 pub struct BtreeSuccessorStore {}
 
 impl BtreeSuccessorStore {
-    pub const TABLE_ID: u8 = 4;
+    pub const TABLE_ID: u8 = BtreeBlockStore::TABLE_ID;
 
     pub fn new() -> Self {
         Self {}
     }
 
+    #[inline]
     fn make_key(&self, hash: &BlockHash) -> [u8; KEY_SIZE] {
         let mut key = [0u8; KEY_SIZE];
         key[0] = Self::TABLE_ID;
@@ -23,22 +25,26 @@ impl BtreeSuccessorStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.insert(key, successor.as_bytes());
+            let _ = db.update_suffix_32(&key, successor.as_bytes());
         }
     }
 
     pub fn get(&self, hash: &BlockHash) -> Option<BlockHash> {
+        if !BtreeBlockStore::may_exist_global(hash) {
+            return None;
+        }
         let key = self.make_key(hash);
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             if let Some(res) = db.get_with(&key, |value| {
-                if value.len() == 32 {
-                    Some(BlockHash::from_bytes(value[0..32].try_into().unwrap()))
-                } else {
-                    tracing::debug!("SuccessorStore: garbage value found for hash {}, length={}", hash, value.len());
-                    None
+                if value.len() >= 32 {
+                    let tail = &value[value.len() - 32..];
+                    if tail != [0u8; 32] {
+                        return Some(BlockHash::from_bytes(tail.try_into().unwrap()));
+                    }
                 }
+                None
             }) {
                 return res;
             }
@@ -51,7 +57,7 @@ impl BtreeSuccessorStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            db.delete(key);
+            let _ = db.update_suffix_32(&key, &[0u8; 32]);
         }
     }
 }

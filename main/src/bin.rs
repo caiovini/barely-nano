@@ -1285,7 +1285,22 @@ fn run_storage_flush_and_monitor_loop(
     let mut last_stored_count = node_mon.ledger.block_count();
     let mut last_confirmed_count = node_mon.ledger.confirmed_count();
     let mut last_oled_stored = last_stored_count;
-    let mut cached_db_kb: usize = 0;
+    let mut shard_pages = [0usize; kernel_common::storage::SHARD_COUNT];
+    let mut shard_free = [0usize; kernel_common::storage::SHARD_COUNT];
+    let mut shard_cached = [0usize; kernel_common::storage::SHARD_COUNT];
+    {
+        let shard_max = kernel_common::storage::SHARD_SIZE_PAGES.load(Ordering::Relaxed);
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
+                if let Some(btree) = btree_guard.as_mut() {
+                    shard_pages[i] = btree.page_count();
+                    shard_free[i] = btree.capacity_remaining(shard_max) + btree.free_page_count();
+                    shard_cached[i] = btree.bpm.cached_page_count();
+                }
+            }
+        }
+    }
+    let mut cached_db_kb: usize = shard_pages.iter().sum::<usize>() * 4;
     let mut iterations = 0;
 
     // Initial OLED status render right after boot completes
@@ -1347,28 +1362,27 @@ fn run_storage_flush_and_monitor_loop(
         }
 
         if mtime - last_tick > seconds(15) {
-            let mut free_pages = 0;
-            let mut total_pages = 0;
-            let mut cached_pages = 0;
+            let shard_max = kernel_common::storage::SHARD_SIZE_PAGES.load(Ordering::Relaxed);
+            for i in 0..kernel_common::storage::SHARD_COUNT {
+                if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
+                    if let Some(btree) = btree_guard.as_mut() {
+                        shard_pages[i] = btree.page_count();
+                        shard_free[i] = btree.capacity_remaining(shard_max) + btree.free_page_count();
+                        shard_cached[i] = btree.bpm.cached_page_count();
+                    }
+                }
+            }
+            let total_pages: usize = shard_pages.iter().sum();
+            let free_pages: usize = shard_free.iter().sum();
+            let cached_pages: usize = shard_cached.iter().sum();
+            let db_kb = total_pages * 4;
+            let cache_mb = (cached_pages * 4) / 1024;
+            cached_db_kb = db_kb;
             if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
                 let (used, _) = {
                     let heap = ALLOCATOR.0.lock();
                     (heap.used(), heap.size())
                 };
-                let shard_max = kernel_common::storage::SHARD_SIZE_PAGES.load(Ordering::Relaxed);
-                for i in 0..kernel_common::storage::SHARD_COUNT {
-                    if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
-                        if let Some(btree) = btree_guard.as_mut() {
-                            total_pages += btree.page_count();
-                            free_pages += btree.capacity_remaining(shard_max);
-                            free_pages += btree.free_page_count();
-                            cached_pages += btree.bpm.cached_page_count();
-                        }
-                    }
-                }
-                let db_kb = total_pages * 4;
-                let cache_mb = (cached_pages * 4) / 1024;
-                cached_db_kb = db_kb;
                 let stored_count = node_mon.ledger.block_count();
                 let confirmed_count = node_mon.ledger.confirmed_count();
 
