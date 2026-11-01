@@ -464,6 +464,9 @@ In a bare-metal environment with an incomplete ledger during initial sync, publi
 
 The repository provides a high-throughput stress testing tool (`tools/nano-stress`) to test node stability, B-Tree storage performance, and queue behavior under heavy load by generating cryptographically valid blocks and streaming them directly over TCP to port **7075**.
 
+> [!TIP]
+> **Hardware Benchmark Results:** On the OrangePi RV2 (SpacemiT K1 8-core RISC-V SoC), the node achieves **19,679.4 blocks/second end-to-end** (`5.08s` for 100,000 blocks) and **20,631.3 – 21,786.5 blocks/second internal Hart 6 pipeline throughput** with full Ed25519 signature verification and RVV Blake2b PoW validation. See the full [Stress Test & Throughput Report (`STRESS_TEST_REPORT.md`)](file:///mnt/data/rust-workspace/barely-nano/STRESS_TEST_REPORT.md) for detailed stage-by-stage hardware profiling and multi-hart metrics.
+
 ### 1. Node Dev Network Setup
 
 To prepare the node for stress testing, set the following in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) on the SD card:
@@ -512,6 +515,7 @@ make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
 > Do **not** pass `--zero-pow` when streaming to the node. The node validates block entry thresholds against dev network rules (`0xf000000000000000`). Dev PoW calculation takes only ~100 µs on x86_64, ensuring all blocks pass ledger entry criteria.
 
 ## Workspace Structure
+- [`STRESS_TEST_REPORT.md`](file:///mnt/data/rust-workspace/barely-nano/STRESS_TEST_REPORT.md) — Hardware stress test campaign results, peak/sustained BPS benchmarks, and per-hart microarchitectural profiling on the OrangePi RV2.
 - [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) — Declarative TOML configuration for bare-metal network, node, bootstrap, queues, RPC, and WebSocket server.
 - [`main/`](file:///mnt/data/rust-workspace/barely-nano/main) — Main bare-metal binary entry point (`entry.S`, `bin.rs`) and per-hart loops.
 - [`common/`](file:///mnt/data/rust-workspace/barely-nano/common) — Core kernel library: S-mode trap handler, UART/SBI/U-Boot wrappers, OLED driver, 16-shard B-Tree + DRAM Bank 1 BPM + atomic WAL storage engine, cooperative async executor, and `smoltcp` networking stack.
