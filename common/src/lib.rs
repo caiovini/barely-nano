@@ -10,6 +10,7 @@ pub mod net;
 pub mod oled;
 pub mod pmic_wdt;
 pub mod sbi;
+pub mod soc;
 pub mod storage;
 pub mod trap;
 pub mod tunnel;

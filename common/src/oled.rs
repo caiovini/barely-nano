@@ -7,7 +7,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 // ── SpacemiT K1 / Ky X1 MMIO bases ───────────────────────────────────────────
-const I2C4_BASE: usize = 0xd401_2800;
+const I2C4_BASE: usize = crate::soc::I2C4_BASE;
 
 const APBC_BASE: usize = 0xd401_5000;
 const APBC_GPIO_CLK_RST: usize = 0x08;

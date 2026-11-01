@@ -8,8 +8,10 @@ name = "kernel_common"
 path = "src/lib.rs"
 
 [features]
-default = ["smode"]
+default = ["smode", "k1"]
 smode = []   # S-mode via OpenSBI (default for real hardware)
+k1 = []      # SpacemiT K1 / Ky X1 (Orange Pi RV2, 8 GB LPDDR4X)
+k3 = []      # SpacemiT K3 (32 GB LPDDR5)
 block-test = []
 
 [dependencies]

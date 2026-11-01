@@ -7,7 +7,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(target_arch = "riscv64")]
-const WDT_BASE: usize = 0xd4080000;
+const WDT_BASE: usize = crate::soc::WDT_BASE;
 
 // Register offsets
 #[cfg(target_arch = "riscv64")]

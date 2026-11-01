@@ -584,7 +584,13 @@ fn init_shards(mut storage: StorageContext) {
         && crate::trap::probe_rw_u64(high_dram_end - 8);
 
     if use_high_dram {
-        uart::print(b"[storage] High DRAM Bank 1 verified at 0x100000000..0x250000000 (5120 MB Sector Cache enabled, 81920 frames/shard)\n");
+        uart::print(b"[storage] High DRAM Bank 1 verified (");
+        uart::print(crate::soc::SOC_NAME.as_bytes());
+        uart::print(b", ");
+        uart::print_usize((SHARD_COUNT * bpm::HIGH_DRAM_TARGET_FRAMES * bpm::BLOCK_SIZE) / (1024 * 1024));
+        uart::print(b" MB Sector Cache enabled, ");
+        uart::print_usize(bpm::HIGH_DRAM_TARGET_FRAMES);
+        uart::print(b" frames/shard)\n");
     } else {
         uart::print(b"[storage] Using Bank 0 Heap Sector Cache (640 MB, 10240 frames/shard)\n");
     }

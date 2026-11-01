@@ -9,8 +9,10 @@ name = "barely-nano"
 path = "src/bin.rs"
 
 [features]
-default = ["smode", "simd"]
+default = ["smode", "simd", "k1"]
 smode = ["kernel-common/smode"] # OpenSBI, SBI ecalls
+k1 = ["kernel-common/k1"]       # SpacemiT K1 / Ky X1 (Orange Pi RV2, 8 GB LPDDR4X)
+k3 = ["kernel-common/k3"]       # SpacemiT K3 (32 GB LPDDR5)
 block-test = ["kernel-common/block-test"] # Deterministic bare-metal block generation & pipeline benchmark
 spammer = ["block-test"]        # Backwards-compatible alias for block-test
 simd = ["rsnano_sha/simd"]

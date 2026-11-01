@@ -12,7 +12,7 @@
 
 // ── K1 PWR I2C (bus 8) MMIO layout ──────────────────────────────────────────
 // struct ky_i2c { u32 icr; u32 isr; u32 isar; u32 idbr; u32 ilcr; u32 iwcr; u32 irst_cyc; u32 ibmr; }
-const I2C8_BASE: usize = 0xd401d800;
+const I2C8_BASE: usize = crate::soc::I2C8_BASE;
 
 // Register offsets (u32 words → byte offsets)
 const ICR:  usize = 0x00; // Control

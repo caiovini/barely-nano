@@ -1,0 +1,4 @@
+[submodule "u-boot-orangepi-k1"]
+	path = u-boot-orangepi-k1
+	url = https://github.com/caiovini/u-boot-orangepi-k1.git
+	branch = main

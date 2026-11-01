@@ -1,5 +1,5 @@
-// CLINT timer frequency on Orange Pi RV2 (SpacemiT K1): 24 MHz
-pub const FREQ: u64 = 24_000_000;
+// CLINT timer frequency (configured in `crate::soc::CLINT_FREQ`, 24 MHz on SpacemiT K1/K3)
+pub const FREQ: u64 = crate::soc::CLINT_FREQ;
 
 /// Read the current time from the `time` CSR virtualised by OpenSBI.
 pub fn mtime_raw() -> u64 {

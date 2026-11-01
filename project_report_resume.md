@@ -1,13 +1,13 @@
 # barely-nano — Project Resume
 
 > A bare-metal Nano protocol node written in `no_std` Rust, targeting the
-> **OrangePi RV2** (SpacemiT K1 SoC, 8× RISC-V X60 harts, 8 GB RAM, 1 TB NVMe SSD).
+> **OrangePi RV2** (SpacemiT K1 / Ky X1 SoC, 8× RISC-V X60 harts, 8 GB RAM, 1 TB NVMe SSD).
 
 ---
 
 ## 1. Mission
 
-Migrate the RSNano reference node from a Linux/std environment to a fully
+Migrate the RSNano reference node from a Linux/`std` environment to a fully
 self-contained, OS-free binary that boots directly from U-Boot on RISC-V
 hardware. Protocol semantics are preserved verbatim from RSNano; the migration
 is structural, not a redesign.
@@ -20,24 +20,29 @@ Memory efficiency → SSD endurance → CPU throughput.
 ## 2. High-Level Architecture
 
 ```
-Nano Protocol (rsnano-node crates)
+SD Card (MMC — Boot Media)
+  └── SPL / U-Boot + boot.scr + barely-nano.bin + config.toml
+
+Nano Protocol (rsnano_node, rsnano_ledger, rsnano_core, rsnano_messages)
          │
+         ├──► RPC Server (port 7076) & WebSocket Server (port 7078)
          ▼
-  Multi-Hart Executor  (8 harts, work-stealing)
+  Multi-Hart Runtime (Harts 1–7 dedicated roles + work-stealing async executor)
          │
-    ┌────┴────────────────────────────────────┐
-    │  Network Stack   │  Consensus / Ledger  │
-    │  (smoltcp)       │  (rsnano-node)       │
-    └────┬─────────────┴────────┬─────────────┘
-         │                      │
-    U-Boot Ethernet         B-Tree Storage Engine
-    driver (raw Ethernet)        │
-         │                  Buffer Pool Manager (BPM)
-         │                       │
-    NVMe SSD via             U-Boot block API
-    U-Boot Syscall API       (dev_read / dev_write)
-         │                       │
-    ─────────────────── NVMe SSD (1 TB) ─────────────────────
+    ┌────┴────────────────────────────────────────┐
+    │  Network Stack       │  Consensus / Ledger  │
+    │  (smoltcp 0.12)      │  (Single-Writer H6)  │
+    └────┬─────────────────┴──────────┬───────────┘
+         │                            │
+    U-Boot Ethernet            16 Sharded B-Trees
+    driver (raw Ethernet)             │
+         │                     Buffer Pool Manager (5 GB in DRAM Bank 1)
+         │                            │
+         │                     Atomic Dual-Area Write-Ahead Log (WAL)
+         │                            │
+         └──────────────► U-Boot Syscall API (dev_read / dev_write)
+                                      │
+                        ───── NVMe SSD (1 TB — Ledger Storage) ─────
 ```
 
 ---
@@ -46,37 +51,35 @@ Nano Protocol (rsnano-node crates)
 
 | Phase | Who | What happens |
 |-------|-----|--------------|
-| SPL / U-Boot | Bootloader | Loads `barely-nano.bin` at known address |
-| `entry.S` | Hart 1 | Sets up stack per-hart, calls `rust_main` |
-| `rust_main` | Hart 1 | Zeros BSS, inits U-Boot JT + API, inits heap |
-| `boot_hart_main` | Hart 1 | PMIC WDT disable, trap vector, logger, seed, smoltcp, storage shards, node build, `node.start()` |
-| Cache flush | Hart 1 | `cbo.flush` over entire heap + BSS, sets `HART_DISPATCH_READY` |
-| Secondary harts (2–7) | harts | Wait on `HART_DISPATCH_READY` (SeqCst + `cbo.inval` on flag), init own trap vectors, grab `Arc<Node>` + `Executor` from globals, enter per-role task loop |
+| SPL / U-Boot | Bootloader | Boots from **SD Card (MMC)**, executes `boot.scr`, and loads `barely-nano.bin` and `config.toml` from the SD card into DRAM |
+| `entry.S` | Hart 1 | Sets up per-hart stack, saves U-Boot registers, calls `rust_main` |
+| `rust_main` | Hart 1 | Disables PMIC watchdog early, dynamically resolves U-Boot API signature (`env_get("api_address")` or RAM scan), initializes U-Boot Jump Table |
+| `boot_hart_main` | Hart 1 | Initializes heap (`LockedHeap`), trap vector, logger, RNG seed, OLED display, parses `config.toml` (loaded from SD card), initializes `smoltcp` network stack, probes **NVMe SSD** for 16 B-Tree storage shards + WAL recovery, builds `Node`, starts RPC & WebSocket servers, connects preconfigured peers |
+| Cache flush | Hart 1 | Executes `cbo.clean` over kernel image, active heap, and BSS to DRAM; sets `NODE_INIT_COMPLETE` and `HART_DISPATCH_READY` |
+| Secondary harts (2–7) | Harts 2–7 | Started via `sbi::hart_start` + manual wakeup IPI; wait on `HART_DISPATCH_READY`, initialize per-hart trap vectors, acquire `Arc<Node>` + `Executor`, enter dedicated per-hart loops |
 
-> **Why not pass Arc via opaque register?** OpenSBI on SpacemiT K1 does not
+> **Why not pass `Arc<Node>` via SBI opaque register?** OpenSBI on SpacemiT K1 does not
 > reliably relay `a1` to woken harts, and `Arc::into_raw` produces the same
-> allocation pointer for all clones, corrupting the refcount. The safe path is
-> sharing the Arc through a global `Mutex<Option<NodeWrapper>>`.
+> allocation pointer for all clones without incrementing the reference count per hart.
+> Sharing via the global `Mutex<Option<NodeWrapper>>` after explicit cross-cluster cache
+> cleaning guarantees safe reference counting and visibility across Cluster 0 and Cluster 1.
 
 ---
 
 ## 4. Multi-Hart Task Assignment
 
-Each hart runs a dedicated tight loop with no OS scheduler:
+Each hart runs a dedicated tight loop (`main/src/bin.rs`) with adaptive `pause` backoff (`+zihintpause`):
 
-| Hart | Role |
-|------|------|
-| 0 | Heavy I/O (network polling + async executor) |
-| 1 | Boot hart → Maintenance, network, AEC, peer cache, async executor |
-| 2 | Block Processor + periodic BTree flush every 5 s |
-| 3 | Consensus loop (AEC voter + AEC ticker @ 100 ms, async executor) |
-| 4 | RPC server (port 7076, smoltcp TCP) |
-| 5 | Vote Processor + signature verification helper |
-| 6 | Heavy I/O (mirrors Hart 0) |
-| 7 | Monitor / stats loop |
-
-Every hart calls `signature_checker.try_help_verify()` where idle, spreading
-ed25519 batch verification across all cores.
+| Hart | Cluster | Role |
+|------|---------|------|
+| **0** | Cluster 0 | Reserved / skipped (known OpenSBI start quirk on SpacemiT K1) |
+| **1** | Cluster 0 | **Boot, Maintenance & Network (`Maint+Net`):** `smoltcp` interface polling, HTTP JSON-RPC server (port 7076), delegated NVMe block I/O execution for worker harts, gateway ICMP keepalive, watchdog kick |
+| **2** | Cluster 0 | **Crypto Worker 1 (`Crypto-1`):** Lock-free SIMD Ed25519 batch verification (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` |
+| **3** | Cluster 0 | **Crypto Worker 2 (`Crypto-2`):** Mirrors Hart 2 — SIMD Ed25519 batch verification and `MessageProcessor::run_batch()` |
+| **4** | Cluster 1 | **Consensus & Elections (`Consensus`):** Drives `aec_voter` and `aec_ticker` every 300 ms, polls async executor tasks (`exec.run_once(4)`) |
+| **5** | Cluster 1 | **Vote Processor (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and polls async executor tasks (`exec.run_once(5)`) |
+| **6** | Cluster 1 | **Single-Writer Ledger Commit & Bootstrap (`Ledger+Boot`):** Runs `block_processor`, `unchecked`, `confirming_set`, `election_schedulers`, `backlog_scan`, atomic WAL checkpoints (every 10 s or on BPM demand), periodic `node.tick()`, and `bootstrap_server` |
+| **7** | Cluster 1 | **Monitor, OLED & Async Worker (`Storage+Mon`):** Runs `online_weight_calculation`, updates hardware I2C OLED display every 2 s, prints 15 s system/storage/lock telemetry, and polls async executor tasks (`exec.run_once(7)`) |
 
 ---
 
@@ -87,170 +90,109 @@ ed25519 batch verification across all cores.
 Production build (`make build` / `make build-smode`):
 
 ```bash
-RUSTFLAGS="-C target-feature=+v,+zbb,+zba,+zbs,+zbc,+zihintpause,+zicboz,+zicbom"
+RUSTFLAGS="-C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zihintpause"
 ```
 
 | Extension | Purpose |
 |-----------|---------|
-| `+v` | RISC-V Vector 1.0 (SIMD for hashing / crypto) |
-| `+zbb` | Bit-Manipulation Base — `rori`, `clz`, `cpop`, `rev8` etc. Blake2b rotations → single `rori` instruction |
-| `+zba` | Address-Gen Bit-Manipulation — `sh1add`, `sh2add`, `sh3add` |
+| `+v`, `+zvl256b` | RISC-V Vector 1.0 with 256-bit vector registers (RVV SIMD for Blake2b & Ed25519) |
+| `+zbb` | Bit-Manipulation Base — `rori`, `clz`, `cpop`, `rev8` (Blake2b 64-bit rotations compile to single `rori`) |
+| `+zba` | Address-Generation Bit-Manipulation — `sh1add`, `sh2add`, `sh3add` |
 | `+zbs` | Single-Bit Manipulation — `bset`, `bclr`, `bext` |
-| `+zbc` | Carry-less Multiplication — CRC / GF operations |
-| `+zihintpause` | `pause` hint → replaces `nop` spin loops, reduces power & bus pressure |
-| `+zicboz` | Cache-Block Zero — `cbo.zero` for fast BSS/buffer clearing |
-| `+zicbom` | Cache-Block Management — `cbo.clean`, `cbo.flush`, `cbo.inval` for explicit cross-cluster coherency |
+| `+zbc` | Carry-less Multiplication |
+| `+zihintpause` | `pause` instruction in spin/backoff loops — reduces interconnect contention |
+| `+zicboz` | Cache-Block Zero (`cbo.zero`) |
+| `+zicbom` | Cache-Block Management (`cbo.clean`, `cbo.flush`, `cbo.inval`) for cross-cluster coherency |
+| `Zicbop` | Cache-line read prefetch hints (`prefetch.r` via inline `ori zero, rs1, 1`) in B-Tree binary search |
 
-### 5.2 Blake2b / Crypto Optimization
+### 5.2 Blake2b & Ed25519 Cryptographic Acceleration (`nullables/sha`)
 
-- All Blake2b calls go through `rsnano_sha::blake2b::hash`.
-- The comment in `crypto/mod.rs` explicitly notes: *"every rotation compiles to a single Zbb `rori` instruction"*.
-- The `simd` feature gate enables the vectorized code path at build time.
-- `sstatus.FS` (bits 14:13) and `sstatus.VS` (bits 10:9) are set to `Dirty` (11) during trap init so that the CPU does not trap on FP/vector instructions.
+- **Blake2b:** Vectorized RVV 1.0 + Zbb implementation (`rsnano_sha::blake2b`), verified at boot via deterministic self-test. Supports 4-way batch PoW difficulty evaluation (`get_difficulties_batch_4`).
+- **Ed25519:** Precomputed Radix-16 scalar multiplication table (`init_radix16_precomp`) and multi-hart batch verification distributed across Harts 2 and 3.
+- **S-Mode Vector/FP Enablement:** `sstatus.FS` and `sstatus.VS` are initialized to `Dirty` (`11`) in `trap::init()` on every hart so vector instructions execute without trapping.
 
-### 5.3 Cache Coherency (Cross-Cluster)
+### 5.3 Cross-Cluster Cache Coherency
 
-SpacemiT K1 has two clusters (Cluster 0 = harts 0–3, Cluster 1 = harts 4–7)
-without automatic CCI. Cache coherency is achieved manually:
-
-```rust
-// Zicbom: clean (write-back) a range to DRAM
-fn clean_cache_range(addr: usize, len: usize) {
-    // 64-byte cache-line aligned loop
-    core::arch::asm!("cbo.clean ({0})", in(reg) current, ...);
-    core::arch::asm!("fence rw, rw", ...);
-}
-
-// Zicbom: invalidate (discard) a range from L1/L2
-fn invalidate_cache_range(addr: usize, len: usize) {
-    core::arch::asm!("cbo.inval ({0})", in(reg) current, ...);
-    core::arch::asm!("fence r, r", ...);
-}
-```
-
-Used in:
-- BSS zeroing after boot (Hart 1 cleans, secondary harts rely on the SeqCst barrier)
-- Heap flush before waking secondary harts
-- `HART_DISPATCH_READY` flag polling in secondary hart spin loops
-
-> **cbo.inval note:** Requires `menvcfg.CBIE` set by OpenSBI. On this SoC it
-> is NOT set, so secondary harts use only `cbo.clean` (always S-mode-permitted)
-> and rely on the SeqCst barrier + boot-hart cache flush.
+SpacemiT K1 splits harts across Cluster 0 (Harts 0–3) and Cluster 1 (Harts 4–7). Before waking secondary harts, Hart 1 cleans the kernel image, heap, and BSS to DRAM using 64-byte cache-line `cbo.clean` loops followed by `fence rw, rw`.
 
 ---
 
 ## 6. Storage Engine
 
-### 6.1 Overview
+### 6.1 Architecture Overview
 
-No LMDB, RocksDB, or POSIX APIs. The ledger lives on NVMe via a custom
-sector-addressable storage stack:
+Boot artifacts (`SPL`, `U-Boot`, `boot.scr`, `barely-nano.bin`, and `config.toml`) reside on the **SD Card (`MMC`)**, whereas the **1 TB NVMe SSD** is dedicated exclusively to Nano ledger storage. At startup, `init_uboot_blk()` enumerates U-Boot storage devices and selects the NVMe SSD (`if_type != 6 && if_type != 7`), ignoring the SD/MMC boot card (using it only as a fallback if no NVMe drive is attached).
 
-```
-Ledger Store (rsnano-node API)
-        │
-  16 Sharded B-Trees   (parallel prefix-sharded key space)
-        │
-  Buffer Pool Manager  (128-frame LRU per shard)
-        │
-  StorageContext       (UBoot NVMe | RAM disk fallback)
-        │
-  U-Boot block API    (dev_read / dev_write → NVMe SSD)
-```
-
-### 6.2 Storage Layout on Disk
+The ledger operates directly on NVMe sectors without LMDB, RocksDB, or an OS filesystem:
 
 ```
-LBA 0 → 1 048 575        : U-Boot boot partition (reserved, never touched)
-LBA 1 048 576+            : barely-nano ledger data
-  Page 0                  : Global shard header (magic 0x5348415244534846, shard_size, shard_count)
-  For each shard i (0..15):
-    base_page = 1 + i * (shard_size + 1)
-    Page base_page + 0    : B-Tree metadata page (magic 0xBEEFCB02, root_page_id, next_free_page, free_list_head)
-    Pages base_page + 1…  : B-Tree nodes (4 KB each)
+Ledger Store (rsnano_ledger_store: block, account, pending, confirmation_height, rep_weight, peer, ...)
+        │
+  16 Prefix-Sharded B-Trees (`common/src/storage/btree.rs`)
+        │
+  Buffer Pool Manager (`common/src/storage/bpm.rs` — 5.0 GB in DRAM Bank 1)
+        │
+  Write-Ahead Log (`common/src/storage/wal.rs` — Dual 128 MB areas, atomic checkpoints)
+        │
+  StorageContext (`common/src/storage/mod.rs` — 32-bit DMA bounce buffer for Bank 1 frames)
+        │
+  U-Boot Block API (`dev_read` / `dev_write` → 1 TB NVMe SSD)
 ```
 
-**Block size:** 4 096 bytes = 8 × 512-byte LBA sectors.
+### 6.2 Disk Layout
 
-### 6.3 Buffer Pool Manager (BPM)
+- **SD Card (`MMC`):** Contains the U-Boot boot partition and FAT/ext filesystem where `make build` deploys `barely-nano.bin`, `config.toml`, and `boot.scr`.
+- **1 TB NVMe SSD (Ledger Storage):**
+  - **LBA `0 .. 524,287` (first 256 MB):** Unused safety margin (`STORAGE_BASE_LBA = 1,048_576` ensures that even if the node ever booted without an NVMe drive and fell back to the SD card, it would never overwrite U-Boot or boot files).
+  - **LBA `524,288 .. 655,367` (256 MB offset):** Persistent Bloom filter header (`BLOOM_HEADER_LBA`) and 64 MB Bloom filter data (`BLOOM_DATA_LBA`).
+  - **LBA `1,048,576+` (`4 KB` pages = `8 × 512 B` sectors):**
+    - **Page 0:** Global shard header (`STORAGE_MAGIC = "SHARDSH3"`, `wal_epoch` bumped on every boot, `shard_size`, `shard_count`, `wal_base`, `wal_pages`).
+    - **Shards `0..15` (`1 + i * (shard_size + 1)`):** Each shard has its own metadata page (`root_page_id`, `next_free_page`, `free_list_head`) followed by `shard_size` 4 KB B-Tree node pages.
+    - **WAL Region (`65,536` pages = `256 MB` at `wal_base`):** Split into two alternating `128 MB` (`32,768`-page) areas for sequential batch logging.
 
-File: `common/src/storage/bpm.rs`
+### 6.3 Buffer Pool Manager (BPM) in DRAM Bank 1
+
+File: [`common/src/storage/bpm.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/bpm.rs)
 
 | Property | Value |
 |----------|-------|
-| Frame count per shard | 128 |
-| Frame size | 4 096 bytes (`AlignedBlock`, `repr(align(64))`) |
-| Eviction policy | LRU with clean-first preference |
-| Page table | `BTreeMap<page_id, frame_id>` |
-| Dirty tracking | per-frame `is_dirty` flag |
-| Pin count | per-frame `pin_count: u32` |
+| Backing memory | Ky X1 DRAM Bank 1 (`HIGH_DRAM_BASE = 0x1_0000_0000`, 6 GB physical window) |
+| Target resident frames / shard | `81,920` (`320 MB` per shard = **`5.00 GB` across 16 shards**) |
+| Max frames / shard | `86,016` (`336 MB` per shard = **`5.25 GB` across 16 shards**) |
+| Frame metadata | Compact 24-byte `FrameMeta` kept in Bank 0 L2-friendly RAM |
+| Lookup structure | Open-addressed hash table (`page_id -> frame_id`) |
+| Eviction policy | Clock (second-chance) algorithm over clean frames; **never writes dirty pages on eviction** |
 
-**`PageGuard`** — RAII handle returned by `fetch_page()`. Calls `unpin()` on
-drop, propagating the dirty flag automatically.
+Because dirty pages are never written ad-hoc during eviction, an interrupted write or power loss can never leave cross-shard state (such as `account` frontier vs. `block` table) inconsistent on disk.
 
-**LRU algorithm:**
-1. Cache hit → `mark_mru()` (O(n) scan, acceptable for 128 frames).
-2. Cache miss → scan LRU queue for unpinned clean frame first, then unpinned dirty frame.
-3. Dirty victim → flushed to disk before reuse.
-4. `flush_all()` → writes all dirty frames; called every 5 s from Hart 2 and at shutdown.
+### 6.4 Atomic Write-Ahead Log (WAL)
 
-**Backends:**
-- `StorageBackend::UBoot(DeviceInfo)` — real NVMe via U-Boot syscall API.
-- `StorageBackend::RamDisk(Vec<u8>)` — 128 MB in-RAM fallback if no storage found.
+File: [`common/src/storage/wal.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wal.rs)
 
-### 6.4 B-Tree Engine
+1. **Transaction-Consistent Cut:** Hart 6 (the single ledger writer) invokes `wal::checkpoint()` between block batches (every 10 seconds or when `NEED_CHECKPOINT` is signaled by the BPM).
+2. **Snapshot & Sequential WAL Write:** Up to `MAX_CHECKPOINT_PAGES = 4,096` (`16 MB`, pre-allocated at boot) dirty pages across all 16 shards are copied into a contiguous buffer and written sequentially to the active WAL area as `[descriptor pages][data pages][commit page]` with a 64-bit multiplicative hash checksum and the current boot epoch.
+3. **Sorted Home Application:** Once the commit page is durable on NVMe, the snapshotted pages are sorted by disk LBA and written to their home shard locations, then marked clean if not re-dirtied.
+4. **Power-Loss Recovery:** On boot (`wal::init_and_recover`), the engine scans both WAL areas for valid batches matching the previous epoch and idempotently replays the newest committed batch before bumping the device epoch.
 
-File: `common/src/storage/btree.rs`
+### 6.5 B-Tree Engine
 
-| Constant | Value | Rationale |
-|----------|-------|-----------|
-| `BLOCK_SIZE` | 4 096 B | Matches NVMe sector size |
-| `MAX_KEYS` | 12 | Keys + values + children fit in one 4 KB page |
-| `MIN_KEYS` | 4 | Standard B-Tree minimum (MAX_KEYS / 2 − 1) |
-| `KEY_SIZE` | 65 B | 1-byte table ID + 64-byte key |
-| `VALUE_SIZE` | 256 B | Sufficient for all Nano ledger record types |
+File: [`common/src/storage/btree.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs)
 
-**Node layout on disk (4 KB page):**
-```
-Offset  0       : is_leaf (1 byte)
-Offset  1–3     : num_keys (u16 LE + 1 pad byte)
-Offset  4       : keys[0..MAX_KEYS]  (12 × 65 B = 780 B)
-Offset  784     : values[0..MAX_KEYS] (12 × 256 B = 3072 B)
-Offset  3856    : value_lengths[0..MAX_KEYS] (12 × 2 B = 24 B)
-Offset  3880    : children[0..MAX_KEYS+1] (13 × 4 B = 52 B)
-                  Total = 3932 B < 4096 B ✓
-```
-
-**Operations:**
-- `search()` — iterative descent with binary search at each node. O(log n) page reads.
-- `insert()` — proactive split (root split grows tree height). Handles in-place update for existing keys at both leaf and internal nodes.
-- `delete()` — predecessor/successor replacement for internal keys; borrow-from-sibling or merge for underflowing nodes; page freed to free-list on merge.
-- `iter(start_key)` → `RangeIterator` — stack-based in-order traversal; nodes cached between `next_kv()` calls to reduce BPM pressure.
-- `count_prefixed(prefix)` — table-scoped counting; kicks watchdog every 1 000 entries to prevent PMIC WDT reset during large scans.
-
-**Free page management:** Merged or deleted pages are prepended to a singly-linked free list embedded in the page data itself (first 4 bytes = next free page ID). `allocate_page()` checks this list first.
-
-**Metadata persistence:** `save_meta()` writes to Page 0 via BPM (dirty-flagged), so it is flushed lazily with the rest of the pool.
-
-### 6.5 Sharding
-
-`SHARD_COUNT = 16` shards, selected by the top nibble of `key[1]` (the first byte after the table-ID byte). This gives prefix-ordered shards so range scans remain contiguous within a shard. Each shard has its own `Arc<Mutex<StorageContext>>` and `BufferPool`, allowing concurrent access from multiple harts without cross-shard contention.
+- **Page size:** `4,096 B` (`AlignedBlock`, `repr(align(64))`).
+- **Node capacity:** `MAX_KEYS = 12`, `KEY_SIZE = 65 B` (1-byte table prefix + 64-byte key), `VALUE_SIZE = 256 B`.
+- **Operations:** Iterative `search()` with `Zicbop` cache-line prefetching, proactive-split `insert()`, `delete()` with sibling borrow/merge and embedded free-page linked list, and stack-cached `RangeIterator`.
+- **Sharding:** `16` shards selected by the top nibble of `key[1]`, preserving prefix ordering within each shard while allowing parallel read access across harts. Per-hart lock wait/hold times and long-hold call sites are tracked via `ShardMutex`.
 
 ---
 
-## 7. Network Stack
+## 7. Network, RPC, and WebSocket Stack
 
-- **Driver:** `UbootNetDevice` — raw Ethernet via U-Boot `dev_read` / `dev_write` syscalls. No kernel, no socket OS abstraction.
-- **TCP/IP:** `smoltcp` 0.11 in no_std/no_os mode.
-- **Static IP:** `192.168.0.200/24`, gateway `192.168.0.1`.
-- **Sockets managed:**
-  - Peering listener — port 7075 (Nano protocol TCP)
-  - RPC listener — port 7076 (JSON-RPC)
-  - ICMP socket — ping diagnostics
-  - DNS socket — Cloudflare 1.1.1.1
-  - UDP socket — general use
-- **Async TCP:** `AsyncTcpStream` adapts smoltcp sockets to the custom `Executor`'s async model.
-- **DNS resolver:** `BareMetalDnsResolver` tries literal IP parse first, then calls `kernel_common::net::resolve()` (async DNS via smoltcp DNS socket).
+- **Driver:** `UbootNetDevice` — raw Ethernet RX/TX via U-Boot syscalls with TX stall detection.
+- **TCP/IP:** `smoltcp` 0.12 in `no_std` mode, configured via `config.toml` (default IP `192.168.1.200/24`, gateway `192.168.1.1`).
+- **Services & Ports:**
+  - **Port `7075` (Peering):** Nano live network TCP listener & outbound peer connector (`96` concurrent peers).
+  - **Port `7076` (HTTP JSON-RPC):** Full `no_std` migration of `rsnano_rpc_messages`, `rsnano_rpc_handler`, and `rsnano_rpc_server`.
+  - **Port `7078` (WebSocket Server):** Full `no_std` migration of `rsnano_websocket_messages`, `rsnano_websocket_client`, and `rsnano_websocket_server` using `httparse` and `embedded-websocket`. Supports real-time subscriptions (`confirmation`, `vote`, `started_election`, `stopped_election`, `telemetry`, `bootstrap`, `new_unconfirmed_block`, etc.) with subscription acknowledgements, topic filtering, and `ping`/`pong`.
 
 ---
 
@@ -258,119 +200,53 @@ Offset  3880    : children[0..MAX_KEYS+1] (13 × 4 B = 52 B)
 
 File: `common/src/async_rt.rs`
 
-A minimal `no_std`-compatible cooperative executor:
+A minimal multicore-safe `no_std` cooperative executor:
 
-- **8 per-hart local queues** (`VecDeque<Arc<Task>>`).
-- **1 global injector queue** for newly spawned tasks with no affinity.
-- **Work stealing:** `pop_task()` checks local → injector → steals from other queues (back of victim queue, `try_lock` only to avoid deadlock).
-- **Task states:** `IDLE`, `QUEUED`, `SUSPENDED`.
-- **Waker:** `Arc<Task>` implements `Wake`; `wake_by_ref()` re-enqueues the task to its assigned hart's local queue.
-- **`Sleep` future:** cooperative yield based on `rdtime` (CLINT); no preemptive timer interrupt needed.
-- **`YieldNow` future:** single round-trip through the executor to let other tasks run.
+- **Per-hart queues:** 8 local queues (`VecDeque<Arc<Task>>`) plus an injector queue.
+- **Worker affinity:** Newly spawned tasks are round-robined across worker harts `[4, 5, 7]`, leaving Hart 1 dedicated to networking/I/O, Harts 2–3 dedicated to crypto/message draining, and Hart 6 dedicated to single-writer ledger commits.
+- **Work stealing:** Idle worker harts steal from other worker queues in `[4, 5, 7]` using `try_lock()`.
+- **Timers:** Hardware `mtime` (24 MHz CLINT) drives `Sleep` futures without timer interrupt overhead.
 
 ---
 
 ## 9. Hardware Drivers
 
-### 9.1 U-Boot Integration (`common/src/uboot.rs`)
-
-Bridges Rust to U-Boot's C driver layer without a full OS:
-
-- **Jump Table (JT):** `putc`, `puts`, `printf`, `malloc`/`free`, `udelay`, `get_timer`, `env_get`/`env_set`, I2C R/W.
-- **Syscall API:** `dev_enum`, `dev_open`, `dev_close`, `dev_read`, `dev_write` — used for both NVMe and Ethernet.
-- **GP register swap:** Every call into U-Boot saves/restores the `gp` (global pointer) register via inline assembly to prevent U-Boot's C globals from clobbering Rust's.
-- **Dynamic API discovery:** Boot hart scans `0x7b000000`–`0x7f000000` for the `"UBootAPI"` magic string; falls back to env var `api_address`; then hardcoded address.
-
-### 9.2 PMIC Watchdog (`common/src/pmic_wdt.rs`)
-
-The SPM8821 PMIC has a hardware WDT (60 s timeout) independent of the SoC WDT:
-
-- Accessed via PWR I2C bus 8 (MMIO `0xd401d800`).
-- APBC clock gate for I2C8 at `0xd4015000 + 0x20` is enabled before use.
-- `disable()` clears bit 3 of register `0x44` via raw I2C read-modify-write.
-- `kick()` sets/clears the clear-status bit (bit 0) to reset the countdown.
-- Called from Hart 1 and Hart 2 every second, and during long storage scans.
-
-### 9.3 CLINT / Timer (`common/src/clint.rs`)
-
-- `mtime()` / `mtime_raw()` — reads the RISC-V `time` CSR.
-- `FREQ` — used for tick-to-duration conversion in `Sleep` futures and heartbeat timing.
-- M-mode also uses `set_mtimecmp()` for the 10 Hz timer interrupt.
-
-### 9.4 Trap Handler (`common/src/trap.rs`)
-
-- Assembly trap vector for both M-mode and S-mode (conditional compilation).
-- Saves/restores all 31 GPRs on the stack.
-- Timer interrupt → increments `TICK_COUNT`, kicks watchdog on Hart 1, schedules next tick.
-- Exception → prints hart ID, `xcause`, `sepc`, `ra` via lock-free UART; halts on fatal causes.
-- `sstatus.FS | VS` set to `Dirty` on init → enables FP + vector without trapping.
+- **U-Boot API Bridge (`common/src/uboot.rs`):** Wraps U-Boot Jump Table and Syscall API (`dev_read`, `dev_write`, `env_get`, etc.) with inline assembly `gp` register preservation.
+- **I2C OLED Display (`common/src/oled.rs`):** Bare-metal SSD1306/SH1106 128×64 driver supporting hardware `I2C4` (`0xd401_2800`) and GPIO bit-bang fallback across candidate header pins. Renders live peer count, stored blocks (`BLK`), confirmed blocks (`CNF`), throughput (`<bps>/S`), and database size (`K`/`M`/`G`).
+- **PMIC Watchdog (`common/src/watchdog.rs` / `pmic_wdt.rs`):** Manages the SPM8821 PMIC watchdog over PWR I2C8 (`0xd401_d800`) and tracks Hart 6 liveness.
+- **CLINT Timer (`common/src/clint.rs`):** 24 MHz `rdtime` counter (`24 ticks = 1 µs`).
+- **Trap Handler (`common/src/trap.rs`):** S-mode trap vector saving all 31 GPRs, enabling `sstatus.FS | VS`, and reporting exception diagnostics (`scause`, `sepc`, `stval`, `ra`, hart ID) over UART.
 
 ---
 
-## 10. Cryptography
+## 10. Build System & Host Tools
 
-- **Blake2b-256:** `rsnano_sha::blake2b::hash` — optimized implementation where every 64-bit rotation compiles to a single `rori` instruction (Zbb extension).
-- **Ed25519:** reused from `ed25519-dalek` reference, no modifications to signature format, key derivation, or output.
-- **Signature verification:** distributed across harts via `signature_checker.try_help_verify()` called in every hart's idle path.
-- **Hardware detection:** `test_hw_extensions()` uses `#[cfg(target_feature)]` instead of reading `misa` (which traps in S-mode).
+Authoritative interface: [`Makefile`](file:///mnt/data/rust-workspace/barely-nano/Makefile)
 
----
-
-## 11. Memory Management
-
-- **Heap:** `linked_list_allocator::LockedHeap` wrapped in `InterruptSafeAllocator` (disables interrupts during `alloc`/`dealloc` to prevent nested lock acquisition).
-- **Heap range:** defined by linker symbols `_heap_start` / `_heap_end` (in `linker-smode.ld`).
-- **`AlignedBlock`:** `repr(align(64))` — ensures DMA-friendly 64-byte cache-line alignment for all 4 KB storage blocks.
-- **No std:** entire binary is `#![no_std] #![no_main]`; only `core` and `alloc` used.
+| Command | Description |
+|---------|-------------|
+| `make build` / `make build-smode` | Builds release S-mode binary with RVV/Zbb/Zba/Zbs/Zbc/Zicbom/Zicboz/Zihintpause, generates `barely-nano.bin` and `boot.scr`, and deploys to SD card (`NANO_NODE`) if mounted |
+| `make build-block-test` | Builds firmware with `block-test` feature for deterministic on-hardware single-block and 64-block pipeline benchmarking |
+| `make run-tests` | Runs unit test suites on host (`x86_64`) across `rsnano_sha`, `rsnano_core`, `rsnano_ledger`, `rsnano_messages`, `rsnano_node`, `rsnano_rpc_messages`, `rsnano_rpc_handler`, `rsnano_websocket_messages`, `rsnano_websocket_client`, and `rsnano_websocket_server` |
+| `make run-picocom` | Captures live 115200-baud UART output from `/dev/ttyUSB0` to `orpi.log` |
+| `make stress` | Builds and runs `tools/nano-stress` against the bare-metal node |
+| `./tools/ws_subscribe.py` | Zero-dependency Python CLI tool to subscribe to live WebSocket topics on port `7078` |
 
 ---
 
-## 12. Build System
-
-```makefile
-build:      build-smode          # Default: S-mode + all RISC-V extensions
-build-smode:                     # Produces barely-nano.bin, auto-copies to SD if mounted
-build-mmode:                     # QEMU M-mode, no extensions (for emulation testing)
-build-spammer:                   # S-mode + spammer feature for B-Tree throughput testing
-run-smode / run-spammer:         # QEMU with full extension flags: v,zbb,zba,zbs,zbc,zicbom,zicboz
-```
-
-**Deployment:** `llvm-objcopy -O binary` → `barely-nano.bin` → copied to SD card mount `/run/media/cvini/NANO_NODE/` automatically if present.
-
-**Logging:** Live serial via `make run-picocom` → `picocom -b 115200 /dev/ttyUSB0 > orpi.log`.
-
----
-
-## 13. Node Configuration Highlights
-
-```rust
-config.online_weight_minimum  = 130_000_000 NANO
-config.enable_voting           = true
-config.enable_vote_processor   = true
-config.bootstrap.rate_limit    = 10_000
-config.bootstrap.max_requests  = 16_384
-config.block_processor.max_peer_queue   = 65_536
-config.block_processor.batch_size       = 2_048
-config.vote_processor.batch_size        = 4_096
-config.vote_processor.max_triggered     = 65_536
-```
-
-Peers bootstrapped: `37.120.187.138:7075`, `94.130.135.50:7075`, `192.168.0.244:7075` (local synced node).
-
----
-
-## 14. Current Status (as of 2026-06-14)
+## 11. Current Status (as of 2026-11-01)
 
 | Subsystem | Status |
 |-----------|--------|
-| Boot + multi-hart init | ✅ Stable (harts 1–7 running) |
-| U-Boot API integration | ✅ Dynamic discovery working |
-| PMIC WDT disable/kick | ✅ Operational |
-| smoltcp networking | ✅ TCP connections established |
-| Nano NodeIdHandshake | 🔧 `X` validation failures under investigation (latest conversation) |
-| Network Realtime mode | 🔧 Peers transitioning, handshake stabilization ongoing |
-| B-Tree + BPM storage | ✅ Operational; shards init correctly; flush every 5 s |
-| Ledger block sync | 🔄 Bootstrap in progress |
-| RPC server (7076) | ✅ Functional |
-| Ed25519 / Blake2b | ✅ Protocol-compatible, Zbb-optimized |
-| Cross-cluster coherency | ✅ cbo.flush + SeqCst barriers working |
+| Boot + multi-hart dispatch (Harts 1–7) | ✅ Production-stable |
+| U-Boot API + SD `config.toml` loader | ✅ Operational |
+| Cross-cluster cache coherency (`Zicbom`) | ✅ Operational |
+| RVV 1.0 + Zbb Blake2b & Ed25519 (`rsnano_sha`) | ✅ Operational (~37.7M+ batch-verified signatures in 10.5h run) |
+| 16-Shard B-Tree + 5 GB DRAM Bank 1 BPM | ✅ Operational |
+| Atomic Dual-Area Write-Ahead Log (WAL) | ✅ Operational (`4,697` checkpoints / `92.9M` pages applied with 0 errors in 10.5h) |
+| Live Network Peering & Realtime Sync | ✅ 96/96 peers connected, `73.48M` online stake, `127.1M+` blocks (`99.95%` confirmed) |
+| Sustained Sync Throughput | ✅ **280–524 bps** (**~720 bps** average over 10.5h overnight run; `+27.28M` blocks synced overnight) |
+| Memory Stability | ✅ Flat ~1,023–1,040 MB heap + 4.48–5.12 GB page cache over 10.5h continuous run |
+| HTTP JSON-RPC Server (port 7076) | ✅ Complete `no_std` migration & unit-tested |
+| WebSocket Server & Client (port 7078) | ✅ Complete `no_std` migration, unit-tested, and verified streaming live `confirmation`, `vote`, and `started_election` topics |
+| SSD1306/SH1106 I2C OLED Display | ✅ Live status (`BLK`, `CNF`, `BPS`, `DB` in `K`/`M`/`G`) |

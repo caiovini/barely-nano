@@ -1,3 +1,0 @@
-version=4
-opts=filenamemangle=s/\/(.*)v/@PACKAGE@-/ \
-   https://github.com/riscv-software-src/@PACKAGE@/tags .*/v@ANY_VERSION@.tar.gz

@@ -1,5 +1,5 @@
 #[cfg(target_arch = "riscv64")]
-const UART0: *mut u8 = 0xD401_7000 as *mut u8;
+const UART0: *mut u8 = crate::soc::UART0_BASE as *mut u8;
 pub static UART_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 use core::sync::atomic::AtomicBool;
