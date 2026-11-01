@@ -4,7 +4,7 @@
 # - bootinfo_sd.bin    to sector 0    (0x000000, 80 bytes; preserves MBR partition table at byte 446)
 # - FSBL.bin (SPL)     to sector 256  (0x020000, 128 KB offset)
 # - u-boot-opensbi.itb to sector 1664 (0x0D0000, 832 KB offset; OpenSBI + U-Boot + DTB FIT image)
-# ex: ./build_u-boot.sh /dev/sdb --flash
+# ex: ./build_u-boot.sh /dev/sda --flash
 
 set -e
 
@@ -15,7 +15,7 @@ BOARD_CONFIG=x1_defconfig
 UBOOT_DIR="u-boot-orangepi-k1"
 
 # Parse arguments
-DEVICE="/dev/sdb"
+DEVICE="/dev/sda"
 FLASH_AUTO=false
 
 for arg in "$@"; do
