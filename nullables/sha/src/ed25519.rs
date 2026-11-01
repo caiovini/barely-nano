@@ -215,7 +215,81 @@ const EMPTY_PUBKEY_CACHE: PubkeyPointCache = PubkeyPointCache {
     valid: false,
 };
 
-static PUBKEY_POINT_CACHE: TinyLock<[PubkeyPointCache; 4]> = TinyLock::new([EMPTY_PUBKEY_CACHE; 4]);
+const PUBKEY_CACHE_SETS: usize = 16;
+const PUBKEY_CACHE_WAYS: usize = 4;
+
+const COMB_STATE_EMPTY: u8 = 0;
+const COMB_STATE_BUILDING: u8 = 1;
+const COMB_STATE_READY: u8 = 2;
+
+struct CombCacheSlot {
+    state: core::sync::atomic::AtomicU8,
+    key: core::cell::UnsafeCell<[u8; 32]>,
+    comb: core::cell::UnsafeCell<[[PrecomputedPoint; 8]; 16]>,
+}
+
+// SAFETY: `CombCacheSlot` transitions monotonically `EMPTY -> BUILDING -> READY`.
+// Only the single hart that wins the `EMPTY -> BUILDING` CAS mutates `key` and `comb`,
+// publishing with `Release` before setting `state = READY`. Readers only access `key`
+// and `comb` after observing `state == READY` with `Acquire` ordering.
+unsafe impl Sync for CombCacheSlot {}
+
+impl CombCacheSlot {
+    const EMPTY: Self = Self {
+        state: core::sync::atomic::AtomicU8::new(COMB_STATE_EMPTY),
+        key: core::cell::UnsafeCell::new([0u8; 32]),
+        comb: core::cell::UnsafeCell::new([[PrecomputedPoint::IDENTITY; 8]; 16]),
+    };
+}
+
+static COMB_CACHE: [[CombCacheSlot; PUBKEY_CACHE_WAYS]; PUBKEY_CACHE_SETS] =
+    [const { [CombCacheSlot::EMPTY; PUBKEY_CACHE_WAYS] }; PUBKEY_CACHE_SETS];
+
+#[derive(Clone, Copy)]
+struct HartPubkeyCache {
+    sets: [[PubkeyPointCache; PUBKEY_CACHE_WAYS]; PUBKEY_CACHE_SETS],
+    next_way: [u8; PUBKEY_CACHE_SETS],
+}
+
+const EMPTY_HART_PUBKEY_CACHE: HartPubkeyCache = HartPubkeyCache {
+    sets: [[EMPTY_PUBKEY_CACHE; PUBKEY_CACHE_WAYS]; PUBKEY_CACHE_SETS],
+    next_way: [0; PUBKEY_CACHE_SETS],
+};
+
+static PUBKEY_POINT_CACHE: [TinyLock<HartPubkeyCache>; 8] = [
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+];
+
+#[inline(always)]
+fn pubkey_cache_shard(bytes: &[u8; 32]) -> usize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let tp: usize;
+        // SAFETY: Reading the RISC-V thread pointer register `tp` is side-effect-free;
+        // each bare-metal hart sets `tp` to its `hart_id` (0..7) at boot.
+        unsafe {
+            core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, preserves_flags));
+        }
+        let _ = bytes;
+        tp & 7
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        (bytes[0] as usize) & 7
+    }
+}
+
+#[inline(always)]
+fn pubkey_cache_set(bytes: &[u8; 32]) -> usize {
+    ((bytes[0] as usize) ^ (bytes[15] as usize) ^ (bytes[30] as usize)) & (PUBKEY_CACHE_SETS - 1)
+}
 
 impl PartialEq for Point {
     fn eq(&self, other: &Self) -> bool {
@@ -525,18 +599,22 @@ impl Point {
     }
 
     #[inline(always)]
-    pub fn get_or_create_neg_table(bytes: &[u8; 32]) -> Option<[PrecomputedPoint; 8]> {
-        let cached = PUBKEY_POINT_CACHE.try_with(|cache| {
-            for entry in cache.iter() {
-                if entry.valid && &entry.key == bytes {
-                    return Some(entry.neg_table_a);
+    fn get_or_create_entry(bytes: &[u8; 32]) -> Option<(Self, [PrecomputedPoint; 8])> {
+        let shard = pubkey_cache_shard(bytes);
+        let set_idx = pubkey_cache_set(bytes);
+        let cached = PUBKEY_POINT_CACHE[shard]
+            .try_with(|cache| {
+                for entry in cache.sets[set_idx].iter() {
+                    if entry.valid && &entry.key == bytes {
+                        return Some((entry.point, entry.neg_table_a));
+                    }
                 }
-            }
-            None
-        }).flatten();
+                None
+            })
+            .flatten();
 
-        if let Some(table) = cached {
-            return Some(table);
+        if let Some(hit) = cached {
+            return Some(hit);
         }
 
         let pt = Self::from_bytes_uncached(bytes)?;
@@ -574,9 +652,22 @@ impl Point {
             };
         }
 
-        let _ = PUBKEY_POINT_CACHE.try_with(|cache| {
-            let idx = (bytes[0] as usize) % 4;
-            cache[idx] = PubkeyPointCache {
+        let _ = PUBKEY_POINT_CACHE[shard].try_with(|cache| {
+            let set = &mut cache.sets[set_idx];
+            for entry in set.iter_mut() {
+                if !entry.valid || &entry.key == bytes {
+                    *entry = PubkeyPointCache {
+                        key: *bytes,
+                        point: pt,
+                        neg_table_a: precomp_table,
+                        valid: true,
+                    };
+                    return;
+                }
+            }
+            let way = (cache.next_way[set_idx] as usize) & (PUBKEY_CACHE_WAYS - 1);
+            cache.next_way[set_idx] = cache.next_way[set_idx].wrapping_add(1);
+            set[way] = PubkeyPointCache {
                 key: *bytes,
                 point: pt,
                 neg_table_a: precomp_table,
@@ -584,45 +675,165 @@ impl Point {
             };
         });
 
-        Some(precomp_table)
+        Some((pt, precomp_table))
+    }
+
+    #[inline(always)]
+    pub fn get_or_create_neg_table(bytes: &[u8; 32]) -> Option<[PrecomputedPoint; 8]> {
+        if let Some(table) = Self::get_cached_neg_table(bytes) {
+            return Some(table);
+        }
+        Self::get_or_create_entry(bytes).map(|(_, table)| table)
     }
 
     #[inline(always)]
     pub fn get_cached_neg_table(bytes: &[u8; 32]) -> Option<[PrecomputedPoint; 8]> {
-        PUBKEY_POINT_CACHE.try_with(|cache| {
-            for entry in cache.iter() {
-                if entry.valid && &entry.key == bytes {
-                    return Some(entry.neg_table_a);
+        let shard = pubkey_cache_shard(bytes);
+        let set_idx = pubkey_cache_set(bytes);
+        PUBKEY_POINT_CACHE[shard]
+            .try_with(|cache| {
+                for entry in cache.sets[set_idx].iter() {
+                    if entry.valid && &entry.key == bytes {
+                        return Some(entry.neg_table_a);
+                    }
+                }
+                None
+            })
+            .flatten()
+    }
+
+    /// Lock-free lookup or one-time construction of a 16-comb (`[[PrecomputedPoint; 8]; 16]`)
+    /// for `-A` in the 64-slot shared `COMB_CACHE`. Returns a zero-copy `'static` reference.
+    #[inline]
+    pub fn get_or_create_comb(bytes: &[u8; 32]) -> Option<&'static [[PrecomputedPoint; 8]; 16]> {
+        let set_idx = pubkey_cache_set(bytes);
+        let set = &COMB_CACHE[set_idx];
+
+        for slot in set.iter() {
+            if slot.state.load(Ordering::Acquire) == COMB_STATE_READY {
+                // SAFETY: `state == COMB_STATE_READY` is terminal and observed with `Acquire`,
+                // so `slot.key` and `slot.comb` are immutable and initialized.
+                let k = unsafe { &*slot.key.get() };
+                if k == bytes {
+                    return Some(unsafe { &*slot.comb.get() });
                 }
             }
-            None
-        }).flatten()
+        }
+
+        // Check if any slot in this 4-way set is still empty before decompressing/building.
+        let has_empty = set
+            .iter()
+            .any(|s| s.state.load(Ordering::Relaxed) == COMB_STATE_EMPTY);
+        if !has_empty {
+            return None;
+        }
+
+        let pt = Self::from_bytes(bytes)?;
+
+        for slot in set.iter() {
+            let st = slot.state.load(Ordering::Acquire);
+            if st == COMB_STATE_READY {
+                // SAFETY: `state == COMB_STATE_READY` observed with `Acquire`.
+                if unsafe { &*slot.key.get() } == bytes {
+                    return Some(unsafe { &*slot.comb.get() });
+                }
+                continue;
+            }
+            if st == COMB_STATE_EMPTY
+                && slot
+                    .state
+                    .compare_exchange(
+                        COMB_STATE_EMPTY,
+                        COMB_STATE_BUILDING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                let comb = Self::build_comb_16(&pt);
+                // SAFETY: This hart exclusively owns `slot` while `state == COMB_STATE_BUILDING`.
+                unsafe {
+                    *slot.key.get() = *bytes;
+                    *slot.comb.get() = comb;
+                }
+                slot.state.store(COMB_STATE_READY, Ordering::Release);
+                // SAFETY: `slot` is now in terminal `COMB_STATE_READY` state.
+                return Some(unsafe { &*slot.comb.get() });
+            }
+        }
+
+        None
+    }
+
+    /// Builds `[1..=8] * 2^(16*m) * (-A)` for `m = 0..16` using a single 128-way Montgomery batch inversion.
+    fn build_comb_16(pt: &Point) -> [[PrecomputedPoint; 8]; 16] {
+        let neg_a = pt.neg();
+        let mut proj = [[neg_a; 8]; 16];
+        let mut base = neg_a;
+
+        for m in 0..16 {
+            let p1 = base;
+            let p2 = p1.double();
+            let p3 = p2.add(&p1);
+            let p4 = p2.double();
+            let p5 = p4.add(&p1);
+            let p6 = p3.double();
+            let p7 = p6.add(&p1);
+            let p8 = p4.double();
+            proj[m] = [p1, p2, p3, p4, p5, p6, p7, p8];
+
+            if m < 15 {
+                // `p8` is `2^3 * P_m`; 13 more doublings give `2^16 * P_m = P_{m+1}`.
+                let mut r = ProjectivePoint {
+                    x: p8.x,
+                    y: p8.y,
+                    z: p8.z,
+                };
+                for _ in 0..12 {
+                    r = r.double().to_p2();
+                }
+                base = r.double().to_p3();
+            }
+        }
+
+        let mut prefix = [[FieldElement::ONE; 8]; 16];
+        let mut acc = FieldElement::ONE;
+        for m in 0..16 {
+            for j in 0..8 {
+                acc = acc.mul(&proj[m][j].z);
+                prefix[m][j] = acc;
+            }
+        }
+
+        let mut inv = acc.invert();
+        let mut out = [[PrecomputedPoint::IDENTITY; 8]; 16];
+
+        for m in (0..16).rev() {
+            for j in (0..8).rev() {
+                let prev = if j > 0 {
+                    prefix[m][j - 1]
+                } else if m > 0 {
+                    prefix[m - 1][7]
+                } else {
+                    FieldElement::ONE
+                };
+                let z_inv = prev.mul(&inv);
+                inv = inv.mul(&proj[m][j].z);
+                let ax = proj[m][j].x.mul(&z_inv);
+                let ay = proj[m][j].y.mul(&z_inv);
+                out[m][j] = PrecomputedPoint {
+                    yplusx: ay.add(&ax),
+                    yminusx: ay.sub(&ax),
+                    xy2d: ax.mul(&ay).mul(&D_TIMES_TWO),
+                };
+            }
+        }
+
+        out
     }
 
     pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let cached = PUBKEY_POINT_CACHE.try_with(|cache| {
-            for entry in cache.iter() {
-                if entry.valid && &entry.key == bytes {
-                    return Some(entry.point);
-                }
-            }
-            None
-        }).flatten();
-
-        if let Some(pt) = cached {
-            return Some(pt);
-        }
-
-        let _ = Self::get_or_create_neg_table(bytes)?;
-
-        PUBKEY_POINT_CACHE.try_with(|cache| {
-            for entry in cache.iter() {
-                if entry.valid && &entry.key == bytes {
-                    return Some(entry.point);
-                }
-            }
-            None
-        }).flatten()
+        Self::get_or_create_entry(bytes).map(|(pt, _)| pt)
     }
 
     fn from_bytes_uncached(bytes: &[u8; 32]) -> Option<Self> {
@@ -745,6 +956,121 @@ impl Point {
             r = t.to_p2();
             i -= 1;
         }
+    }
+
+    /// Evaluates `s*B + k*(-A)` using a 16-tooth signed radix-16 comb (`[[PrecomputedPoint; 8]; 16]`)
+    /// for `-A` and the 16 matching rows of `RADIX16_PRECOMP` for `B`.
+    /// Requires at most 12 curve doublings (`3 * 4`) instead of 255 curve doublings,
+    /// while keeping both lookup tables (`12 KB + 12 KB = 24 KB`) inside the 32 KB L1D cache.
+    pub fn double_scalar_mul_comb(
+        s: &[u8; 32],
+        comb_a: &[[PrecomputedPoint; 8]; 16],
+        k: &[u8; 32],
+    ) -> ProjectivePoint {
+        if !RADIX16_PRECOMP_INIT.load(Ordering::Acquire) {
+            init_radix16_precomp();
+        }
+
+        let mut da = [0i8; 64];
+        let mut db = [0i8; 64];
+        for i in 0..32 {
+            da[2 * i] = (k[i] & 0x0f) as i8;
+            da[2 * i + 1] = (k[i] >> 4) as i8;
+            db[2 * i] = (s[i] & 0x0f) as i8;
+            db[2 * i + 1] = (s[i] >> 4) as i8;
+        }
+        let mut carry_a = 0i8;
+        let mut carry_b = 0i8;
+        for i in 0..63 {
+            let va = da[i] + carry_a;
+            carry_a = (va + 8) >> 4;
+            da[i] = va - (carry_a << 4);
+
+            let vb = db[i] + carry_b;
+            carry_b = (vb + 8) >> 4;
+            db[i] = vb - (carry_b << 4);
+        }
+        da[63] += carry_a;
+        db[63] += carry_b;
+
+        let mut r = ProjectivePoint::IDENTITY;
+        let mut has_point = false;
+
+        for step in (0..4).rev() {
+            let mut t = CompletedPoint {
+                x: FieldElement::ZERO,
+                y: FieldElement::ONE,
+                z: FieldElement::ONE,
+                t: FieldElement::ONE,
+            };
+            let mut step_has_t = false;
+
+            if has_point {
+                t = r.double();
+                r = t.to_p2();
+                t = r.double();
+                r = t.to_p2();
+                t = r.double();
+                r = t.to_p2();
+                t = r.double();
+                step_has_t = true;
+            }
+
+            for m in 0..16 {
+                let idx = 4 * m + step;
+
+                let mut d = da[idx];
+                if idx == 63 && d > 8 {
+                    let u = if step_has_t { t.to_p3() } else { Point::identity() };
+                    t = u.madd(&comb_a[15][7]);
+                    step_has_t = true;
+                    has_point = true;
+                    d -= 8;
+                }
+                if d > 0 {
+                    let u = if step_has_t { t.to_p3() } else { Point::identity() };
+                    t = u.madd(&comb_a[m][(d as usize) - 1]);
+                    step_has_t = true;
+                    has_point = true;
+                } else if d < 0 {
+                    let u = if step_has_t { t.to_p3() } else { Point::identity() };
+                    t = u.msub(&comb_a[m][((-d) as usize) - 1]);
+                    step_has_t = true;
+                    has_point = true;
+                }
+
+                let mut sb = db[idx];
+                if idx == 63 && sb > 8 {
+                    let u = if step_has_t { t.to_p3() } else { Point::identity() };
+                    // SAFETY: `RADIX16_PRECOMP` is initialized before this loop.
+                    t = u.madd(unsafe { &RADIX16_PRECOMP[60][7] });
+                    step_has_t = true;
+                    has_point = true;
+                    sb -= 8;
+                }
+                if sb > 0 {
+                    let u = if step_has_t { t.to_p3() } else { Point::identity() };
+                    // SAFETY: `RADIX16_PRECOMP` is initialized before this loop,
+                    // `4 * m <= 60 < 64`, and `(sb as usize) - 1 < 8 < 15`.
+                    t = u.madd(unsafe { &RADIX16_PRECOMP[4 * m][(sb as usize) - 1] });
+                    step_has_t = true;
+                    has_point = true;
+                } else if sb < 0 {
+                    let u = if step_has_t { t.to_p3() } else { Point::identity() };
+                    // SAFETY: `RADIX16_PRECOMP` is initialized before this loop,
+                    // `4 * m <= 60 < 64`, and `((-sb) as usize) - 1 < 8 < 15`.
+                    t = u.msub(unsafe { &RADIX16_PRECOMP[4 * m][((-sb) as usize) - 1] });
+                    step_has_t = true;
+                    has_point = true;
+                }
+            }
+
+            if step_has_t {
+                r = t.to_p2();
+            }
+        }
+
+        r
     }
 
     /// Interleaved double scalar multiplication computing s*B + k*A in a single shared doubling loop.
@@ -1238,26 +1564,34 @@ pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
 }
 
 pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
-    let neg_table = if let Some(t) = Point::get_or_create_neg_table(public_key) {
-        t
+    let comb = Point::get_or_create_comb(public_key);
+    let neg_table = if comb.is_none() {
+        match Point::get_or_create_neg_table(public_key) {
+            Some(t) => Some(t),
+            None => return false,
+        }
     } else {
-        return false;
+        None
     };
-    
+
     let mut hasher = blake2b::Blake2bHasher::new(64);
     hasher.update(&signature[..32]); // Native R
     hasher.update(public_key); // Native A
     hasher.update(message);
     let k_hash = hasher.finalize();
     let k_bytes = sc_reduce(&k_hash);
-    
+
     let mut s_le = [0u8; 32];
     s_le.copy_from_slice(&signature[32..]);
     if (s_le[31] & 0xE0) != 0 {
         s_le = Scalar::from_bytes_wide_32(&s_le).to_bytes();
     }
-    
-    let sb_minus_ka = Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_table, &k_bytes);
+
+    let sb_minus_ka = if let Some(c) = comb {
+        Point::double_scalar_mul_comb(&s_le, c, &k_bytes)
+    } else {
+        Point::double_scalar_mul_base_and_point_with_table(&s_le, neg_table.as_ref().unwrap(), &k_bytes)
+    };
     sb_minus_ka.equals_signature_r((&signature[..32]).try_into().unwrap())
 }
 
@@ -1267,21 +1601,37 @@ pub fn verify_batch_4(
     signatures: [&[u8; 64]; 4],
 ) -> [bool; 4] {
     let mut results = [false; 4];
-    
+
     // Check if all messages have matching lengths and fit within our zero-allocation stack buffer limits
     let len0 = messages[0].len();
     let all_match = messages[1].len() == len0 && messages[2].len() == len0 && messages[3].len() == len0;
-    
+
     if all_match && len0 <= 128 {
-        let mut neg_tables = [[PrecomputedPoint::IDENTITY; 8]; 4];
+        let mut combs: [Option<&'static [[PrecomputedPoint; 8]; 16]>; 4] = [None; 4];
+        let mut fallback_tables: [Option<[PrecomputedPoint; 8]>; 4] = [None; 4];
+
         for i in 0..4 {
-            if let Some(t) = Point::get_or_create_neg_table(public_keys[i]) {
-                neg_tables[i] = t;
+            let mut reused = false;
+            for j in 0..i {
+                if public_keys[i] == public_keys[j] {
+                    combs[i] = combs[j];
+                    fallback_tables[i] = fallback_tables[j];
+                    reused = true;
+                    break;
+                }
+            }
+            if reused {
+                continue;
+            }
+            if let Some(c) = Point::get_or_create_comb(public_keys[i]) {
+                combs[i] = Some(c);
+            } else if let Some(t) = Point::get_or_create_neg_table(public_keys[i]) {
+                fallback_tables[i] = Some(t);
             } else {
                 return results;
             }
         }
-        
+
         // Zero-allocation stack buffer: each slice has size (64 + len0)
         let mut payloads = [[0u8; 64 + 128]; 4];
         for i in 0..4 {
@@ -1289,25 +1639,33 @@ pub fn verify_batch_4(
             payloads[i][32..64].copy_from_slice(public_keys[i]);
             payloads[i][64..64 + len0].copy_from_slice(messages[i]);
         }
-        
+
         let mut payload_refs: [&[u8]; 4] = [&[]; 4];
         for i in 0..4 {
             payload_refs[i] = &payloads[i][..64 + len0];
         }
-        
+
         let k_hashes = blake2b::hash64_batch_4(payload_refs);
-        
+
         let mut sb_minus_ka = [ProjectivePoint::IDENTITY; 4];
         for i in 0..4 {
             let k_bytes = sc_reduce(&k_hashes[i]);
-            
+
             let mut s_le = [0u8; 32];
             s_le.copy_from_slice(&signatures[i][32..]);
             if (s_le[31] & 0xE0) != 0 {
                 s_le = Scalar::from_bytes_wide_32(&s_le).to_bytes();
             }
-            
-            sb_minus_ka[i] = Point::double_scalar_mul_base_and_point_with_table(&s_le, &neg_tables[i], &k_bytes);
+
+            sb_minus_ka[i] = if let Some(c) = combs[i] {
+                Point::double_scalar_mul_comb(&s_le, c, &k_bytes)
+            } else {
+                Point::double_scalar_mul_base_and_point_with_table(
+                    &s_le,
+                    fallback_tables[i].as_ref().unwrap(),
+                    &k_bytes,
+                )
+            };
         }
 
         let z_invs = FieldElement::batch_invert_4([
@@ -1326,7 +1684,7 @@ pub fn verify_batch_4(
             results[i] = verify(public_keys[i], messages[i], signatures[i]);
         }
     }
-    
+
     results
 }
 
@@ -1567,6 +1925,43 @@ mod tests {
         assert!(results[1]);
         assert!(results[2]);
         assert!(results[3]);
+    }
+
+    #[test]
+    fn test_double_scalar_mul_comb_matches_ref10() {
+        let priv_key =
+            hex_to_32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let pub_key = derive_public_key(&priv_key);
+        let comb = Point::get_or_create_comb(&pub_key).expect("valid public key comb");
+        let neg_table = Point::get_or_create_neg_table(&pub_key).expect("valid neg table");
+
+        let scalars: [[u8; 32]; 6] = [
+            [0u8; 32],
+            {
+                let mut s = [0u8; 32];
+                s[0] = 1;
+                s
+            },
+            {
+                let mut s = [0xffu8; 32];
+                s[31] = 0x7f;
+                s
+            },
+            Scalar::from_bytes_wide_32(&[0xffu8; 32]).to_bytes(),
+            Scalar::from_bytes_wide_32(&hex_to_32(
+                "d9c55a774266ff9affac714049a50befaada8f587b79b2fd2436746a68eaace2",
+            ))
+            .to_bytes(),
+            hex_to_32("4384b84a4c721d3c5ca5f9456dca44739d09f6cc12467932fb9a24455e3f3b04"),
+        ];
+
+        for s in &scalars {
+            for k in &scalars {
+                let p_comb = Point::double_scalar_mul_comb(s, comb, k);
+                let p_ref = Point::double_scalar_mul_base_and_point_with_table(s, &neg_table, k);
+                assert_eq!(p_comb.to_bytes(), p_ref.to_bytes());
+            }
+        }
     }
 }
 

@@ -86,24 +86,21 @@ impl MessageProcessor {
         }
     }
 
-    /// Pops and processes one batch without holding the outer `MessageProcessor` mutex during
-    /// `handle_batch`, allowing multiple worker harts (Harts 2 & 3) to process in parallel.
+    /// Pops and processes one batch while holding the `MessageProcessor` lock so that
+    /// consecutive batches from the same TCP peer are pushed to `BlockProcessorQueue` in FIFO order.
     pub fn run_batch(mp: &spin::Mutex<Self>) -> bool {
-        let state = {
-            let guard = mp.lock();
-            if guard.state.inbound_queue.is_empty_fast() {
-                return false;
-            }
-            guard.state.clone()
+        let Some(guard) = mp.try_lock() else {
+            return false;
         };
-        if state.stopped.load(Ordering::Relaxed) {
+        if guard.state.inbound_queue.is_empty_fast() || guard.state.stopped.load(Ordering::Relaxed)
+        {
             return false;
         }
-        let batch = state.inbound_queue.next_batch(State::MAX_BATCH_SIZE);
+        let batch = guard.state.inbound_queue.next_batch(State::MAX_BATCH_SIZE);
         if batch.is_empty() {
             return false;
         }
-        state.handle_batch(batch);
+        guard.state.handle_batch(batch);
         true
     }
 
@@ -148,7 +145,7 @@ struct State {
 }
 
 impl State {
-    const MAX_BATCH_SIZE: usize = 64;
+    const MAX_BATCH_SIZE: usize = 256;
 
     #[allow(dead_code)]
     async fn run(&self) {
@@ -167,14 +164,39 @@ impl State {
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
         let _start = kernel_common::clint::mtime();
         let batch_size = batch.len();
+        let mut publish_batch = Vec::new();
 
         for (_, (message, channel)) in batch {
-            let class = msg_class(&message);
+            match message {
+                Message::Publish(publish) => {
+                    publish_batch.push((publish, channel.channel_id()));
+                }
+                other => {
+                    if !publish_batch.is_empty() {
+                        let count = publish_batch.len() as u64;
+                        let t0 = kernel_common::clint::mtime();
+                        self.realtime_handler
+                            .process_publish_batch(core::mem::take(&mut publish_batch));
+                        let dt = kernel_common::clint::mtime() - t0;
+                        MSG_PROF[1].fetch_add(count, Ordering::Relaxed);
+                        MSG_PROF[7 + 1].fetch_add(dt, Ordering::Relaxed);
+                    }
+                    let class = msg_class(&other);
+                    let t0 = kernel_common::clint::mtime();
+                    self.realtime_handler.process(other, &channel);
+                    let dt = kernel_common::clint::mtime() - t0;
+                    MSG_PROF[class].fetch_add(1, Ordering::Relaxed);
+                    MSG_PROF[7 + class].fetch_add(dt, Ordering::Relaxed);
+                }
+            }
+        }
+        if !publish_batch.is_empty() {
+            let count = publish_batch.len() as u64;
             let t0 = kernel_common::clint::mtime();
-            self.realtime_handler.process(message, &channel);
+            self.realtime_handler.process_publish_batch(publish_batch);
             let dt = kernel_common::clint::mtime() - t0;
-            MSG_PROF[class].fetch_add(1, Ordering::Relaxed);
-            MSG_PROF[7 + class].fetch_add(dt, Ordering::Relaxed);
+            MSG_PROF[1].fetch_add(count, Ordering::Relaxed);
+            MSG_PROF[7 + 1].fetch_add(dt, Ordering::Relaxed);
         }
         self.total_processed.fetch_add(batch_size as u64, Ordering::Relaxed);
     }

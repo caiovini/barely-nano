@@ -574,6 +574,11 @@ impl Ledger {
             alloc::collections::BTreeMap::new();
         let mut deferred_accounts: alloc::collections::BTreeMap<Account, (AccountInfo, AccountInfo)> =
             alloc::collections::BTreeMap::new();
+        let mut deferred_pending: alloc::collections::BTreeMap<
+            rsnano_core::PendingKey,
+            Option<rsnano_core::PendingInfo>,
+        > = alloc::collections::BTreeMap::new();
+        let batch_now = rsnano_core::utils::UnixMillisTimestamp::now();
 
         for (idx, &(block, signature_verified)) in items.iter().enumerate() {
             if idx + 4 < len {
@@ -617,6 +622,29 @@ impl Ledger {
             let in_batch_source_exists =
                 !source_hash.is_zero() && deferred_blocks.contains_key(&source_hash);
 
+            // If this is an epoch open block (or test mode) that queries `receivable_exists`,
+            // flush any deferred pending entries first so B-Tree scan sees them.
+            if !deferred_pending.is_empty()
+                && (cfg!(test)
+                    || (block.is_open()
+                        && self.constants.epochs.is_epoch_link(&source_hash.into())))
+            {
+                for (key, opt_info) in &deferred_pending {
+                    match opt_info {
+                        Some(info) => self.store.pending.put(key, info),
+                        None => self.store.pending.del(key),
+                    }
+                }
+                deferred_pending.clear();
+            }
+
+            let in_batch_pending = match (candidate_account, source_hash.is_zero()) {
+                (Some(acc), false) => deferred_pending
+                    .get(&rsnano_core::PendingKey::new(acc, source_hash))
+                    .cloned(),
+                _ => None,
+            };
+
             let any = OwningAnySet::new(&self.store, &self.constants);
             let validator = BlockValidatorFactory::new(&any, &self.constants, block)
                 .create_validator_with_batch_cache(
@@ -625,6 +653,8 @@ impl Ledger {
                     in_batch_prev,
                     in_batch_account,
                     in_batch_source_exists,
+                    in_batch_pending,
+                    batch_now,
                 );
             let tp1 = kernel_common::clint::mtime();
             let result = validator.validate();
@@ -644,6 +674,12 @@ impl Ledger {
                     if let Some(saved_block) = inserted {
                         if !prev_hash.is_zero() {
                             deferred_successors.insert(prev_hash, hash);
+                        }
+                        if let Some(del_key) = &instructions.delete_pending {
+                            deferred_pending.insert(del_key.clone(), None);
+                        }
+                        if let Some((ins_key, ins_info)) = &instructions.insert_pending {
+                            deferred_pending.insert(ins_key.clone(), Some(ins_info.clone()));
                         }
                         deferred_accounts
                             .entry(instructions.account)
@@ -688,6 +724,16 @@ impl Ledger {
             for (prev, succ) in &deferred_successors {
                 if !deferred_blocks.contains_key(prev) {
                     self.store.successors.put(prev, succ);
+                }
+            }
+            for (key, opt_info) in &deferred_pending {
+                match opt_info {
+                    Some(info) => self.store.pending.put(key, info),
+                    None => {
+                        if !deferred_blocks.contains_key(&key.send_block_hash) {
+                            self.store.pending.del(key);
+                        }
+                    }
                 }
             }
             for (account, (first_old_info, final_new_info)) in &deferred_accounts {
@@ -801,45 +847,12 @@ impl Ledger {
     ) where
         O: CementingObserver,
     {
-        let mut confirmed = Vec::new();
-        let mut blocks_confirmed = 0;
-
-        for confirmation_root in batch.into_iter() {
-            loop {
-                if stopped.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                if blocks_confirmed >= max_blocks {
-                    blocks_confirmed = 0;
-                    cementing_observer.batch_confirmed(confirmed);
-                    confirmed = Vec::new();
-                }
-
-                if !self.store.block.exists(confirmation_root) {
-                    break;
-                }
-
-                let added = self.confirm_max(*confirmation_root, max_blocks);
-
-                if !added.is_empty() {
-                    let count = added.len();
-                    blocks_confirmed += count;
-                    for block in added {
-                        confirmed.push((block, *confirmation_root));
-                    }
-                    if count < max_blocks {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-        }
-
-        if !confirmed.is_empty() {
-            cementing_observer.batch_confirmed(confirmed);
-        }
+        BlockCementer::new(&self.store, &self.constants, &self.stats).confirm_batch(
+            batch,
+            stopped,
+            max_blocks,
+            cementing_observer,
+        );
     }
 }
 

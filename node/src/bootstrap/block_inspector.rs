@@ -132,7 +132,11 @@ impl BlockInspector {
                 // In production, only boost accounts still present in `priorities` so that
                 // async `LedgerEventProcessor` inspection on Hart 4 does not re-insert an
                 // account that was just erased by a short-batch completion callback on Hart 6.
-                if result.source != BlockSource::Live
+                let is_live = matches!(
+                    result.source,
+                    BlockSource::Live | BlockSource::LiveOriginator
+                );
+                if !is_live
                     && (cfg!(test) || state.candidate_accounts.prioritized(&account))
                 {
                     match state.candidate_accounts.priority_up(&account) {
@@ -154,7 +158,7 @@ impl BlockInspector {
                     }
                 }
 
-                if result.source != BlockSource::Live {
+                if !is_live {
 
                     if saved_block.is_send() {
                         if let Some(destination) = saved_block.destination() {

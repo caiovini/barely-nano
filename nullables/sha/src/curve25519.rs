@@ -157,27 +157,21 @@ impl FieldElement {
         let t1 = (r[5] as u128) * 38 + (r[1] as u128) + (t0 >> 64);
         let t2 = (r[6] as u128) * 38 + (r[2] as u128) + (t1 >> 64);
         let t3 = (r[7] as u128) * 38 + (r[3] as u128) + (t2 >> 64);
-        let carry = (t3 >> 64) as u64;
 
+        // Split t3 at bit 63: 2^255 == 19 (mod p), so ((t3 >> 63) * 19) folds both the high carry
+        // and bit 255 in a single carry chain instead of two separate 256-bit carry chains.
+        let carry255 = ((t3 >> 63) as u64) * 19;
         let r0 = t0 as u64;
         let r1 = t1 as u64;
         let r2 = t2 as u64;
-        let r3 = t3 as u64;
+        let r3 = (t3 as u64) & 0x7FFFFFFFFFFFFFFF;
 
-        let c0 = (r0 as u128) + ((carry * 38) as u128);
+        let c0 = (r0 as u128) + (carry255 as u128);
         let c1 = (r1 as u128) + (c0 >> 64);
         let c2 = (r2 as u128) + (c1 >> 64);
         let c3 = (r3 as u128) + (c2 >> 64);
 
-        let h = ((c3 as u64) >> 63) as u64;
-        let r3_final = (c3 as u64) & 0x7FFFFFFFFFFFFFFF;
-
-        let d0 = (c0 as u64 as u128) + ((h * 19) as u128);
-        let d1 = (c1 as u64 as u128) + (d0 >> 64);
-        let d2 = (c2 as u64 as u128) + (d1 >> 64);
-        let d3 = (r3_final as u128) + (d2 >> 64);
-
-        FieldElement([d0 as u64, d1 as u64, d2 as u64, d3 as u64])
+        FieldElement([c0 as u64, c1 as u64, c2 as u64, c3 as u64])
     }
 
     #[inline(always)]

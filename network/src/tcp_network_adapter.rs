@@ -104,7 +104,7 @@ impl TcpNetworkAdapter {
                 if channel_l.is_closed() {
                     break;
                 }
-                if consecutive_reads >= 4 {
+                if consecutive_reads >= 16 {
                     consecutive_reads = 0;
                     async_rt::yield_now().await;
                 }
@@ -151,7 +151,7 @@ impl TcpNetworkAdapter {
                                 break;
                             }
                             ReceiveResult::Pause => loop {
-                                async_rt::sleep(core::time::Duration::from_millis(50)).await;
+                                async_rt::sleep(core::time::Duration::from_millis(2)).await;
                                 if channel_l.is_cancelled() {
                                     break;
                                 }

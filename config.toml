@@ -84,7 +84,7 @@ max_size = 65536
 optimistic_limit_percentage = 50
 
 [node.block_processor]
-max_peer_queue = 65536
+max_peer_queue = 131072
 max_system_queue = 131072
 batch_size = 256
 

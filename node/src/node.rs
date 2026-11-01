@@ -325,7 +325,7 @@ impl Node {
         let wallet_workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::create(1, "Wallet Workers"));
 
         let mut inbound_message_queue =
-            InboundMessageQueue::new(1024);
+            InboundMessageQueue::new(4096);
         if let Some(cb) = args.callbacks.on_inbound {
             inbound_message_queue.set_inbound_callback(cb);
         }

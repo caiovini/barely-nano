@@ -1,8 +1,9 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
-use rsnano_core::{Block, Account};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use rsnano_core::Account;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::block_processing::{SIG_STATE_DONE, SIG_STATE_IN_PROGRESS, SIG_STATE_UNCLAIMED};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
@@ -13,199 +14,152 @@ pub enum SignatureResult {
 }
 
 pub struct SignatureTask {
-    pub block: Arc<Block>,
-    pub ctx: Option<Arc<crate::block_processing::BlockContext>>,
+    pub ctx: Arc<crate::block_processing::BlockContext>,
     pub account: Option<Account>,
-    pub result: Option<Arc<AtomicU8>>,
-    pub finished: Option<Arc<AtomicBool>>,
 }
+
+const MAX_BG_TASKS: usize = 131072;
 
 pub struct SignatureChecker {
     tasks: Mutex<VecDeque<SignatureTask>>,
-    pending_count: core::sync::atomic::AtomicUsize,
+    bg_tasks: Mutex<VecDeque<Arc<crate::block_processing::BlockContext>>>,
+    sync_count: AtomicUsize,
+    bg_count: AtomicUsize,
 }
 
 impl SignatureChecker {
     pub fn new() -> Self {
         Self {
             tasks: Mutex::new(VecDeque::with_capacity(512)),
-            pending_count: core::sync::atomic::AtomicUsize::new(0),
+            bg_tasks: Mutex::new(VecDeque::with_capacity(4096)),
+            sync_count: AtomicUsize::new(0),
+            bg_count: AtomicUsize::new(0),
         }
-    }
-
-    pub fn push(&self, block: Arc<Block>, account: Option<Account>) -> (Arc<AtomicU8>, Arc<AtomicBool>) {
-        let result = Arc::new(AtomicU8::new(SignatureResult::Unknown as u8));
-        let finished = Arc::new(AtomicBool::new(false));
-        let task = SignatureTask {
-            block,
-            ctx: None,
-            account,
-            result: Some(result.clone()),
-            finished: Some(finished.clone()),
-        };
-        let mut lock = self.tasks.lock();
-        lock.push_front(task);
-        self.pending_count.store(lock.len(), Ordering::Release);
-        (result, finished)
     }
 
     pub fn push_batch_front(
         &self,
         items: alloc::vec::Vec<(Arc<crate::block_processing::BlockContext>, Option<Account>)>,
-    ) -> alloc::vec::Vec<(Arc<crate::block_processing::BlockContext>, Arc<AtomicU8>, Arc<AtomicBool>)> {
+    ) -> alloc::vec::Vec<Arc<crate::block_processing::BlockContext>> {
         let mut out = alloc::vec::Vec::with_capacity(items.len());
         if items.is_empty() {
             return out;
         }
         let mut lock = self.tasks.lock();
         for (ctx, account) in items.into_iter().rev() {
-            let result = Arc::new(AtomicU8::new(SignatureResult::Unknown as u8));
-            let finished = Arc::new(AtomicBool::new(false));
-            let task = SignatureTask {
-                block: Arc::new(ctx.block.clone()),
-                ctx: Some(ctx.clone()),
-                account,
-                result: Some(result.clone()),
-                finished: Some(finished.clone()),
-            };
-            lock.push_front(task);
-            out.push((ctx, result, finished));
-        }
-        self.pending_count.store(lock.len(), Ordering::Release);
-        out
-    }
-
-    #[allow(dead_code)]
-    pub fn enqueue_preverify_batch(
-        &self,
-        ctxs: &[Arc<crate::block_processing::BlockContext>],
-    ) {
-        if self.pending_count.load(Ordering::Relaxed) >= 512 || ctxs.is_empty() {
-            return;
-        }
-        let mut playable_hashes: alloc::collections::BTreeMap<
-            rsnano_core::BlockHash,
-            Option<rsnano_core::Amount>,
-        > = alloc::collections::BTreeMap::new();
-        let mut to_enqueue = alloc::vec::Vec::new();
-
-        for ctx in ctxs {
-            if ctx.source == crate::block_processing::BlockSource::Local {
-                continue;
-            }
-            let b = &ctx.block;
-            let hash = b.hash();
-            let prev = b.previous();
-            if !prev.is_zero()
-                && !playable_hashes.contains_key(&prev)
-                && !rsnano_ledger::block_may_exist(&prev)
+            if ctx.block.is_signature_verified()
+                || ctx.sig_state.load(Ordering::Acquire) == SIG_STATE_DONE
             {
                 continue;
             }
-
-            if !b.is_signature_verified() {
-                let verify_account = b
-                    .account_field()
-                    .or(ctx.account)
-                    .filter(|a| !a.is_zero());
-                if verify_account.is_some() {
-                    to_enqueue.push((ctx.clone(), verify_account));
-                }
+            if ctx.sig_state.load(Ordering::Acquire) == SIG_STATE_IN_PROGRESS {
+                // Already claimed and actively being verified by a background worker hart!
+                // Do not enqueue a duplicate task; just wait for it to reach SIG_STATE_DONE.
+                out.push(ctx);
+                continue;
             }
-
-            let mut gap_source = false;
-            match b {
-                Block::LegacyReceive(_) | Block::LegacyOpen(_) => {
-                    let source = b.source_or_link();
-                    if !source.is_zero()
-                        && !playable_hashes.contains_key(&source)
-                        && !rsnano_ledger::block_may_exist(&source)
-                    {
-                        gap_source = true;
-                    }
-                }
-                Block::State(s) => {
-                    if !s.link().is_zero() {
-                        let source: rsnano_core::BlockHash = s.link().into();
-                        let is_receive = if prev.is_zero() {
-                            true
-                        } else if let Some(Some(prev_bal)) = playable_hashes.get(&prev) {
-                            s.balance() >= *prev_bal
-                        } else {
-                            false
-                        };
-                        if is_receive
-                            && !playable_hashes.contains_key(&source)
-                            && !rsnano_ledger::block_may_exist(&source)
-                        {
-                            gap_source = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            if !gap_source {
-                playable_hashes.insert(hash, b.balance_field());
-            }
+            lock.push_front(SignatureTask {
+                ctx: ctx.clone(),
+                account,
+            });
+            out.push(ctx);
         }
+        self.sync_count.store(lock.len(), Ordering::Release);
+        out
+    }
 
-        if to_enqueue.is_empty() {
+    #[inline]
+    pub fn enqueue_bg(&self, ctx: &Arc<crate::block_processing::BlockContext>) {
+        if self.bg_count.load(Ordering::Relaxed) >= MAX_BG_TASKS {
             return;
         }
-        if let Some(mut lock) = self.tasks.try_lock() {
-            for (ctx, account) in to_enqueue {
-                if lock.len() >= 512 {
-                    break;
-                }
-                lock.push_back(SignatureTask {
-                    block: Arc::new(ctx.block.clone()),
-                    ctx: Some(ctx),
-                    account,
-                    result: None,
-                    finished: None,
-                });
-            }
-            self.pending_count.store(lock.len(), Ordering::Release);
+        if ctx.source == crate::block_processing::BlockSource::Local
+            || ctx.block.is_signature_verified()
+            || ctx.sig_state.load(Ordering::Relaxed) != SIG_STATE_UNCLAIMED
+        {
+            return;
         }
+        let has_account = ctx
+            .block
+            .account_field()
+            .or(ctx.account)
+            .is_some_and(|a| !a.is_zero());
+        if !has_account {
+            return;
+        }
+        let mut lock = self.bg_tasks.lock();
+        if lock.len() < MAX_BG_TASKS {
+            lock.push_back(ctx.clone());
+            self.bg_count.store(lock.len(), Ordering::Release);
+        }
+    }
+
+    pub fn enqueue_bg_batch(&self, ctxs: &[Arc<crate::block_processing::BlockContext>]) {
+        if self.bg_count.load(Ordering::Relaxed) >= MAX_BG_TASKS || ctxs.is_empty() {
+            return;
+        }
+        let mut lock = self.bg_tasks.lock();
+        for ctx in ctxs {
+            if lock.len() >= MAX_BG_TASKS {
+                break;
+            }
+            if ctx.source == crate::block_processing::BlockSource::Local
+                || ctx.block.is_signature_verified()
+                || ctx.sig_state.load(Ordering::Relaxed) != SIG_STATE_UNCLAIMED
+            {
+                continue;
+            }
+            let has_account = ctx
+                .block
+                .account_field()
+                .or(ctx.account)
+                .is_some_and(|a| !a.is_zero());
+            if has_account {
+                lock.push_back(ctx.clone());
+            }
+        }
+        self.bg_count.store(lock.len(), Ordering::Release);
+    }
+
+    #[inline]
+    pub fn has_sync_tasks(&self) -> bool {
+        self.sync_count.load(Ordering::Relaxed) > 0
     }
 
     #[inline]
     pub fn is_empty_relaxed(&self) -> bool {
-        self.pending_count.load(Ordering::Relaxed) == 0
+        self.sync_count.load(Ordering::Relaxed) == 0 && self.bg_count.load(Ordering::Relaxed) == 0
     }
 
-    pub fn help_verify(&self) -> bool {
-        if self.is_empty_relaxed() {
-            return false;
+    /// Used by Hart 6 (`BlockBatchProcessor`) to verify only synchronous batch tasks.
+    pub fn help_verify_sync(&self) -> usize {
+        if self.sync_count.load(Ordering::Relaxed) == 0 {
+            return 0;
         }
         let mut tasks: [Option<SignatureTask>; 4] = [None, None, None, None];
         let mut count = 0;
         {
-            let Some(mut lock) = self.tasks.try_lock() else {
-                return false;
-            };
+            let mut lock = self.tasks.lock();
             if lock.is_empty() {
-                self.pending_count.store(0, Ordering::Relaxed);
-                return false;
+                self.sync_count.store(0, Ordering::Relaxed);
+                return 0;
             }
             while count < 4 {
                 if let Some(t) = lock.pop_front() {
-                    let already_verified = t.block.is_signature_verified()
-                        || t.ctx
-                            .as_ref()
-                            .is_some_and(|c| c.block.is_signature_verified());
-                    if already_verified {
-                        t.block.set_signature_verified(true);
-                        if let Some(ctx) = &t.ctx {
-                            ctx.block.set_signature_verified(true);
-                        }
-                        if let Some(res) = &t.result {
-                            res.store(SignatureResult::Valid as u8, Ordering::Release);
-                        }
-                        if let Some(fin) = &t.finished {
-                            fin.store(true, Ordering::Release);
-                        }
+                    if t.ctx.block.is_signature_verified() {
+                        t.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
+                        continue;
+                    }
+                    if t.ctx
+                        .sig_state
+                        .compare_exchange(
+                            SIG_STATE_UNCLAIMED,
+                            SIG_STATE_IN_PROGRESS,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
                         continue;
                     }
                     tasks[count] = Some(t);
@@ -214,19 +168,114 @@ impl SignatureChecker {
                     break;
                 }
             }
-            self.pending_count.store(lock.len(), Ordering::Relaxed);
+            self.sync_count.store(lock.len(), Ordering::Relaxed);
         }
-        
+
         if count == 0 {
-            return false;
+            return 0;
         }
-        
+
         self.verify_tasks_slice(&mut tasks[..count]);
-        true
+        count
+    }
+
+    /// Used by Crypto Worker Harts: drains high-priority synchronous batch tasks first,
+    /// and when idle, pre-verifies queued blocks from `bg_tasks`.
+    pub fn help_verify(&self) -> usize {
+        if self.sync_count.load(Ordering::Relaxed) > 0 {
+            let mut tasks: [Option<SignatureTask>; 4] = [None, None, None, None];
+            let mut count = 0;
+            {
+                let mut lock = self.tasks.lock();
+                while count < 4 {
+                    if let Some(t) = lock.pop_front() {
+                        if t.ctx.block.is_signature_verified() {
+                            t.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
+                            continue;
+                        }
+                        if t.ctx
+                            .sig_state
+                            .compare_exchange(
+                                SIG_STATE_UNCLAIMED,
+                                SIG_STATE_IN_PROGRESS,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        tasks[count] = Some(t);
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                self.sync_count.store(lock.len(), Ordering::Relaxed);
+            }
+            if count > 0 {
+                self.verify_tasks_slice(&mut tasks[..count]);
+                return count;
+            }
+        }
+
+        if self.bg_count.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+
+        let mut tasks: [Option<SignatureTask>; 4] = [None, None, None, None];
+        let mut count = 0;
+        {
+            let mut lock = self.bg_tasks.lock();
+            if lock.is_empty() {
+                self.bg_count.store(0, Ordering::Relaxed);
+                return 0;
+            }
+            while count < 4 {
+                if let Some(ctx) = lock.pop_front() {
+                    if ctx.block.is_signature_verified() {
+                        ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
+                        continue;
+                    }
+                    let account = ctx
+                        .block
+                        .account_field()
+                        .or(ctx.account)
+                        .filter(|a| !a.is_zero());
+                    if account.is_none() {
+                        continue;
+                    }
+                    if ctx
+                        .sig_state
+                        .compare_exchange(
+                            SIG_STATE_UNCLAIMED,
+                            SIG_STATE_IN_PROGRESS,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    tasks[count] = Some(SignatureTask { ctx, account });
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            self.bg_count.store(lock.len(), Ordering::Relaxed);
+        }
+
+        if count == 0 {
+            return 0;
+        }
+
+        self.verify_tasks_slice(&mut tasks[..count]);
+        count
     }
 
     pub fn try_help_verify(&self) -> bool {
-        self.help_verify()
+        self.help_verify() > 0
     }
 
     fn verify_tasks_slice(&self, tasks: &mut [Option<SignatureTask>]) {
@@ -237,7 +286,7 @@ impl SignatureChecker {
                 let t = tasks[i].as_ref().unwrap();
                 if let Some(acc) = t.account {
                     accounts[i] = acc;
-                } else if let Some(acc) = t.block.account_field() {
+                } else if let Some(acc) = t.ctx.block.account_field() {
                     accounts[i] = acc;
                 } else {
                     all_have_account = false;
@@ -264,10 +313,10 @@ impl SignatureChecker {
                     keys_val[3].as_bytes(),
                 ];
                 let hashes = [
-                    t0.block.hash(),
-                    t1.block.hash(),
-                    t2.block.hash(),
-                    t3.block.hash(),
+                    t0.ctx.block.hash(),
+                    t1.ctx.block.hash(),
+                    t2.ctx.block.hash(),
+                    t3.ctx.block.hash(),
                 ];
                 let msgs = [
                     hashes[0].as_bytes() as &[u8],
@@ -276,10 +325,10 @@ impl SignatureChecker {
                     hashes[3].as_bytes() as &[u8],
                 ];
                 let sigs_val = [
-                    t0.block.signature(),
-                    t1.block.signature(),
-                    t2.block.signature(),
-                    t3.block.signature(),
+                    t0.ctx.block.signature(),
+                    t1.ctx.block.signature(),
+                    t2.ctx.block.signature(),
+                    t3.ctx.block.signature(),
                 ];
                 let sigs = [
                     sigs_val[0].as_bytes(),
@@ -292,20 +341,9 @@ impl SignatureChecker {
                 for i in 0..4 {
                     let t = tasks[i].as_ref().unwrap();
                     if results[i] {
-                        t.block.set_signature_verified(true);
-                        if let Some(ctx) = &t.ctx {
-                            ctx.block.set_signature_verified(true);
-                        }
+                        t.ctx.block.set_signature_verified(true);
                     }
-                    if let Some(res) = &t.result {
-                        res.store(
-                            if results[i] { SignatureResult::Valid as u8 } else { SignatureResult::Invalid as u8 },
-                            Ordering::Release,
-                        );
-                    }
-                    if let Some(fin) = &t.finished {
-                        fin.store(true, Ordering::Release);
-                    }
+                    t.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
                 }
                 return;
             }
@@ -316,30 +354,18 @@ impl SignatureChecker {
             if let Some(task) = opt.take() {
                 let account = if let Some(acc) = task.account {
                     acc
-                } else if let Some(acc) = task.block.account_field() {
+                } else if let Some(acc) = task.ctx.block.account_field() {
                     acc
                 } else {
-                    if let Some(fin) = &task.finished {
-                        fin.store(true, Ordering::Release);
-                    }
+                    task.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
                     continue;
                 };
 
-                let valid = task.block.verify_with_key(&account.as_key()).is_ok();
+                let valid = task.ctx.block.verify_with_key(&account.as_key()).is_ok();
                 if valid {
-                    if let Some(ctx) = &task.ctx {
-                        ctx.block.set_signature_verified(true);
-                    }
+                    task.ctx.block.set_signature_verified(true);
                 }
-                if let Some(res) = &task.result {
-                    res.store(
-                        if valid { SignatureResult::Valid as u8 } else { SignatureResult::Invalid as u8 },
-                        Ordering::Release,
-                    );
-                }
-                if let Some(fin) = &task.finished {
-                    fin.store(true, Ordering::Release);
-                }
+                task.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
             }
         }
     }

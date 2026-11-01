@@ -112,6 +112,11 @@ impl BtreeStore {
         let (account_count, block_count, confirmed_count, pruned_count) =
             if let Some((acc, blk, conf, pruned)) = self.version.get_cached_counts() {
                 *LAST_PERSISTED_COUNTS.lock() = (acc, blk, conf, pruned);
+                if acc <= 250_000 {
+                    self.account.populate_bloom();
+                } else {
+                    self.account.disable_bloom();
+                }
                 #[cfg(not(test))]
                 {
                     kernel_common::uart::print(
@@ -199,6 +204,7 @@ impl BtreeStore {
             }
         }
         self.block.clear_bloom();
+        self.account.clear_bloom();
         self.pruned.set_has_pruned(false);
         self.cache.reset();
         *LAST_PERSISTED_COUNTS.lock() = (0, 0, 0, 0);

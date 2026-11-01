@@ -64,6 +64,89 @@ impl RealtimeMessageHandler {
         }
     }
 
+    pub fn process_publish_batch(
+        &self,
+        publishes: alloc::vec::Vec<(rsnano_messages::Publish, rsnano_network::ChannelId)>,
+    ) {
+        let n = publishes.len();
+        if n == 0 {
+            return;
+        }
+        self.stats.add_dir(
+            StatType::Message,
+            DetailType::Publish,
+            Direction::In,
+            n as u64,
+        );
+
+        let mut valid_flags = alloc::vec![false; n];
+        let mut i = 0;
+        while i + 4 <= n {
+            let blocks = [
+                &publishes[i].0.block,
+                &publishes[i + 1].0.block,
+                &publishes[i + 2].0.block,
+                &publishes[i + 3].0.block,
+            ];
+            let res = self.work_thresholds.validate_entry_blocks_4(blocks);
+            valid_flags[i] = res[0];
+            valid_flags[i + 1] = res[1];
+            valid_flags[i + 2] = res[2];
+            valid_flags[i + 3] = res[3];
+            i += 4;
+        }
+        while i < n {
+            valid_flags[i] = self
+                .work_thresholds
+                .validate_entry_block(&publishes[i].0.block);
+            i += 1;
+        }
+
+        let mut to_push = alloc::vec::Vec::with_capacity(n);
+        let mut rejected_digests = alloc::vec::Vec::new();
+        let mut insufficient_work = 0u64;
+
+        for ((publish, channel_id), pow_ok) in publishes.into_iter().zip(valid_flags.into_iter()) {
+            if !pow_ok {
+                insufficient_work += 1;
+                rejected_digests.push(publish.digest);
+                continue;
+            }
+            let source = if publish.is_originator {
+                BlockSource::LiveOriginator
+            } else {
+                BlockSource::Live
+            };
+            let _ = publish.block.hash();
+            to_push.push((
+                BlockContext::new(publish.block, source, channel_id),
+                publish.digest,
+            ));
+        }
+
+        if insufficient_work > 0 {
+            self.stats.add(
+                StatType::BlockProcessor,
+                DetailType::InsufficientWork,
+                insufficient_work,
+            );
+        }
+
+        if !to_push.is_empty() {
+            self.block_processor_queue
+                .push_batch_with_digests(to_push, &mut rejected_digests);
+        }
+
+        if !rejected_digests.is_empty() {
+            let dropped = rejected_digests.len() as u64;
+            for digest in rejected_digests {
+                self.network_filter.clear(digest);
+            }
+            self.stats
+                .add_dir(StatType::Drop, DetailType::Publish, Direction::In, dropped);
+        }
+    }
+
     pub fn process(&self, message: Message, channel: &Arc<Channel>) {
         self.stats.inc_dir(
             StatType::Message,
@@ -73,7 +156,6 @@ impl RealtimeMessageHandler {
 
         match message {
             Message::Keepalive(keepalive) => {
-                kernel_common::uart::putchar(b'k');
                 // Discovery: Remember the peers for future reachout
                 self.latest_keepalives
                     .lock()
@@ -93,7 +175,6 @@ impl RealtimeMessageHandler {
                 }
             }
             Message::Publish(publish) => {
-                kernel_common::uart::putchar(b'B');
                 let mut ok = true;
 
                 if !self.work_thresholds.validate_entry_block(&publish.block) {
@@ -134,7 +215,6 @@ impl RealtimeMessageHandler {
                 }
             }
             Message::ConfirmAck(ack) => {
-                kernel_common::uart::putchar(b'A');
                 // Ignore zero account votes
                 if ack.vote().voter.is_zero() {
                     self.stats.inc_dir(
@@ -181,7 +261,6 @@ impl RealtimeMessageHandler {
                 self.bootstrap_server.enqueue(req, channel.clone());
             }
             Message::AscPullAck(ack) => {
-                kernel_common::uart::putchar(b'S');
                 self.bootstrapper.process(ack, channel.channel_id());
             }
             Message::FrontierReq(_)

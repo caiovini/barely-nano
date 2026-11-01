@@ -162,7 +162,7 @@ impl BlockProcessorQueue {
         let added = {
             let mut guard = self.queue.lock();
             if guard.can_push(context.source, context.channel_id, &hash) {
-                guard.push(context)
+                guard.push(context.clone())
             } else {
                 guard.record_overfill(context.source);
                 false
@@ -170,6 +170,9 @@ impl BlockProcessorQueue {
         };
 
         if added {
+            if let Some(checker) = self.signature_checker.lock().as_ref() {
+                checker.enqueue_bg(&context);
+            }
             self.condition.notify_one();
         }
 
@@ -177,21 +180,56 @@ impl BlockProcessorQueue {
     }
 
     pub fn push_batch(&self, contexts: impl IntoIterator<Item = BlockContext>) {
-        let mut any_added = false;
+        let mut added_ctxs = Vec::new();
         {
             let mut guard = self.queue.lock();
             for ctx in contexts {
                 let hash = ctx.block.hash();
                 if guard.can_push(ctx.source, ctx.channel_id, &hash) {
-                    if guard.push(Arc::new(ctx)) {
-                        any_added = true;
+                    let arc_ctx = Arc::new(ctx);
+                    if guard.push(arc_ctx.clone()) {
+                        added_ctxs.push(arc_ctx);
                     }
                 } else {
                     guard.record_overfill(ctx.source);
                 }
             }
         }
-        if any_added {
+        if !added_ctxs.is_empty() {
+            if let Some(checker) = self.signature_checker.lock().as_ref() {
+                checker.enqueue_bg_batch(&added_ctxs);
+            }
+            self.condition.notify_one();
+        }
+    }
+
+    pub fn push_batch_with_digests(
+        &self,
+        items: Vec<(BlockContext, u128)>,
+        rejected_digests: &mut Vec<u128>,
+    ) {
+        let mut added_ctxs = Vec::with_capacity(items.len());
+        {
+            let mut guard = self.queue.lock();
+            for (ctx, digest) in items {
+                let hash = ctx.block.hash();
+                if guard.can_push(ctx.source, ctx.channel_id, &hash) {
+                    let arc_ctx = Arc::new(ctx);
+                    if guard.push(arc_ctx.clone()) {
+                        added_ctxs.push(arc_ctx);
+                    } else {
+                        rejected_digests.push(digest);
+                    }
+                } else {
+                    guard.record_overfill(ctx.source);
+                    rejected_digests.push(digest);
+                }
+            }
+        }
+        if !added_ctxs.is_empty() {
+            if let Some(checker) = self.signature_checker.lock().as_ref() {
+                checker.enqueue_bg_batch(&added_ctxs);
+            }
             self.condition.notify_one();
         }
     }
@@ -199,8 +237,12 @@ impl BlockProcessorQueue {
     pub fn try_push(&self, context: impl Into<Arc<BlockContext>>) -> Result<bool, ()> {
         let context = context.into();
         if let Some(mut queue) = self.queue.try_lock() {
-            let added = queue.push(context);
+            let added = queue.push(context.clone());
+            drop(queue);
             if added {
+                if let Some(checker) = self.signature_checker.lock().as_ref() {
+                    checker.enqueue_bg(&context);
+                }
                 self.condition.notify_one();
             }
             Ok(added)

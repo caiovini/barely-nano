@@ -1,4 +1,6 @@
-use rsnano_core::{utils::UnixMillisTimestamp, Account, AccountInfo, Block, PendingKey, SavedBlock};
+use rsnano_core::{
+    utils::UnixMillisTimestamp, Account, AccountInfo, Block, PendingInfo, PendingKey, SavedBlock,
+};
 
 use crate::{AnySet, LedgerConstants};
 
@@ -25,7 +27,15 @@ impl<'a> BlockValidatorFactory<'a> {
 
     #[allow(dead_code)]
     pub(crate) fn create_validator(&self, signature_verified: bool) -> BlockValidator<'a> {
-        self.create_validator_with_batch_cache(signature_verified, false, None, None, false)
+        self.create_validator_with_batch_cache(
+            signature_verified,
+            false,
+            None,
+            None,
+            false,
+            None,
+            UnixMillisTimestamp::now(),
+        )
     }
 
     pub(crate) fn create_validator_with_batch_cache(
@@ -35,6 +45,8 @@ impl<'a> BlockValidatorFactory<'a> {
         in_batch_prev: Option<SavedBlock>,
         in_batch_account: Option<AccountInfo>,
         in_batch_source_exists: bool,
+        in_batch_pending: Option<Option<PendingInfo>>,
+        batch_now: UnixMillisTimestamp,
     ) -> BlockValidator<'a> {
         use crate::LEDGER_PROF as P;
         use core::sync::atomic::Ordering::Relaxed;
@@ -65,7 +77,7 @@ impl<'a> BlockValidatorFactory<'a> {
                 is_genesis,
                 signature_verified,
                 previous_block: None,
-                now: UnixMillisTimestamp::now(),
+                now: batch_now,
             };
         }
 
@@ -92,7 +104,7 @@ impl<'a> BlockValidatorFactory<'a> {
                 is_genesis,
                 signature_verified,
                 previous_block: None,
-                now: UnixMillisTimestamp::now(),
+                now: batch_now,
             };
         }
 
@@ -124,6 +136,8 @@ impl<'a> BlockValidatorFactory<'a> {
         let t2a = t();
         let pending_receive_info = if !maybe_receive || source_block.is_zero() {
             None
+        } else if let Some(cached_pending) = in_batch_pending {
+            cached_pending
         } else {
             self.any
                 .get_pending(&PendingKey::new(account, source_block))
@@ -149,7 +163,7 @@ impl<'a> BlockValidatorFactory<'a> {
         let t6 = t();
         P[8].fetch_add(t6 - t2c, Relaxed); // receivable_exists
 
-        let now = UnixMillisTimestamp::now();
+        let now = batch_now;
         let t7 = t();
         P[9].fetch_add(t7 - t6, Relaxed); // now()
 

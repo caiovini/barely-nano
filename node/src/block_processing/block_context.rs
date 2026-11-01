@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use core::sync::atomic::AtomicU8;
 use spin::Mutex;
 use alloc::boxed::Box;
 
@@ -10,6 +11,10 @@ use super::BlockSource;
 
 pub type BlockProcessorCallback = Box<dyn Fn(Result<(), BlockError>) + Send + Sync>;
 
+pub const SIG_STATE_UNCLAIMED: u8 = 0;
+pub const SIG_STATE_IN_PROGRESS: u8 = 1;
+pub const SIG_STATE_DONE: u8 = 2;
+
 pub struct BlockContext {
     pub block: Block,
     pub account: Option<Account>,
@@ -18,6 +23,7 @@ pub struct BlockContext {
     pub callback: Option<BlockProcessorCallback>,
     pub waiter: Option<Arc<BlockProcessorWaiter>>,
     pub channel_id: ChannelId,
+    pub sig_state: AtomicU8,
 }
 
 impl BlockContext {
@@ -30,6 +36,7 @@ impl BlockContext {
             callback: None,
             waiter: None,
             channel_id,
+            sig_state: AtomicU8::new(SIG_STATE_UNCLAIMED),
         }
     }
 
@@ -47,6 +54,7 @@ impl BlockContext {
             callback: Some(callback),
             waiter: None,
             channel_id,
+            sig_state: AtomicU8::new(SIG_STATE_UNCLAIMED),
         }
     }
 
@@ -67,6 +75,7 @@ impl BlockContext {
             callback: None,
             waiter: Some(waiter.clone()),
             channel_id,
+            sig_state: AtomicU8::new(SIG_STATE_UNCLAIMED),
         };
         (ctx, waiter)
     }

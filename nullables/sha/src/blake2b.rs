@@ -8,6 +8,7 @@
 //! - **Zvkb**: The vectorized compression function uses `vror.vi`, `vadd.vv`,
 //!   and `vxor.vv` to execute 4 G-function columns in parallel per instruction.
 
+#[cfg(target_arch = "riscv64")]
 use core::arch::asm;
 use core::convert::TryInto;
 

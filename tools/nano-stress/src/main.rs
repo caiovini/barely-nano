@@ -267,17 +267,27 @@ async fn main() -> Result<()> {
     }
     generator.init_accounts(args.accounts);
 
+    let gen_start = Instant::now();
+    let mut batches = Vec::new();
+    let mut rem_gen = args.blocks;
+    while rem_gen > 0 {
+        let chunk = rem_gen.min(args.batch_size);
+        batches.push(generator.generate_batch(chunk, args.strategy));
+        rem_gen -= chunk;
+    }
+    println!(
+        "  -> Pre-generated {} blocks in {:.2?} ({} batches)",
+        args.blocks,
+        gen_start.elapsed(),
+        batches.len()
+    );
+
     let overall_start = Instant::now();
     let mut total_sent = 0;
-    let mut remaining = args.blocks;
 
-    while remaining > 0 {
-        let chunk = remaining.min(args.batch_size);
-        let batch = generator.generate_batch(chunk, args.strategy);
-
+    for batch in &batches {
         let (sent, dur) = session.send_blocks(&batch.blocks, args.rate).await?;
         total_sent += sent;
-        remaining -= sent;
 
         let bps = (sent as f64) / dur.as_secs_f64().max(0.0001);
         let bytes_sent = sent * 224;
@@ -298,8 +308,8 @@ async fn main() -> Result<()> {
     println!("============================================================");
     println!(" Total Blocks Sent:   {}", total_sent);
     println!(" Total Data Sent:     {:.2} KB", total_kb);
-    println!(" Elapsed Time:        {:.2?}", overall_dur);
-    println!(" Average Throughput:  {:.1} blocks/second", overall_bps);
+    println!(" TCP Stream Time:     {:.2?}", overall_dur);
+    println!(" TCP Send Throughput: {:.1} blocks/second", overall_bps);
     println!("============================================================\n");
 
     println!("[4/4] Waiting for node pipeline to process and cement blocks...");
@@ -325,7 +335,7 @@ async fn main() -> Result<()> {
                 }
                 if current_c == last_c && current_c > 0 {
                     stable_iterations += 1;
-                    if stable_iterations >= 100
+                    if stable_iterations >= 600
                         && wait_start.elapsed() > std::time::Duration::from_secs(30)
                     {
                         break;
@@ -335,7 +345,7 @@ async fn main() -> Result<()> {
                 }
             } else if current_c == last_c && current_c > 0 {
                 stable_iterations += 1;
-                if stable_iterations >= 16 {
+                if stable_iterations >= 60 {
                     break;
                 }
             } else {
@@ -343,8 +353,10 @@ async fn main() -> Result<()> {
             }
             last_c = current_c;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
+
+    let e2e_dur = overall_start.elapsed();
 
     if let Some(final_count) = final_count {
         println!(
@@ -356,15 +368,16 @@ async fn main() -> Result<()> {
             let final_c: u64 = final_count.count.parse().unwrap_or(0);
             let init_u: u64 = init.unchecked.parse().unwrap_or(0);
             let final_u: u64 = final_count.unchecked.parse().unwrap_or(0);
+            let growth = final_c.saturating_sub(init_c);
+            let e2e_bps = (growth as f64) / e2e_dur.as_secs_f64().max(0.0001);
 
-            println!(
-                "  -> Ledger Block Growth: +{} blocks",
-                final_c.saturating_sub(init_c)
-            );
+            println!("  -> Ledger Block Growth: +{} blocks", growth);
             println!(
                 "  -> Unchecked Queue:     +{} blocks",
                 final_u.saturating_sub(init_u)
             );
+            println!("  -> End-to-End Time:     {:.2?}", e2e_dur);
+            println!("  -> Node Commit Rate:    {:.1} blocks/second", e2e_bps);
         }
     }
 

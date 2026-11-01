@@ -219,8 +219,38 @@ impl WorkThresholds {
 
     pub fn validate_entry_block(&self, block: &Block) -> bool {
         let difficulty = self.difficulty_block(block);
+        if difficulty >= self.base {
+            block.set_pow_base_verified(true);
+        }
         let threshold = self.threshold_entry(block.block_type());
         difficulty >= threshold
+    }
+
+    pub fn validate_entry_blocks_4(&self, blocks: [&Block; 4]) -> [bool; 4] {
+        let roots = [
+            blocks[0].root(),
+            blocks[1].root(),
+            blocks[2].root(),
+            blocks[3].root(),
+        ];
+        let works = [
+            blocks[0].work(),
+            blocks[1].work(),
+            blocks[2].work(),
+            blocks[3].work(),
+        ];
+        let difficulties = self.difficulty.get_difficulties_batch_4_roots(
+            [&roots[0], &roots[1], &roots[2], &roots[3]],
+            works,
+        );
+        let mut out = [false; 4];
+        for i in 0..4 {
+            if difficulties[i] >= self.base {
+                blocks[i].set_pow_base_verified(true);
+            }
+            out[i] = difficulties[i] >= self.threshold_entry(blocks[i].block_type());
+        }
+        out
     }
 
     pub fn is_valid_pow(&self, block: &Block, details: &BlockDetails) -> bool {

@@ -63,6 +63,9 @@ impl<'a> BlockInserter<'a> {
             }
             
             self.update_account();
+            self.delete_old_pending_info();
+            self.insert_new_pending_info();
+            self.update_representative_cache();
         } else if !self.instructions.set_account_info.head.is_zero()
             && self.instructions.old_account_info.head.is_zero()
             && self.instructions.set_account_info.open_block == self.instructions.set_account_info.head
@@ -72,12 +75,6 @@ impl<'a> BlockInserter<'a> {
                 .cache
                 .account_count
                 .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        }
-
-        self.delete_old_pending_info();
-        self.insert_new_pending_info();
-        if !defer_btree_tables {
-            self.update_representative_cache();
         }
 
         Some(saved_block)

@@ -1023,6 +1023,11 @@ fn run_consensus_and_elections_loop(
                 break;
             }
         }
+        if !node_arc.signature_checker.is_empty_relaxed() {
+            if node_arc.signature_checker.help_verify() > 0 {
+                worked = true;
+            }
+        }
 
         adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
@@ -1071,6 +1076,11 @@ fn run_vote_processor_loop(
                 break;
             }
         }
+        if !node_arc.signature_checker.is_empty_relaxed() {
+            if node_arc.signature_checker.help_verify() > 0 {
+                worked = true;
+            }
+        }
         adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
@@ -1107,23 +1117,41 @@ fn run_crypto_worker_1_loop(
         }
 
         let mut worked = false;
-        if !node_arc.signature_checker.is_empty_relaxed() {
-            for _ in 0..16 {
-                if node_arc.signature_checker.help_verify() {
+        // 1. High-priority synchronous signature batches waiting on Hart 6
+        while node_arc.signature_checker.has_sync_tasks() {
+            let n = node_arc.signature_checker.help_verify();
+            if n > 0 {
+                worked = true;
+                verified_count = verified_count.wrapping_add(n);
+            } else {
+                break;
+            }
+        }
+
+        // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
+        if !node_arc.inbound_message_queue.is_empty_relaxed() {
+            let hp1 = kernel_common::clint::mtime();
+            for _ in 0..4 {
+                if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
                     worked = true;
-                    verified_count = verified_count.wrapping_add(1);
                 } else {
                     break;
                 }
             }
+            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
         }
 
-        if !node_arc.inbound_message_queue.is_empty_relaxed() {
-            let hp1 = kernel_common::clint::mtime();
-            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
-                worked = true;
+        // 3. Background signature pre-verification (interleaved with sync & message checks)
+        if !node_arc.signature_checker.is_empty_relaxed() {
+            for _ in 0..4 {
+                let n = node_arc.signature_checker.help_verify();
+                if n > 0 {
+                    worked = true;
+                    verified_count = verified_count.wrapping_add(n);
+                } else {
+                    break;
+                }
             }
-            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
         }
 
         let _ = (&exec, hart_id);
@@ -1164,23 +1192,41 @@ fn run_crypto_worker_2_loop(
         }
 
         let mut worked = false;
-        if !node_arc.signature_checker.is_empty_relaxed() {
-            for _ in 0..16 {
-                if node_arc.signature_checker.help_verify() {
+        // 1. High-priority synchronous signature batches waiting on Hart 6
+        while node_arc.signature_checker.has_sync_tasks() {
+            let n = node_arc.signature_checker.help_verify();
+            if n > 0 {
+                worked = true;
+                verified_count = verified_count.wrapping_add(n);
+            } else {
+                break;
+            }
+        }
+
+        // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
+        if !node_arc.inbound_message_queue.is_empty_relaxed() {
+            let hp1 = kernel_common::clint::mtime();
+            for _ in 0..4 {
+                if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
                     worked = true;
-                    verified_count = verified_count.wrapping_add(1);
                 } else {
                     break;
                 }
             }
+            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
         }
 
-        if !node_arc.inbound_message_queue.is_empty_relaxed() {
-            let hp1 = kernel_common::clint::mtime();
-            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
-                worked = true;
+        // 3. Background signature pre-verification (interleaved with sync & message checks)
+        if !node_arc.signature_checker.is_empty_relaxed() {
+            for _ in 0..4 {
+                let n = node_arc.signature_checker.help_verify();
+                if n > 0 {
+                    worked = true;
+                    verified_count = verified_count.wrapping_add(n);
+                } else {
+                    break;
+                }
             }
-            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
         }
 
         let _ = (&exec, hart_id);
@@ -1513,6 +1559,12 @@ fn run_storage_flush_and_monitor_loop(
         }
 
         if !worked_exec {
+            if !node_mon.signature_checker.is_empty_relaxed()
+                && node_mon.signature_checker.help_verify() > 0
+            {
+                iterations += 1;
+                continue;
+            }
             // Aggressive throttle when completely idle to free up system bus
             for _ in 0..2000 {
                 core::hint::spin_loop();
@@ -1685,7 +1737,7 @@ fn run_ledger_commit_and_bootstrap_loop(
                     worked = true;
                     batch_worked = true;
                 }
-                if node_arc.confirming_set.len() >= 128 {
+                if node_arc.ledger.backlog_count() >= 100_000 && node_arc.confirming_set.len() >= 128 {
                     node_arc.confirming_set.run_once();
                 }
                 if !batch_worked || node_arc.ledger.backlog_count() >= 250_000 {
@@ -1693,7 +1745,9 @@ fn run_ledger_commit_and_bootstrap_loop(
                 }
             }
         }
-        node_arc.confirming_set.run_once();
+        if node_arc.block_processor.total_queue_len() == 0 || node_arc.ledger.backlog_count() >= 100_000 {
+            node_arc.confirming_set.run_once();
+        }
         node_arc.election_schedulers.priority.run_one();
 
         if mtime - last_scheduler_tick > millis(100) {
@@ -2227,14 +2281,20 @@ fn run_maintenance_and_network_loop(
 
         // Release NET.lock() for a brief window (50 us when active, 200 us when idle)
         // so Cluster 1 worker harts can acquire NET.lock() for socket reads/writes without starving.
-        let pause_ticks = if net_active {
-            CLINT_FREQ / 20_000
+        if !net_active && !node_arc.signature_checker.is_empty_relaxed() {
+            let hs = kernel_common::clint::mtime();
+            let _ = node_arc.signature_checker.help_verify();
+            HART1_PROF[2].fetch_add(kernel_common::clint::mtime() - hs, Ordering::Relaxed);
         } else {
-            CLINT_FREQ / 5_000
-        };
-        let pause_start = kernel_common::clint::mtime();
-        while kernel_common::clint::mtime().wrapping_sub(pause_start) < pause_ticks {
-            core::hint::spin_loop();
+            let pause_ticks = if net_active {
+                CLINT_FREQ / 20_000
+            } else {
+                CLINT_FREQ / 5_000
+            };
+            let pause_start = kernel_common::clint::mtime();
+            while kernel_common::clint::mtime().wrapping_sub(pause_start) < pause_ticks {
+                core::hint::spin_loop();
+            }
         }
     }
 }

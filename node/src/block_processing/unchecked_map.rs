@@ -277,29 +277,55 @@ impl UncheckedMapThread {
         let mut satisfied = Vec::new();
         let callback = {
             let mut lock = self.mutable.lock();
-            let mut queue = VecDeque::new();
-            for hash in hashes {
-                queue.push_back(*hash);
-            }
+            let mut transitive_queue = VecDeque::new();
 
-            while let Some(dep) = queue.pop_front() {
-                if satisfied.len() >= 512 {
-                    break;
-                }
+            // 1. Always resolve all direct dependencies from `hashes` so no trigger in `back_buffer` is dropped.
+            for dep in hashes {
                 let start_idx = satisfied.len();
                 lock.entries_container.for_each_with_dependency(
-                    &dep,
+                    dep,
                     |key, info| {
-                        if satisfied.len() < 512 {
-                            satisfied.push((key.clone(), info.clone()));
-                        }
+                        satisfied.push((key.clone(), info.clone()));
                     },
                     || true,
                 );
 
                 if !self.disable_delete {
-                    for (key, _) in &satisfied[start_idx..] {
+                    for (key, info) in &satisfied[start_idx..] {
                         lock.entries_container.remove(key);
+                        transitive_queue.push_back(info.block.hash().into());
+                        let link = info.block.destination_or_link();
+                        if !link.is_zero() {
+                            transitive_queue.push_back(link.into());
+                        }
+                    }
+                }
+            }
+
+            // 2. Transitively pull chained blocks in topological order up to a full 256-block batch.
+            // Any remaining descendants in `entries_container` will be triggered when the tail blocks
+            // in `satisfied` commit in `BlockBatchProcessor::process_blocks`.
+            while satisfied.len() < 256 {
+                let Some(dep) = transitive_queue.pop_front() else {
+                    break;
+                };
+                let start_idx = satisfied.len();
+                lock.entries_container.for_each_with_dependency(
+                    &dep,
+                    |key, info| {
+                        satisfied.push((key.clone(), info.clone()));
+                    },
+                    || true,
+                );
+
+                if !self.disable_delete {
+                    for (key, info) in &satisfied[start_idx..] {
+                        lock.entries_container.remove(key);
+                        transitive_queue.push_back(info.block.hash().into());
+                        let link = info.block.destination_or_link();
+                        if !link.is_zero() {
+                            transitive_queue.push_back(link.into());
+                        }
                     }
                 }
             }
@@ -565,5 +591,33 @@ mod tests {
             UncheckedKey::new(hash.into(), BlockHash::default()),
             UncheckedInfo::new(Block::new_test_instance()),
         )
+    }
+
+    #[test]
+    fn transitive_chain_resolution() {
+        let map = UncheckedMap::default();
+        let satisfied_hashes = Arc::new(Mutex::new(Vec::new()));
+        let satisfied_clone = satisfied_hashes.clone();
+        map.set_satisfied_observer(Arc::new(move |info| {
+            satisfied_clone.lock().push(info.block.hash());
+        }));
+
+        let b1 = Block::new_test_instance_with_key(1);
+        let b2 = Block::new_test_instance_with_key(2);
+        let b3 = Block::new_test_instance_with_key(3);
+        let root_dep = BlockHash::from(999);
+
+        map.put(root_dep.into(), UncheckedInfo::new(b1.clone()));
+        map.put(b1.hash().into(), UncheckedInfo::new(b2.clone()));
+        map.put(b2.hash().into(), UncheckedInfo::new(b3.clone()));
+
+        map.trigger(&root_dep.into());
+        map.run_once();
+
+        assert_eq!(
+            *satisfied_hashes.lock(),
+            alloc::vec![b1.hash(), b2.hash(), b3.hash()]
+        );
+        assert!(map.is_empty());
     }
 }

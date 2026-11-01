@@ -34,6 +34,14 @@ impl TryFrom<u8> for WorkVersion {
 pub trait Difficulty: Send + Sync {
     fn get_difficulty(&self, root: &Root, work: WorkNonce) -> u64;
     fn get_difficulties_batch_4(&self, root: &Root, work: [WorkNonce; 4]) -> [u64; 4];
+    fn get_difficulties_batch_4_roots(&self, roots: [&Root; 4], work: [WorkNonce; 4]) -> [u64; 4] {
+        [
+            self.get_difficulty(roots[0], work[0]),
+            self.get_difficulty(roots[1], work[1]),
+            self.get_difficulty(roots[2], work[2]),
+            self.get_difficulty(roots[3], work[3]),
+        ]
+    }
     fn clone(&self) -> Box<dyn Difficulty>;
 }
 
@@ -88,6 +96,21 @@ impl Difficulty for DifficultyV1 {
         ];
 
         // Nano work uses an 8-byte Blake2b digest (same as get_difficulty above).
+        tools::blake2b::hash8_batch_4(inputs_refs)
+    }
+
+    fn get_difficulties_batch_4_roots(&self, roots: [&Root; 4], work: [WorkNonce; 4]) -> [u64; 4] {
+        let mut inputs = [[0u8; 40]; 4];
+        for i in 0..4 {
+            inputs[i][..8].copy_from_slice(&work[i].0.to_le_bytes());
+            inputs[i][8..].copy_from_slice(roots[i].as_bytes());
+        }
+        let inputs_refs = [
+            &inputs[0][..],
+            &inputs[1][..],
+            &inputs[2][..],
+            &inputs[3][..],
+        ];
         tools::blake2b::hash8_batch_4(inputs_refs)
     }
 

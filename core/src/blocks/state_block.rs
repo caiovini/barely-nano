@@ -14,6 +14,7 @@ pub struct StateBlock {
     hash: BlockHash,
     work: WorkNonce,
     pub signature_verified: AtomicBool,
+    pub pow_base_verified: AtomicBool,
 }
 
 impl Clone for StateBlock {
@@ -24,6 +25,7 @@ impl Clone for StateBlock {
             hash: self.hash,
             work: self.work,
             signature_verified: AtomicBool::new(self.signature_verified.load(Ordering::Relaxed)),
+            pow_base_verified: AtomicBool::new(self.pow_base_verified.load(Ordering::Relaxed)),
         }
     }
 }
@@ -36,6 +38,7 @@ impl Default for StateBlock {
             hash: BlockHash::default(),
             work: WorkNonce::default(),
             signature_verified: AtomicBool::new(false),
+            pow_base_verified: AtomicBool::new(false),
         }
     }
 }
@@ -61,6 +64,16 @@ impl StateBlock {
     #[inline(always)]
     pub fn set_signature_verified(&self, verified: bool) {
         self.signature_verified.store(verified, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn is_pow_base_verified(&self) -> bool {
+        self.pow_base_verified.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn set_pow_base_verified(&self, verified: bool) {
+        self.pow_base_verified.store(verified, Ordering::Relaxed);
     }
 
     pub fn verify_signature(&self) -> anyhow::Result<()> {
@@ -134,6 +147,7 @@ impl StateBlock {
             hashables,
             hash,
             signature_verified: AtomicBool::new(false),
+            pow_base_verified: AtomicBool::new(false),
         })
     }
 }
@@ -176,6 +190,7 @@ impl BlockBase for StateBlock {
 
     fn set_work(&mut self, work: WorkNonce) {
         self.work = work;
+        self.pow_base_verified.store(false, Ordering::Relaxed);
     }
 
     fn work(&self) -> WorkNonce {
@@ -317,6 +332,7 @@ impl<'a> From<StateBlockArgs<'a>> for Block {
             hash,
             work: value.work,
             signature_verified: AtomicBool::new(true),
+            pow_base_verified: AtomicBool::new(false),
         })
     }
 }
@@ -350,6 +366,7 @@ impl<'a> From<EpochBlockArgs<'a>> for Block {
             hash,
             work: value.work,
             signature_verified: AtomicBool::new(false),
+            pow_base_verified: AtomicBool::new(false),
         })
     }
 }
@@ -372,6 +389,7 @@ impl From<JsonStateBlock> for StateBlock {
             hashables,
             hash,
             signature_verified: AtomicBool::new(false),
+            pow_base_verified: AtomicBool::new(false),
         }
     }
 }

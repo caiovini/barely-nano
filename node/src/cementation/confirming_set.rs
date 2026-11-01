@@ -45,10 +45,10 @@ pub struct ConfirmingSetConfig {
 impl Default for ConfirmingSetConfig {
     fn default() -> Self {
         Self {
-            batch_size: 128,
-            max_blocks: 2048,
+            batch_size: 256,
+            max_blocks: 16384,
             max_queued_notifications: 8,
-            max_deferred: 2048,
+            max_deferred: 16384,
             deferred_age_cutoff: Duration::from_secs(15 * 60),
         }
     }

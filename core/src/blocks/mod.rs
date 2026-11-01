@@ -297,6 +297,21 @@ impl Block {
         }
     }
 
+    #[inline(always)]
+    pub fn is_pow_base_verified(&self) -> bool {
+        match self {
+            Block::State(b) => b.is_pow_base_verified(),
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn set_pow_base_verified(&self, verified: bool) {
+        if let Block::State(b) = self {
+            b.set_pow_base_verified(verified);
+        }
+    }
+
     pub fn deserialize(stream: &mut dyn Stream) -> anyhow::Result<Block> {
         let block_type =
             BlockType::from_u8(stream.read_u8()?).ok_or_else(|| anyhow!("invalid block type"))?;

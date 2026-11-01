@@ -158,20 +158,13 @@ impl BlockBatchProcessor {
         let verification_tasks = self.signature_checker.push_batch_front(to_verify);
         let verification_count = verification_tasks.len();
         if !verification_tasks.is_empty() {
-            while verification_tasks
-                .iter()
-                .any(|(_, _, finished)| !finished.load(core::sync::atomic::Ordering::Acquire))
-            {
-                if !self.signature_checker.help_verify() {
+            while verification_tasks.iter().any(|ctx| {
+                ctx.sig_state.load(core::sync::atomic::Ordering::Acquire)
+                    != crate::block_processing::SIG_STATE_DONE
+                    && !ctx.block.is_signature_verified()
+            }) {
+                if self.signature_checker.help_verify_sync() == 0 {
                     core::hint::spin_loop();
-                }
-            }
-
-            for (ctx, res, _) in verification_tasks {
-                if res.load(core::sync::atomic::Ordering::Acquire)
-                    == crate::signatures::SignatureResult::Valid as u8
-                {
-                    ctx.block.set_signature_verified(true);
                 }
             }
         }

@@ -84,7 +84,14 @@ impl<'a> BlockValidator<'a> {
         if self.is_genesis {
             return Ok(());
         }
-        if !self.work.is_valid_pow(self.block, &self.block_details()) {
+        let details = self.block_details();
+        if !cfg!(test)
+            && self.block.is_pow_base_verified()
+            && !matches!(details.epoch, rsnano_core::Epoch::Invalid)
+        {
+            return Ok(());
+        }
+        if !self.work.is_valid_pow(self.block, &details) {
             Err(BlockError::InsufficientWork)
         } else {
             Ok(())
