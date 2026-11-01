@@ -146,7 +146,7 @@ impl PeerSession {
             let encoded = self.serializer.serialize(&Message::Publish(publish));
             write_buf.extend_from_slice(encoded);
 
-            if write_buf.len() >= 16 * 1024 || i + 1 == blocks.len() {
+            if write_buf.len() >= 4 * 1024 || i + 1 == blocks.len() {
                 self.stream
                     .write_all(&write_buf)
                     .await
@@ -157,7 +157,7 @@ impl PeerSession {
             sent_count += 1;
 
             if let Some(delay) = delay_per_block {
-                if sent_count % 10 == 0 {
+                if sent_count % 18 == 0 {
                     let expected_elapsed = delay * (sent_count as u32);
                     let actual_elapsed = start.elapsed();
                     if expected_elapsed > actual_elapsed {

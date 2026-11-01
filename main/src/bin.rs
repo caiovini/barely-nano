@@ -1762,8 +1762,12 @@ fn run_ledger_commit_and_bootstrap_loop(
 
         // Atomic WAL checkpoint at a transaction boundary (this hart is the single ledger writer,
         // so the cut across the 16 shards is consistent). Time based, or when a buffer pool had to
-        // grow because every frame was dirty.
-        if mtime - last_checkpoint > seconds(10)
+        // grow because every frame was dirty. Defer periodic timer checkpoints up to 30s while
+        // the block processor queue is actively draining a burst to avoid redundant NVMe writes.
+        let bpq_busy = node_arc.block_processor.total_queue_len() > 0
+            || !node_arc.inbound_message_queue.is_empty_relaxed();
+        let checkpoint_interval = if bpq_busy { seconds(30) } else { seconds(10) };
+        if mtime - last_checkpoint > checkpoint_interval
             || kernel_common::storage::bpm::NEED_CHECKPOINT.load(Ordering::Relaxed)
         {
             let _ = kernel_common::storage::wal::checkpoint();

@@ -162,8 +162,8 @@ impl<'a> NetworkContext<'a> {
             let established_socket = self.sockets.remove(self.peering_handle);
             let peering_port = NET_CONFIG.lock().peering_port;
             
-            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
-            let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 32768]);
+            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
+            let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
             let mut new_listener = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
             let _ = new_listener.listen(peering_port);
             self.peering_handle = self.sockets.add(new_listener);
