@@ -200,13 +200,13 @@ impl Wallets {
                 for (wallet_id, wallet) in guard.iter() {
                     let representatives_l = wallet.representatives.lock().clone();
                     for account in representatives_l {
-                        if let Some(prv) = wallet.get_key(&account) {
-                            if !self.ledger.weight(&account).is_zero() {
-                                if wallet.valid_password() {
+                        if !self.ledger.weight(&account).is_zero() {
+                            if wallet.valid_password() {
+                                if let Some(prv) = wallet.get_key(&account) {
                                     action_accounts_l.push(prv);
-                                } else {
-                                    warn!("Representative locked inside wallet {}", wallet_id);
                                 }
+                            } else {
+                                warn!("Representative locked inside wallet {}", wallet_id);
                             }
                         }
                     }
@@ -235,8 +235,8 @@ impl Wallets {
         let half_principal_weight = self.online_reps.lock().minimum_principal_weight() / 2;
         for (_, wallet) in wallets_guard.iter() {
             let mut representatives = HashSet::new();
-            let keys = wallet.keys.lock();
-            for &pub_key in keys.keys() {
+            let enc_keys = wallet.encrypted_keys.lock();
+            for &pub_key in enc_keys.keys() {
                 if reps_guard.check_rep(pub_key, half_principal_weight) {
                     representatives.insert(pub_key);
                 }
@@ -312,6 +312,7 @@ impl Wallets {
             }
             *wallet.seed.lock() = *seed;
             wallet.deterministic_index.store(0, Ordering::SeqCst);
+            wallet.refresh_meta_encryption();
             let mut last_account = Account::zero();
             let mut restored = 0;
             let to_generate = if count == 0 {
@@ -343,7 +344,12 @@ impl Wallets {
     ) -> Result<Vec<Account>, WalletsError> {
         let guard = self.mutex.lock();
         let wallet = Self::get_wallet(&guard, wallet_id)?;
-        let mut accounts: Vec<Account> = wallet.keys.lock().keys().map(|k| (*k).into()).collect();
+        let mut accounts: Vec<Account> = wallet
+            .encrypted_keys
+            .lock()
+            .keys()
+            .map(|k| (*k).into())
+            .collect();
         for watch_key in wallet.watch_keys.lock().iter() {
             let acc = (*watch_key).into();
             if !accounts.contains(&acc) {
@@ -365,6 +371,7 @@ impl Wallets {
                 return Err(WalletsError::WalletLocked);
             }
             let removed_key = wallet.keys.lock().remove(pub_key).is_some();
+            wallet.encrypted_keys.lock().remove(pub_key);
             let removed_watch = wallet.watch_keys.lock().remove(pub_key);
             wallet.deterministic_keys.lock().remove(pub_key);
             wallet.work_cache.lock().remove(pub_key);
@@ -401,10 +408,11 @@ impl Wallets {
             }
             for pk in accounts {
                 if let Some(prv) = source.keys.lock().remove(pk) {
+                    source.encrypted_keys.lock().remove(pk);
                     source.deterministic_keys.lock().remove(pk);
                     source.representatives.lock().remove(pk);
                     self.ledger.store.wallet.del_wallet_key(source_id, pk);
-                    target.keys.lock().insert(*pk, prv);
+                    target.insert_key(prv);
                     if let Some(rec) = target.to_persisted_key(pk) {
                         self.ledger.store.wallet.put_wallet_key(target_id, pk, &rec);
                     }
@@ -452,11 +460,7 @@ impl Wallets {
     pub fn lock(&self, wallet_id: &WalletId) -> Result<(), WalletsError> {
         let guard = self.mutex.lock();
         let wallet = Self::get_wallet(&guard, wallet_id)?;
-        wallet.locked.store(true, Ordering::SeqCst);
-        self.ledger
-            .store
-            .wallet
-            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
+        wallet.lock_in_ram();
         Ok(())
     }
 
@@ -467,14 +471,19 @@ impl Wallets {
     ) -> Result<(), WalletsError> {
         let guard = self.mutex.lock();
         let wallet = Self::get_wallet(&guard, wallet_id)?;
-        if !wallet.valid_password() {
+        if !wallet.rekey(password.as_ref()) {
             return Err(WalletsError::WalletLocked);
         }
-        *wallet.password.lock() = String::from(password.as_ref());
         self.ledger
             .store
             .wallet
             .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
+        let pks: Vec<PublicKey> = wallet.encrypted_keys.lock().keys().copied().collect();
+        for pk in pks {
+            if let Some(rec) = wallet.to_persisted_key(&pk) {
+                self.ledger.store.wallet.put_wallet_key(wallet_id, &pk, &rec);
+            }
+        }
         Ok(())
     }
 
@@ -732,21 +741,15 @@ impl WalletsExt for Wallets {
     }
 
     fn enter_password(&self, wallet_id: WalletId, password: &str) -> Result<(), WalletsError> {
-        let guard = self.mutex.lock();
-        let wallet = Self::get_wallet(&guard, &wallet_id)?;
-        if wallet.password.lock().as_str() == password {
-            wallet.locked.store(false, Ordering::SeqCst);
-            self.ledger
-                .store
-                .wallet
-                .put_wallet_meta(&wallet_id, &wallet.to_persisted_meta());
+        let unlocked = {
+            let guard = self.mutex.lock();
+            let wallet = Self::get_wallet(&guard, &wallet_id)?;
+            wallet.try_unlock(password)
+        };
+        self.compute_reps();
+        if unlocked {
             Ok(())
         } else {
-            wallet.locked.store(true, Ordering::SeqCst);
-            self.ledger
-                .store
-                .wallet
-                .put_wallet_meta(&wallet_id, &wallet.to_persisted_meta());
             Err(WalletsError::InvalidPassword)
         }
     }
@@ -887,6 +890,7 @@ impl WalletsExt for Wallets {
             return Err(WalletsError::WalletLocked);
         }
         *wallet.representative.lock() = rep;
+        wallet.refresh_meta_encryption();
         self.ledger
             .store
             .wallet
@@ -964,11 +968,16 @@ mod tests {
             .store(false, core::sync::atomic::Ordering::SeqCst);
 
         let wallet_id = WalletId::from(0xABCD);
+        let unattended_wallet_id = WalletId::from(0xBEEF);
         let rep_key = PrivateKey::from_bytes(&[0x33; 32]);
         let rep_pub = rep_key.public_key();
+        let unattended_rep_key = PrivateKey::from_bytes(&[0x44; 32]);
+        let unattended_rep_pub = unattended_rep_key.public_key();
         let custom_rep = PublicKey::from(777);
         let watch_acc = Account::from(888);
         let det_pub;
+
+        kernel_common::storage::wallet_crypto::reset_hardware_wallet_key();
 
         {
             let wallets = Wallets::new_null();
@@ -976,6 +985,10 @@ mod tests {
                 .ledger
                 .rep_weights_updater
                 .representation_put(rep_pub, Amount::nano(5_000_000));
+            wallets
+                .ledger
+                .rep_weights_updater
+                .representation_put(unattended_rep_pub, Amount::nano(5_000_000));
 
             wallets.create(wallet_id);
             wallets
@@ -994,6 +1007,34 @@ mod tests {
                 .unwrap();
             wallets.rekey(&wallet_id, "my_rep_pass").unwrap();
             wallets.lock(&wallet_id).unwrap();
+
+            // Mode A wallet: default empty password "" (auto-unlocks on reboot via Ky X1 eFuse key)
+            wallets.create(unattended_wallet_id);
+            wallets
+                .insert_adhoc2(
+                    &unattended_wallet_id,
+                    unattended_rep_key.raw_key().as_bytes(),
+                    false,
+                )
+                .unwrap();
+        }
+
+        // Verify that plaintext private keys are NEVER stored on NVMe
+        let raw_persisted = rsnano_ledger::BtreeWalletStore::new().load_all();
+        assert_eq!(raw_persisted.len(), 2);
+        for (_, meta, keys) in &raw_persisted {
+            assert_ne!(&meta.encrypted_seed, &[0u8; 32]);
+            for (pk, krec) in keys {
+                if *pk == rep_pub {
+                    assert_ne!(&krec.encrypted_priv_key, rep_key.raw_key().as_bytes());
+                }
+                if *pk == unattended_rep_pub {
+                    assert_ne!(
+                        &krec.encrypted_priv_key,
+                        unattended_rep_key.raw_key().as_bytes()
+                    );
+                }
+            }
         }
 
         // Wallet writes must never set NEED_CHECKPOINT on the ledger WAL
@@ -1009,7 +1050,35 @@ mod tests {
             }
         }
 
-        // Simulate cold hardware reboot: drop in-memory WALLET_SHARD BufferPool and reload from storage
+        // Simulate stealing the NVMe SSD and plugging it into a DIFFERENT board (different SoC eFuse key):
+        // Even the unattended (empty-password) wallet must fail to unlock!
+        *WALLET_SHARD.lock() = None;
+        init_wallet_storage(storage.clone());
+        kernel_common::storage::wallet_crypto::set_hardware_wallet_key([0xEE; 32]);
+        {
+            let mut foreign_board_wallets = Wallets::new_null();
+            foreign_board_wallets
+                .ledger
+                .rep_weights_updater
+                .representation_put(unattended_rep_pub, Amount::nano(5_000_000));
+            foreign_board_wallets.initialize().unwrap();
+
+            assert!(
+                !foreign_board_wallets
+                    .valid_password(&unattended_wallet_id)
+                    .unwrap()
+            );
+            assert!(matches!(
+                foreign_board_wallets.fetch(&unattended_wallet_id, &unattended_rep_pub.into()),
+                Err(WalletsError::WalletLocked)
+            ));
+            let mut foreign_voted = Vec::new();
+            foreign_board_wallets.foreach_representative(|k| foreign_voted.push(k.public_key()));
+            assert!(foreign_voted.is_empty());
+        }
+
+        // Restore original board's Ky X1 SoC eFuse key and simulate normal cold hardware reboot
+        kernel_common::storage::wallet_crypto::reset_hardware_wallet_key();
         *WALLET_SHARD.lock() = None;
         init_wallet_storage(storage.clone());
 
@@ -1019,7 +1088,23 @@ mod tests {
                 .ledger
                 .rep_weights_updater
                 .representation_put(rep_pub, Amount::nano(5_000_000));
+            wallets_after_boot
+                .ledger
+                .rep_weights_updater
+                .representation_put(unattended_rep_pub, Amount::nano(5_000_000));
             wallets_after_boot.initialize().unwrap();
+
+            // Mode A wallet (empty password) auto-unlocked via Ky X1 eFuse key on reboot!
+            assert!(wallets_after_boot
+                .valid_password(&unattended_wallet_id)
+                .unwrap());
+            assert_eq!(
+                wallets_after_boot
+                    .fetch(&unattended_wallet_id, &unattended_rep_pub.into())
+                    .unwrap()
+                    .raw_key(),
+                unattended_rep_key.raw_key()
+            );
 
             assert!(wallets_after_boot.wallet_exists(&wallet_id));
             assert_eq!(
@@ -1044,12 +1129,16 @@ mod tests {
                 WorkNonce::from(0xCAFE_BABE)
             );
 
-            // Representative weight was detected on boot via initialize() -> compute_reps()
-            assert_eq!(wallets_after_boot.voting_reps_count(), 1);
+            // Both representative accounts were detected on boot via initialize() -> compute_reps()
+            assert_eq!(wallets_after_boot.voting_reps_count(), 2);
             assert!(wallets_after_boot.voting_enabled());
 
-            // Locked state persisted; unlocking with password allows fetching private key
+            // Mode B wallet (password-protected) stays locked until wallet_enter; only Mode A votes initially
             assert!(!wallets_after_boot.valid_password(&wallet_id).unwrap());
+            let mut initial_voted = Vec::new();
+            wallets_after_boot.foreach_representative(|k| initial_voted.push(k.public_key()));
+            assert_eq!(initial_voted, alloc::vec![unattended_rep_pub]);
+
             assert_eq!(
                 wallets_after_boot.enter_password(wallet_id, "wrong"),
                 Err(WalletsError::InvalidPassword)
@@ -1066,10 +1155,13 @@ mod tests {
 
             let mut voted_keys = Vec::new();
             wallets_after_boot.foreach_representative(|k| voted_keys.push(k.public_key()));
-            assert_eq!(voted_keys, alloc::vec![rep_pub]);
+            assert_eq!(voted_keys.len(), 2);
+            assert!(voted_keys.contains(&rep_pub));
+            assert!(voted_keys.contains(&unattended_rep_pub));
 
             // Destroy removes from B-Tree
             wallets_after_boot.destroy(&wallet_id);
+            wallets_after_boot.destroy(&unattended_wallet_id);
         }
 
         // Cold reboot after destroy

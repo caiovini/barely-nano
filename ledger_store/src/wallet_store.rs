@@ -1,12 +1,10 @@
-use alloc::string::String;
 use alloc::vec::Vec;
 use kernel_common::storage::btree::KEY_SIZE;
 use kernel_common::storage::WALLET_SHARD;
-use rsnano_core::{PublicKey, RawKey, WalletId, WorkNonce};
+use rsnano_core::{PublicKey, WalletId, WorkNonce};
 
-const WALLET_META_MAGIC: u32 = 0x5741_4C31; // "WAL1"
-const WALLET_KEY_MAGIC: u8 = 0x4B; // 'K'
-const MAX_PASSWORD_BYTES: usize = 128;
+const WALLET_META_MAGIC: u32 = 0x5741_4C32; // "WAL2" (hardware-bound + Blake2b-KDF encrypted)
+const WALLET_KEY_MAGIC: u8 = 0x4C; // 'L' (encrypted private key entry)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -27,19 +25,26 @@ impl PersistedKeyType {
     }
 }
 
+/// Encrypted wallet metadata record stored in `WALLET_SHARD`.
+/// Neither the plaintext `seed` nor the plaintext `password` is ever stored on NVMe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedWalletMeta {
     pub representative: PublicKey,
-    pub seed: RawKey,
     pub deterministic_index: u32,
-    pub locked: bool,
-    pub password: String,
+    /// `false` when the wallet uses the default empty password `""` (auto-unlocked at boot via
+    /// the Ky X1 SoC eFuse hardware root key); `true` when the operator set a passphrase via
+    /// `wallet_rekey` (requires `wallet_enter` after reboot).
+    pub has_password: bool,
+    pub salt: [u8; 32],
+    pub encrypted_seed: [u8; 32],
+    pub check_tag: [u8; 32],
 }
 
+/// Encrypted wallet key record stored in `WALLET_SHARD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistedWalletKey {
     pub key_type: PersistedKeyType,
-    pub priv_key: [u8; 32],
+    pub encrypted_priv_key: [u8; 32],
     pub work: WorkNonce,
 }
 
@@ -70,25 +75,20 @@ impl BtreeWalletStore {
         key
     }
 
-    fn encode_meta(meta: &PersistedWalletMeta, buf: &mut [u8; 256]) -> usize {
+    fn encode_meta(meta: &PersistedWalletMeta) -> [u8; 137] {
+        let mut buf = [0u8; 137];
         buf[0..4].copy_from_slice(&WALLET_META_MAGIC.to_le_bytes());
         buf[4..36].copy_from_slice(meta.representative.as_bytes());
-        buf[36..68].copy_from_slice(meta.seed.as_bytes());
-        buf[68..72].copy_from_slice(&meta.deterministic_index.to_le_bytes());
-        buf[72] = u8::from(meta.locked);
-
-        let pw_bytes = meta.password.as_bytes();
-        let mut pw_len = pw_bytes.len().min(MAX_PASSWORD_BYTES);
-        while pw_len > 0 && !meta.password.is_char_boundary(pw_len) {
-            pw_len -= 1;
-        }
-        buf[73] = pw_len as u8;
-        buf[74..74 + pw_len].copy_from_slice(&pw_bytes[..pw_len]);
-        74 + pw_len
+        buf[36..40].copy_from_slice(&meta.deterministic_index.to_le_bytes());
+        buf[40] = u8::from(meta.has_password);
+        buf[41..73].copy_from_slice(&meta.salt);
+        buf[73..105].copy_from_slice(&meta.encrypted_seed);
+        buf[105..137].copy_from_slice(&meta.check_tag);
+        buf
     }
 
     fn decode_meta(val: &[u8]) -> Option<PersistedWalletMeta> {
-        if val.len() < 74 {
+        if val.len() < 137 {
             return None;
         }
         let magic = u32::from_le_bytes(val[0..4].try_into().ok()?);
@@ -96,22 +96,18 @@ impl BtreeWalletStore {
             return None;
         }
         let representative = PublicKey::from_bytes(val[4..36].try_into().ok()?);
-        let seed = RawKey::from_bytes(val[36..68].try_into().ok()?);
-        let deterministic_index = u32::from_le_bytes(val[68..72].try_into().ok()?);
-        let locked = val[72] != 0;
-        let pw_len = val[73] as usize;
-        if val.len() < 74 + pw_len {
-            return None;
-        }
-        let password = core::str::from_utf8(&val[74..74 + pw_len])
-            .ok()
-            .map(String::from)?;
+        let deterministic_index = u32::from_le_bytes(val[36..40].try_into().ok()?);
+        let has_password = val[40] != 0;
+        let salt: [u8; 32] = val[41..73].try_into().ok()?;
+        let encrypted_seed: [u8; 32] = val[73..105].try_into().ok()?;
+        let check_tag: [u8; 32] = val[105..137].try_into().ok()?;
         Some(PersistedWalletMeta {
             representative,
-            seed,
             deterministic_index,
-            locked,
-            password,
+            has_password,
+            salt,
+            encrypted_seed,
+            check_tag,
         })
     }
 
@@ -119,7 +115,7 @@ impl BtreeWalletStore {
         let mut buf = [0u8; 42];
         buf[0] = WALLET_KEY_MAGIC;
         buf[1] = entry.key_type as u8;
-        buf[2..34].copy_from_slice(&entry.priv_key);
+        buf[2..34].copy_from_slice(&entry.encrypted_priv_key);
         let work_u64: u64 = entry.work.into();
         buf[34..42].copy_from_slice(&work_u64.to_le_bytes());
         buf
@@ -130,22 +126,21 @@ impl BtreeWalletStore {
             return None;
         }
         let key_type = PersistedKeyType::from_u8(val[1])?;
-        let priv_key: [u8; 32] = val[2..34].try_into().ok()?;
+        let encrypted_priv_key: [u8; 32] = val[2..34].try_into().ok()?;
         let work_u64 = u64::from_le_bytes(val[34..42].try_into().ok()?);
         Some(PersistedWalletKey {
             key_type,
-            priv_key,
+            encrypted_priv_key,
             work: WorkNonce::from(work_u64),
         })
     }
 
     pub fn put_wallet_meta(&self, wallet_id: &WalletId, meta: &PersistedWalletMeta) {
         let key = Self::meta_key(wallet_id);
-        let mut buf = [0u8; 256];
-        let len = Self::encode_meta(meta, &mut buf);
+        let buf = Self::encode_meta(meta);
         let mut lock = WALLET_SHARD.lock();
         if let Some(db) = lock.as_mut() {
-            db.insert(key, &buf[..len]);
+            db.insert(key, &buf);
             let _ = db.flush();
         }
     }
@@ -221,13 +216,13 @@ impl BtreeWalletStore {
 
         let mut wallets: Vec<(
             WalletId,
-            PersistedWalletMeta,
+            Option<PersistedWalletMeta>,
             Vec<(PublicKey, PersistedWalletKey)>,
         )> = Vec::new();
 
         let mut lock = WALLET_SHARD.lock();
         let Some(db) = lock.as_mut() else {
-            return wallets;
+            return Vec::new();
         };
         let mut it = db.iter(start_key);
         while let Some(step) = it.next_kv_with(|k, v| {
@@ -247,25 +242,18 @@ impl BtreeWalletStore {
             match step {
                 Ok((wallet_id, None, Some(meta), None)) => {
                     if let Some(entry) = wallets.iter_mut().find(|(id, _, _)| *id == wallet_id) {
-                        entry.1 = meta;
+                        entry.1 = Some(meta);
                     } else {
-                        wallets.push((wallet_id, meta, Vec::new()));
+                        wallets.push((wallet_id, Some(meta), Vec::new()));
                     }
                 }
                 Ok((wallet_id, Some(pub_key), None, Some(key_rec))) => {
                     if let Some(entry) = wallets.iter_mut().find(|(id, _, _)| *id == wallet_id) {
                         entry.2.push((pub_key, key_rec));
                     } else {
-                        let default_meta = PersistedWalletMeta {
-                            representative: PublicKey::zero(),
-                            seed: RawKey::zero(),
-                            deterministic_index: 0,
-                            locked: false,
-                            password: String::new(),
-                        };
                         let mut keys = Vec::new();
                         keys.push((pub_key, key_rec));
-                        wallets.push((wallet_id, default_meta, keys));
+                        wallets.push((wallet_id, None, keys));
                     }
                 }
                 Ok(_) => {}
@@ -274,6 +262,9 @@ impl BtreeWalletStore {
         }
 
         wallets
+            .into_iter()
+            .filter_map(|(id, meta_opt, keys)| meta_opt.map(|meta| (id, meta, keys)))
+            .collect()
     }
 
     pub fn restore_all(

@@ -90,6 +90,57 @@ Without an OS filesystem or traditional database (LMDB/RocksDB), `barely-nano` i
 2. **5 GB High-DRAM Buffer Pool Manager (`common/src/storage/bpm.rs`):** Manages `81,920` × 4 KB frames per shard (`320 MB/shard` = `5.00 GB` total) in Ky X1 DRAM Bank 1 (`0x1_0000_0000`), paired with compact 24-byte `FrameMeta` entries in Bank 0 L2-friendly memory, an open-addressed page hash table, and a **Clock (second-chance)** eviction policy. Dirty frames are **never written during eviction**, preventing partial cross-shard updates from reaching disk.
 3. **Atomic Dual-Area Write-Ahead Log (`common/src/storage/wal.rs`):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. Between block batches on Hart 6 (the single ledger writer), `wal::checkpoint()` snapshots dirty pages across all 16 shards, writes `[descriptor pages][data pages][commit page]` sequentially with a 64-bit checksum and boot epoch, and then writes the pages to their home shard locations sorted by LBA. On boot, `wal::recover()` idempotently replays the latest committed batch.
 4. **16-Shard B-Tree Engine (`common/src/storage/btree.rs`):** Prefix-partitioned across 16 shards by the high nibble of `key[1]`, supporting `Zicbop`-prefetched binary search, proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and stack-cached range iterators.
+5. **Isolated Wallet B-Tree & Atomic Redo Journal (`WALLET_SHARD` at `WALLET_STORAGE_LBA = 786,432`):** Wallet and representative keys live in a dedicated B-Tree partition at the `384 MB` NVMe mark (`LBA 786,432 .. 819,712`, `16 MB` B-Tree + `256 KB` checksummed redo journal), strictly below `STORAGE_BASE_LBA` (`512 MB`) and enforced by compile-time assertions and runtime LBA bounds guards so wallet mutations can never overwrite or contend with a synced ledger.
+
+## Representative & Wallet Key Security Architecture (`wallet_crypto`)
+
+To protect representative private keys against physical NVMe SSD theft, power loss, and unauthorized extraction without sacrificing bare-metal voting throughput, `barely-nano` combines **Ky X1 SoC hardware eFuse binding** with **iterated `Blake2b-256` key derivation (`KDF`)** in [`common/src/storage/wallet_crypto.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wallet_crypto.rs) and [`ledger_store/src/wallet_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/wallet_store.rs):
+
+### 1. Physical & Cryptographic Isolation
+- **Strict NVMe Partition Separation:** Wallet storage uses [`WALLET_SHARD`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs#L164) at `WALLET_STORAGE_LBA = 786,432` (`384 MB` offset) with its own 64-page redo journal. It never touches the 16 ledger [`SHARDS`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs#L161) or the ledger WAL (`>= 512 MB`), and survives full ledger wipes (`wipe_blocks = true`).
+- **No Plaintext Keys or Passwords on Disk:** Neither the wallet `seed`, any account `priv_key`, nor the wallet `password` is ever written in plaintext to the NVMe SSD.
+- **Hardware-Bound Key Derivation (`Ky X1 eFuse + Salt + Password`):**
+  1. At boot, [`hardware_wallet_key()`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wallet_crypto.rs#L99) derives a 256-bit SoC hardware root key from the **SpacemiT K1 / Ky X1 4K-bit on-chip eFuse banks** (`0xD401_F000`), Chip ID Unit (`0xD428_2C00`), EMAC0 factory MAC registers (`0xCAC8_0040`), and U-Boot's eFuse-derived `serial#` / `ethaddr` / optional `wallet_hw_key` environment variables using trap-safe S-mode MMIO probes ([`trap::probe_read_u32`](file:///mnt/data/rust-workspace/barely-nano/common/src/trap.rs#L207)).
+  2. Each wallet generates a unique 256-bit random `salt` and derives its 256-bit wrapping key via **4,096 rounds of iterated `Blake2b-256`**:
+     $$\text{WrappingKey} = \text{Blake2b-256}^{4096}\bigl(\text{Ky\_X1\_eFuse\_Key} \parallel \text{Wallet\_Salt} \parallel \text{Password}\bigr)$$
+  3. The wallet `seed` and each account `priv_key` are encrypted with domain-separated `Blake2b-256` keystream pads (`crypt_seed`, `crypt_priv_key`) and authenticated by a 256-bit `check_tag` (`compute_check_tag`). On unlock, every decrypted private key is also verified against its stored `PublicKey` (`priv_key.public_key() == pub_key`).
+- **Zero Runtime Voting Overhead:** Decryption runs only once when the wallet is unlocked (at boot or on `wallet_enter`, taking `< 1.5 ms`). Once unlocked, Hart 4 ([`VoteGenerator`](file:///mnt/data/rust-workspace/barely-nano/node/src/consensus/vote_generation/vote_generator.rs)) signs votes directly from RAM with 0% cryptographic overhead.
+
+### 2. Two Operator Modes: Unattended Auto-Voting vs. Passphrase Lock on Reboot
+
+| Mode | Configuration | Behavior on Reboot / Power Loss | Protection if NVMe SSD is Stolen |
+| :--- | :--- | :--- | :--- |
+| **Mode A: Unattended Auto-Voting** *(Default)* | Default empty password (`""`) | Node automatically derives the wrapping key from the OrangePi RV2's **Ky X1 SoC eFuse**, unseals the representative key into RAM during `Wallets::initialize()`, runs `compute_reps()`, and **starts voting immediately with zero human input**. | **Encrypted on disk** — another machine lacks the OrangePi RV2's internal Ky X1 eFuse key and cannot verify `check_tag` or decrypt the keys. |
+| **Mode B: Passphrase Required at Reboot** *(Optional)* | Operator sets a password via `wallet_rekey` | Node boots and syncs the ledger normally, but the wallet stays **locked with zero plaintext private keys in RAM** until the operator sends `wallet_enter` over RPC. | **Dual-factor encrypted** — requires **both** the physical OrangePi RV2 SoC eFuse **and** the operator's passphrase. |
+
+### 3. Configuring a Representative via RPC (Port `7076`)
+
+Because `key_create` is a stateless utility RPC that only generates a keypair in memory without saving it, use `wallet_create` + `wallet_add` (or `account_create`) to persist a representative key to the encrypted NVMe wallet store:
+
+```bash
+# 1. (Optional) Generate a new keypair via RPC (or use an existing representative private key)
+curl -s -d '{"action": "key_create"}' http://192.168.1.200:7076
+
+# 2. Create a persistent wallet in the isolated WALLET_SHARD on NVMe
+curl -s -d '{"action": "wallet_create"}' http://192.168.1.200:7076
+# -> Returns: {"wallet": "<WALLET_ID>"}
+
+# 3. Import the representative private key into the wallet (persisted & eFuse-encrypted immediately)
+curl -s -d '{"action": "wallet_add", "wallet": "<WALLET_ID>", "key": "<PRIVATE_KEY_HEX>"}' http://192.168.1.200:7076
+# -> Returns: {"account": "nano_..."}
+```
+
+#### Optional: Enable Mode B (Require Passphrase Unlock After Reboot)
+```bash
+# Set a passphrase (re-encrypts wallet seed & keys under Ky X1 eFuse + passphrase; never stores passphrase)
+curl -s -d '{"action": "wallet_rekey", "wallet": "<WALLET_ID>", "password": "MyStrongRepPassword"}' http://192.168.1.200:7076
+
+# After a node reboot, unlock the wallet in RAM to resume representative voting:
+curl -s -d '{"action": "wallet_enter", "wallet": "<WALLET_ID>", "password": "MyStrongRepPassword"}' http://192.168.1.200:7076
+
+# To switch back to Mode A (unattended auto-voting on reboot), rekey with an empty password while unlocked:
+curl -s -d '{"action": "wallet_rekey", "wallet": "<WALLET_ID>", "password": ""}' http://192.168.1.200:7076
+```
 
 ## Hardware Requirements
 

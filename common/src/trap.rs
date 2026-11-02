@@ -202,6 +202,41 @@ pub fn probe_rw_u64(addr: usize) -> bool {
     }
 }
 
+/// Trap-safe 32-bit MMIO/memory read probe.
+/// Returns `Some(val)` if `addr` is readable in S-mode (no PMP/bus/page fault), or `None` if it faulted.
+pub fn probe_read_u32(addr: usize) -> Option<u32> {
+    #[cfg(target_arch = "riscv64")]
+    {
+        PROBE_FAULTED.store(false, Ordering::SeqCst);
+        PROBE_ACTIVE.store(true, Ordering::SeqCst);
+        let mut val: u32 = 0;
+        // SAFETY: `PROBE_ACTIVE` instructs `rust_trap_handler` to catch any load access fault
+        // on the 4-byte `.option norvc` `lw` instruction and advance `sepc + 4`.
+        unsafe {
+            core::arch::asm!(
+                ".option push",
+                ".option norvc",
+                "lw {out}, 0({ptr})",
+                ".option pop",
+                ptr = in(reg) addr,
+                out = inout(reg) val,
+                options(nostack)
+            );
+        }
+        PROBE_ACTIVE.store(false, Ordering::SeqCst);
+        if PROBE_FAULTED.load(Ordering::SeqCst) {
+            None
+        } else {
+            Some(val)
+        }
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let _ = addr;
+        None
+    }
+}
+
 // ---- Rust trap handler --------------------------------------------------
 
 #[cfg(target_arch = "riscv64")]

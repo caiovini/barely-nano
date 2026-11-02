@@ -1,6 +1,7 @@
 pub mod bpm;
 pub mod btree;
 pub mod wal;
+pub mod wallet_crypto;
 
 #[repr(align(64))]
 #[derive(Clone, Copy)]
@@ -836,6 +837,7 @@ fn init_shards(mut storage: StorageContext) {
 /// Initializes the dedicated `WALLET_SHARD` B-Tree in the isolated `WALLET_STORAGE_LBA` region
 /// (`384 MB` offset, strictly below `STORAGE_BASE_LBA = 512 MB`).
 pub fn init_wallet_storage(shared_storage: Arc<Mutex<StorageContext>>) {
+    let _ = wallet_crypto::hardware_wallet_key();
     let replayed = shared_storage.lock().recover_wallet_journal();
     if replayed > 0 {
         uart::print(b"[storage] Wallet journal recovery: replayed pages=");
