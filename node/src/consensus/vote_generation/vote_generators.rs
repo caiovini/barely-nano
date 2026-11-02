@@ -173,6 +173,14 @@ impl VoteGenerators {
     pub fn voting_enabled(&self) -> bool {
         self.wallets.voting_enabled()
     }
+
+    pub fn run_once(&self) -> bool {
+        let mut worked = self.non_final_vote_generator.run_once();
+        if self.final_vote_generator.run_once() {
+            worked = true;
+        }
+        worked
+    }
 }
 
 impl ContainerInfoProvider for VoteGenerators {

@@ -1016,6 +1016,14 @@ fn run_consensus_and_elections_loop(
         }
 
         let mut worked = false;
+        if node_arc.vote_generators.voting_enabled() {
+            if node_arc.request_aggregator.run_once() {
+                worked = true;
+            }
+            if node_arc.vote_generators.run_once() {
+                worked = true;
+            }
+        }
         for _ in 0..4 {
             if exec.run_once(hart_id) {
                 worked = true;

@@ -156,6 +156,9 @@ pub struct BufferPool {
     dirty_frames: Vec<usize>,
     /// Clock hand index into `meta` for Second-Chance replacement.
     clock_hand: usize,
+    /// When true, this buffer pool addresses the isolated `WALLET_STORAGE_LBA` region and
+    /// never touches ledger blocks (`>= STORAGE_BASE_LBA`) or `NEED_CHECKPOINT`.
+    is_wallet: bool,
 }
 
 // SAFETY: `BufferPool` is exclusively accessed behind its shard `ShardMutex`; `data_ptr` points to
@@ -223,6 +226,7 @@ impl BufferPool {
             free_list: Vec::new(),
             dirty_frames: Vec::with_capacity(8192),
             clock_hand: 0,
+            is_wallet: false,
         }
     }
 
@@ -250,6 +254,33 @@ impl BufferPool {
             free_list: Vec::new(),
             dirty_frames: Vec::with_capacity(max_frames),
             clock_hand: 0,
+            is_wallet: false,
+        }
+    }
+
+    /// Creates a compact Bank 0 `BufferPool` dedicated to the isolated wallet storage region
+    /// (`WALLET_STORAGE_LBA`), completely disjoint from the ledger shards and ledger WAL.
+    pub fn new_wallet(storage: Arc<Mutex<StorageContext>>, num_frames: usize) -> Self {
+        let max_frames = core::cmp::max(num_frames, 16);
+        let mut owned_data = alloc::vec![crate::storage::AlignedBlock::new(); max_frames];
+        let data_ptr = owned_data.as_mut_ptr();
+
+        let mut page_to_frame = Vec::with_capacity(1);
+        page_to_frame.push(Some(alloc::boxed::Box::new([u32::MAX; PAGE_CHUNK_SIZE])));
+
+        Self {
+            storage,
+            base_page: 0,
+            target_frames: max_frames,
+            max_frames,
+            data_ptr,
+            _owned_data: owned_data,
+            meta: Vec::with_capacity(max_frames),
+            page_to_frame,
+            free_list: Vec::new(),
+            dirty_frames: Vec::with_capacity(max_frames),
+            clock_hand: 0,
+            is_wallet: true,
         }
     }
 
@@ -412,7 +443,9 @@ impl BufferPool {
                 if self.meta.len() >= self.max_frames {
                     return Err(crate::storage::StorageError::IoError);
                 }
-                NEED_CHECKPOINT.store(true, Ordering::Relaxed);
+                if !self.is_wallet {
+                    NEED_CHECKPOINT.store(true, Ordering::Relaxed);
+                }
                 let fid = self.meta.len();
                 self.meta.push(FrameMeta::new());
                 Ok(fid)
@@ -432,7 +465,11 @@ impl BufferPool {
         let tr = crate::clint::mtime();
         // SAFETY: `victim_frame_id < self.meta.len() <= self.max_frames`.
         let buf = unsafe { &mut (*self.data_ptr.add(victim_frame_id)).bytes };
-        self.storage.lock().read_block(page_id + self.base_page, buf)?;
+        if self.is_wallet {
+            self.storage.lock().read_wallet_block(page_id, buf)?;
+        } else {
+            self.storage.lock().read_block(page_id + self.base_page, buf)?;
+        }
         let prio = Self::page_priority(page_id, buf);
         self.meta[victim_frame_id].ref_count = prio;
         let now = crate::clint::mtime();
@@ -468,7 +505,7 @@ impl BufferPool {
             if !m.in_dirty_list {
                 m.in_dirty_list = true;
                 self.dirty_frames.push(frame_id);
-                if self.dirty_frames.len() >= 2048 {
+                if !self.is_wallet && self.dirty_frames.len() >= 2048 {
                     NEED_CHECKPOINT.store(true, Ordering::Relaxed);
                 }
             }
@@ -569,10 +606,35 @@ impl BufferPool {
         }
     }
 
-    /// Persists all dirty frames to the storage device (NON-atomic: only for initialisation and
-    /// wipe paths that run before the WAL is in use; runtime persistence goes through the WAL).
+    /// Persists all dirty frames to the storage device.
+    /// For the isolated wallet pool (`self.is_wallet`), writes through the atomic wallet redo
+    /// journal in `WALLET_STORAGE_LBA`. For ledger shards, used only during init/wipe before WAL.
     pub fn flush_all(&mut self) -> Result<(), crate::storage::StorageError> {
         let mut storage_guard = self.storage.lock();
+
+        if self.is_wallet {
+            let mut batch: Vec<(usize, &[u8; BLOCK_SIZE])> = Vec::with_capacity(self.dirty_frames.len());
+            for &fid in &self.dirty_frames {
+                let m = &self.meta[fid];
+                if m.is_dirty {
+                    if let Some(pid) = m.page_id() {
+                        // SAFETY: `fid < self.meta.len() <= self.max_frames`.
+                        let bytes = unsafe { &(*self.data_ptr.add(fid)).bytes };
+                        batch.push((pid, bytes));
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                storage_guard.flush_wallet_dirty_pages(&mut batch)?;
+            }
+            for &fid in &self.dirty_frames {
+                let m = &mut self.meta[fid];
+                m.is_dirty = false;
+                m.in_dirty_list = false;
+            }
+            self.dirty_frames.clear();
+            return Ok(());
+        }
 
         for &fid in &self.dirty_frames {
             let m = &mut self.meta[fid];

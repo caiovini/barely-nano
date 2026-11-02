@@ -147,7 +147,7 @@ pub struct Node {
     pub recently_cemented: Arc<Mutex<BoundedVecDeque<ConfirmedElection>>>,
     pub stats_collector: StatsCollector,
     container_info_factory: ContainerInfoFactory,
-    wallet_reps_checker: Arc<WalletRepsChecker>,
+    wallet_reps_checker: Mutex<WalletRepsChecker>,
     winner_block_broadcaster: Arc<Mutex<WinnerBlockBroadcaster>>,
     block_rate_calculator: Arc<Mutex<BlockRateCalculator>>,
     block_rates: Arc<CurrentBlockRates>,
@@ -198,6 +198,12 @@ impl Node {
 
         let cancel_token = rsnano_core::utils::CancellationToken::new();
         if let Some(mut guard) = self.block_rate_calculator.try_lock() {
+            guard.tick(&cancel_token);
+        }
+        if self.config.enable_voting {
+            self.wallets.compute_reps();
+        }
+        if let Some(mut guard) = self.wallet_reps_checker.try_lock() {
             guard.tick(&cancel_token);
         }
     }
@@ -448,7 +454,7 @@ impl Node {
         let block_processor_queue = Arc::new(BlockProcessorQueue::new(block_processor_config));
 
 
-        let wallets = Wallets::new(
+        let mut wallets = Wallets::new(
             ledger.clone(),
             &config,
             network_params.work.clone(),
@@ -461,6 +467,9 @@ impl Node {
             message_flooder.clone(),
             current_network,
         );
+        if !is_nulled {
+            wallets.initialize().expect("Could not initialize wallets");
+        }
         let wallets = Arc::new(wallets);
 
 
@@ -1274,7 +1283,7 @@ impl Node {
             recently_cemented,
             stats_collector,
             container_info_factory: container_info,
-            wallet_reps_checker: Arc::new(wallet_reps_checker),
+            wallet_reps_checker: Mutex::new(wallet_reps_checker),
             winner_block_broadcaster,
             block_rate_calculator: Arc::new(Mutex::new(block_rate_calculator)),
             block_rates,

@@ -33,6 +33,9 @@ pub use ledger_sets::*;
 pub use rep_weight_cache::*;
 pub use rep_weights_updater::*;
 pub(crate) use representative_block_finder::RepresentativeBlockFinder;
+pub use rsnano_ledger_store::{
+    BtreeWalletStore, PersistedKeyType, PersistedWalletKey, PersistedWalletMeta,
+};
 
 #[inline]
 pub fn block_may_exist(hash: &rsnano_core::BlockHash) -> bool {

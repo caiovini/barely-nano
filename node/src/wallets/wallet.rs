@@ -10,7 +10,9 @@ use rsnano_core::{
     deterministic_key, Amount, Block, BlockHash, Link, PrivateKey, PublicKey, RawKey, Root,
     StateBlockArgs, WorkNonce,
 };
-use rsnano_ledger::Ledger;
+use rsnano_ledger::{
+    AnySet, Ledger, PersistedKeyType, PersistedWalletKey, PersistedWalletMeta,
+};
 use rsnano_work::WorkThresholds;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -57,6 +59,112 @@ impl Wallet {
             password: Mutex::new(String::new()),
             locked: AtomicBool::new(false),
         })
+    }
+
+    pub fn from_persisted(
+        ledger: Arc<Ledger>,
+        work_thresholds: WorkThresholds,
+        meta: PersistedWalletMeta,
+        persisted_keys: alloc::vec::Vec<(PublicKey, PersistedWalletKey)>,
+    ) -> Self {
+        let mut keys = HashMap::new();
+        let mut deterministic_keys = HashSet::new();
+        let mut watch_keys = HashSet::new();
+        let mut work_cache = HashMap::new();
+
+        for (pub_key, rec) in persisted_keys {
+            if u64::from(rec.work) != 0 {
+                work_cache.insert(pub_key, rec.work);
+            }
+            match rec.key_type {
+                PersistedKeyType::Adhoc => {
+                    keys.insert(pub_key, PrivateKey::from_bytes(&rec.priv_key));
+                }
+                PersistedKeyType::Deterministic => {
+                    keys.insert(pub_key, PrivateKey::from_bytes(&rec.priv_key));
+                    deterministic_keys.insert(pub_key);
+                }
+                PersistedKeyType::Watch => {
+                    watch_keys.insert(pub_key);
+                }
+            }
+        }
+
+        Self {
+            representatives: Mutex::new(HashSet::new()),
+            representative: Mutex::new(meta.representative),
+            ledger,
+            work_thresholds,
+            keys: Mutex::new(keys),
+            deterministic_keys: Mutex::new(deterministic_keys),
+            watch_keys: Mutex::new(watch_keys),
+            work_cache: Mutex::new(work_cache),
+            seed: Mutex::new(meta.seed),
+            deterministic_index: AtomicU32::new(meta.deterministic_index),
+            password: Mutex::new(meta.password),
+            locked: AtomicBool::new(meta.locked),
+        }
+    }
+
+    pub fn to_persisted_meta(&self) -> PersistedWalletMeta {
+        PersistedWalletMeta {
+            representative: *self.representative.lock(),
+            seed: *self.seed.lock(),
+            deterministic_index: self.deterministic_index.load(Ordering::SeqCst),
+            locked: self.locked.load(Ordering::SeqCst),
+            password: self.password.lock().clone(),
+        }
+    }
+
+    pub fn to_persisted_key(&self, pub_key: &PublicKey) -> Option<PersistedWalletKey> {
+        let work = self
+            .work_cache
+            .lock()
+            .get(pub_key)
+            .copied()
+            .unwrap_or_else(|| WorkNonce::from(0));
+        if self.deterministic_keys.lock().contains(pub_key) {
+            let prv = self.keys.lock().get(pub_key)?.clone();
+            Some(PersistedWalletKey {
+                key_type: PersistedKeyType::Deterministic,
+                priv_key: *prv.raw_key().as_bytes(),
+                work,
+            })
+        } else if let Some(prv) = self.keys.lock().get(pub_key).cloned() {
+            Some(PersistedWalletKey {
+                key_type: PersistedKeyType::Adhoc,
+                priv_key: *prv.raw_key().as_bytes(),
+                work,
+            })
+        } else if self.watch_keys.lock().contains(pub_key) {
+            Some(PersistedWalletKey {
+                key_type: PersistedKeyType::Watch,
+                priv_key: [0u8; 32],
+                work,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn deterministic_check(&self, index: u32) -> u32 {
+        let mut result = index;
+        let any = self.ledger.any();
+        let seed = *self.seed.lock();
+        let mut i = index + 1;
+        let mut n = index + 64;
+        while i < n {
+            let raw = deterministic_key(&seed, i);
+            let pair = PrivateKey::from(raw);
+            if any.account_head(&pair.account()).is_some()
+                || any.receivable_exists(pair.account())
+            {
+                result = i;
+                n = i + 64 + (i / 64);
+            }
+            i += 1;
+        }
+        result
     }
 
     pub fn insert_key(&self, priv_key: PrivateKey) -> PublicKey {

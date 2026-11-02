@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::sync::Arc;
-use crate::{BtreeBlockStore, BtreeAccountStore, BtreePendingStore, BtreeOnlineWeightStore, BtreePrunedStore, BtreeRepWeightStore, BtreePeerStore, BtreeConfirmationHeightStore, BtreeFinalVoteStore, BtreeSuccessorStore, BtreeVersionStore};
+use crate::{BtreeBlockStore, BtreeAccountStore, BtreePendingStore, BtreeOnlineWeightStore, BtreePrunedStore, BtreeRepWeightStore, BtreePeerStore, BtreeConfirmationHeightStore, BtreeFinalVoteStore, BtreeSuccessorStore, BtreeVersionStore, BtreeWalletStore};
 
 pub struct LedgerCache {
     pub confirmed_count: AtomicU64,
@@ -40,6 +40,7 @@ pub struct BtreeStore {
     pub final_vote: BtreeFinalVoteStore,
     pub successors: BtreeSuccessorStore,
     pub version: BtreeVersionStore,
+    pub wallet: BtreeWalletStore,
 }
 
 static ACTIVE_CACHE: spin::Mutex<Option<Arc<LedgerCache>>> = spin::Mutex::new(None);
@@ -88,6 +89,7 @@ impl BtreeStore {
             final_vote: BtreeFinalVoteStore::new(),
             successors: BtreeSuccessorStore::new(),
             version: BtreeVersionStore::new(),
+            wallet: BtreeWalletStore::new(),
         }
     }
 

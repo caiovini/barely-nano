@@ -5,10 +5,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::Ordering;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use spin::Mutex;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
@@ -141,7 +141,27 @@ impl Wallets {
     pub fn set_start_election_callback(&self, _callback: Box<dyn Fn(SavedBlock) + Send + Sync>) {}
 
     pub fn initialize(&mut self) -> anyhow::Result<()> {
-        info!("Wallets initialized (in-memory)");
+        let persisted = self.ledger.store.wallet.load_all();
+        {
+            let mut guard = self.mutex.lock();
+            for (wallet_id, mut meta, keys) in persisted {
+                if meta.representative.is_zero() {
+                    meta.representative = self.random_representative();
+                }
+                let wallet = Wallet::from_persisted(
+                    self.ledger.clone(),
+                    self.work_thresholds.clone(),
+                    meta,
+                    keys,
+                );
+                guard.insert(wallet_id, Arc::new(wallet));
+            }
+            info!("Found {} wallet(s) in B-Tree storage", guard.len());
+            for id in guard.keys() {
+                info!("Wallet: {}", id);
+            }
+        }
+        self.compute_reps();
         Ok(())
     }
 
@@ -162,20 +182,38 @@ impl Wallets {
     }
 
     pub fn destroy(&self, id: &WalletId) {
-        self.mutex.lock().remove(id);
+        let removed = self.mutex.lock().remove(id).is_some();
+        self.ledger.store.wallet.destroy_wallet(id);
+        if removed {
+            self.compute_reps();
+        }
     }
 
     pub fn foreach_representative<F>(&self, mut action: F)
     where
         F: FnMut(&PrivateKey),
     {
-        let guard = self.mutex.lock();
-        for wallet in guard.values() {
-            if wallet.valid_password() {
-                let keys = wallet.keys.lock();
-                for prv in keys.values() {
-                    action(prv);
+        if self.node_config.enable_voting {
+            let mut action_accounts_l: Vec<PrivateKey> = Vec::new();
+            {
+                let guard = self.mutex.lock();
+                for (wallet_id, wallet) in guard.iter() {
+                    let representatives_l = wallet.representatives.lock().clone();
+                    for account in representatives_l {
+                        if let Some(prv) = wallet.get_key(&account) {
+                            if !self.ledger.weight(&account).is_zero() {
+                                if wallet.valid_password() {
+                                    action_accounts_l.push(prv);
+                                } else {
+                                    warn!("Representative locked inside wallet {}", wallet_id);
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            for keys in action_accounts_l {
+                action(&keys);
             }
         }
     }
@@ -190,9 +228,51 @@ impl Wallets {
         false
     }
 
-    pub fn compute_reps(&self) {}
+    pub fn compute_reps(&self) {
+        let wallets_guard = self.mutex.lock();
+        let mut reps_guard = self.wallet_reps.lock();
+        reps_guard.clear();
+        let half_principal_weight = self.online_reps.lock().minimum_principal_weight() / 2;
+        for (_, wallet) in wallets_guard.iter() {
+            let mut representatives = HashSet::new();
+            let keys = wallet.keys.lock();
+            for &pub_key in keys.keys() {
+                if reps_guard.check_rep(pub_key, half_principal_weight) {
+                    representatives.insert(pub_key);
+                }
+            }
+            *wallet.representatives.lock() = representatives;
+        }
+    }
 
-    pub fn reload(&self) {}
+    pub fn reload(&self) {
+        let persisted = self.ledger.store.wallet.load_all();
+        if persisted.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        {
+            let mut guard = self.mutex.lock();
+            for (wallet_id, mut meta, keys) in persisted {
+                if !guard.contains_key(&wallet_id) {
+                    if meta.representative.is_zero() {
+                        meta.representative = self.random_representative();
+                    }
+                    let wallet = Wallet::from_persisted(
+                        self.ledger.clone(),
+                        self.work_thresholds.clone(),
+                        meta,
+                        keys,
+                    );
+                    guard.insert(wallet_id, Arc::new(wallet));
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.compute_reps();
+        }
+    }
 
     pub fn fetch(&self, wallet_id: &WalletId, account: &Account) -> Result<PrivateKey, WalletsError> {
         let guard = self.mutex.lock();
@@ -208,12 +288,14 @@ impl Wallets {
     pub fn create(&self, id: WalletId) {
         let mut guard = self.mutex.lock();
         let rep = self.random_representative();
-        guard.insert(
-            id,
-            Arc::new(
-                Wallet::new(self.ledger.clone(), self.work_thresholds.clone(), rep).unwrap(),
-            ),
+        let wallet = Arc::new(
+            Wallet::new(self.ledger.clone(), self.work_thresholds.clone(), rep).unwrap(),
         );
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(&id, &wallet.to_persisted_meta());
+        guard.insert(id, wallet);
     }
 
     pub fn change_seed(
@@ -222,21 +304,36 @@ impl Wallets {
         seed: &RawKey,
         count: u32,
     ) -> Result<(u32, Account), WalletsError> {
-        let guard = self.mutex.lock();
-        let wallet = Self::get_wallet(&guard, &id)?;
-        if !wallet.valid_password() {
-            return Err(WalletsError::WalletLocked);
-        }
-        *wallet.seed.lock() = *seed;
-        wallet.deterministic_index.store(0, Ordering::SeqCst);
-        let mut last_account = Account::zero();
-        let mut restored = 0;
-        let to_generate = if count == 0 { 1 } else { count };
-        for _ in 0..to_generate {
-            let pk = wallet.insert_deterministic();
-            last_account = pk.into();
-            restored += 1;
-        }
+        let (restored, last_account) = {
+            let guard = self.mutex.lock();
+            let wallet = Self::get_wallet(&guard, &id)?;
+            if !wallet.valid_password() {
+                return Err(WalletsError::WalletLocked);
+            }
+            *wallet.seed.lock() = *seed;
+            wallet.deterministic_index.store(0, Ordering::SeqCst);
+            let mut last_account = Account::zero();
+            let mut restored = 0;
+            let to_generate = if count == 0 {
+                1 + wallet.deterministic_check(0)
+            } else {
+                count
+            };
+            for _ in 0..to_generate {
+                let pk = wallet.insert_deterministic();
+                if let Some(rec) = wallet.to_persisted_key(&pk) {
+                    self.ledger.store.wallet.put_wallet_key(&id, &pk, &rec);
+                }
+                last_account = pk.into();
+                restored += 1;
+            }
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_meta(&id, &wallet.to_persisted_meta());
+            (restored, last_account)
+        };
+        self.compute_reps();
         Ok((restored, last_account))
     }
 
@@ -261,18 +358,23 @@ impl Wallets {
         wallet_id: &WalletId,
         pub_key: &PublicKey,
     ) -> Result<(), WalletsError> {
-        let guard = self.mutex.lock();
-        let wallet = Self::get_wallet(&guard, wallet_id)?;
-        if !wallet.valid_password() {
-            return Err(WalletsError::WalletLocked);
+        {
+            let guard = self.mutex.lock();
+            let wallet = Self::get_wallet(&guard, wallet_id)?;
+            if !wallet.valid_password() {
+                return Err(WalletsError::WalletLocked);
+            }
+            let removed_key = wallet.keys.lock().remove(pub_key).is_some();
+            let removed_watch = wallet.watch_keys.lock().remove(pub_key);
+            wallet.deterministic_keys.lock().remove(pub_key);
+            wallet.work_cache.lock().remove(pub_key);
+            wallet.representatives.lock().remove(pub_key);
+            if !removed_key && !removed_watch {
+                return Err(WalletsError::AccountNotFound);
+            }
+            self.ledger.store.wallet.del_wallet_key(wallet_id, pub_key);
         }
-        let removed_key = wallet.keys.lock().remove(pub_key).is_some();
-        let removed_watch = wallet.watch_keys.lock().remove(pub_key);
-        wallet.deterministic_keys.lock().remove(pub_key);
-        wallet.work_cache.lock().remove(pub_key);
-        if !removed_key && !removed_watch {
-            return Err(WalletsError::AccountNotFound);
-        }
+        self.compute_reps();
         Ok(())
     }
 
@@ -282,26 +384,34 @@ impl Wallets {
         target_id: &WalletId,
         accounts: &[PublicKey],
     ) -> Result<(), WalletsError> {
-        let guard = self.mutex.lock();
-        let source = Self::get_wallet(&guard, source_id)?;
-        let target = Self::get_wallet(&guard, target_id)?;
-        if !source.valid_password() || !target.valid_password() {
-            return Err(WalletsError::WalletLocked);
-        }
         {
-            let src_keys = source.keys.lock();
+            let guard = self.mutex.lock();
+            let source = Self::get_wallet(&guard, source_id)?;
+            let target = Self::get_wallet(&guard, target_id)?;
+            if !source.valid_password() || !target.valid_password() {
+                return Err(WalletsError::WalletLocked);
+            }
+            {
+                let src_keys = source.keys.lock();
+                for pk in accounts {
+                    if !src_keys.contains_key(pk) {
+                        return Err(WalletsError::AccountNotFound);
+                    }
+                }
+            }
             for pk in accounts {
-                if !src_keys.contains_key(pk) {
-                    return Err(WalletsError::AccountNotFound);
+                if let Some(prv) = source.keys.lock().remove(pk) {
+                    source.deterministic_keys.lock().remove(pk);
+                    source.representatives.lock().remove(pk);
+                    self.ledger.store.wallet.del_wallet_key(source_id, pk);
+                    target.keys.lock().insert(*pk, prv);
+                    if let Some(rec) = target.to_persisted_key(pk) {
+                        self.ledger.store.wallet.put_wallet_key(target_id, pk, &rec);
+                    }
                 }
             }
         }
-        for pk in accounts {
-            if let Some(prv) = source.keys.lock().remove(pk) {
-                source.deterministic_keys.lock().remove(pk);
-                target.keys.lock().insert(*pk, prv);
-            }
-        }
+        self.compute_reps();
         Ok(())
     }
 
@@ -315,12 +425,20 @@ impl Wallets {
         if !wallet.valid_password() {
             return Err(WalletsError::WalletLocked);
         }
-        let mut watch = wallet.watch_keys.lock();
-        for account in accounts {
-            if account.is_zero() {
-                return Err(WalletsError::BadPublicKey);
+        {
+            let mut watch = wallet.watch_keys.lock();
+            for account in accounts {
+                if account.is_zero() {
+                    return Err(WalletsError::BadPublicKey);
+                }
+                watch.insert((*account).into());
             }
-            watch.insert((*account).into());
+        }
+        for account in accounts {
+            let pk: PublicKey = (*account).into();
+            if let Some(rec) = wallet.to_persisted_key(&pk) {
+                self.ledger.store.wallet.put_wallet_key(wallet_id, &pk, &rec);
+            }
         }
         Ok(())
     }
@@ -335,6 +453,10 @@ impl Wallets {
         let guard = self.mutex.lock();
         let wallet = Self::get_wallet(&guard, wallet_id)?;
         wallet.locked.store(true, Ordering::SeqCst);
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
         Ok(())
     }
 
@@ -349,6 +471,10 @@ impl Wallets {
             return Err(WalletsError::WalletLocked);
         }
         *wallet.password.lock() = String::from(password.as_ref());
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
         Ok(())
     }
 
@@ -382,6 +508,12 @@ impl Wallets {
             return Err(WalletsError::AccountNotFound);
         }
         wallet.work_cache.lock().insert(*pub_key, work);
+        if let Some(rec) = wallet.to_persisted_key(pub_key) {
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_key(wallet_id, pub_key, &rec);
+        }
         Ok(())
     }
 
@@ -521,7 +653,19 @@ impl WalletsExt for Wallets {
             return Err(WalletsError::WalletLocked);
         }
         let priv_key = PrivateKey::from_bytes(key);
-        Ok(wallet.insert_key(priv_key))
+        let pub_key = wallet.insert_key(priv_key);
+        if let Some(rec) = wallet.to_persisted_key(&pub_key) {
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_key(wallet_id, &pub_key, &rec);
+        }
+        let half_principal_weight = self.online_reps.lock().minimum_principal_weight() / 2;
+        let mut rep_guard = self.wallet_reps.lock();
+        if rep_guard.check_rep(pub_key, half_principal_weight) {
+            wallet.representatives.lock().insert(pub_key);
+        }
+        Ok(pub_key)
     }
 
     fn deterministic_insert_at(
@@ -535,7 +679,23 @@ impl WalletsExt for Wallets {
         if !wallet.valid_password() {
             return Err(WalletsError::WalletLocked);
         }
-        Ok(wallet.insert_deterministic_at(index))
+        let pub_key = wallet.insert_deterministic_at(index);
+        if let Some(rec) = wallet.to_persisted_key(&pub_key) {
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_key(wallet_id, &pub_key, &rec);
+        }
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
+        let half_principal_weight = self.online_reps.lock().minimum_principal_weight() / 2;
+        let mut rep_guard = self.wallet_reps.lock();
+        if rep_guard.check_rep(pub_key, half_principal_weight) {
+            wallet.representatives.lock().insert(pub_key);
+        }
+        Ok(pub_key)
     }
 
     fn deterministic_insert2(
@@ -548,7 +708,27 @@ impl WalletsExt for Wallets {
         if !wallet.valid_password() {
             return Err(WalletsError::WalletLocked);
         }
-        Ok(wallet.insert_deterministic())
+        let pub_key = wallet.insert_deterministic();
+        if let Some(rec) = wallet.to_persisted_key(&pub_key) {
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_key(wallet_id, &pub_key, &rec);
+        }
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
+        let half_principal_weight = self.online_reps.lock().minimum_principal_weight() / 2;
+        let mut rep_guard = self.wallet_reps.lock();
+        if rep_guard.check_rep(pub_key, half_principal_weight) {
+            info!(
+                account = %pub_key.as_account().encode_account(),
+                "New account qualified as representative"
+            );
+            wallet.representatives.lock().insert(pub_key);
+        }
+        Ok(pub_key)
     }
 
     fn enter_password(&self, wallet_id: WalletId, password: &str) -> Result<(), WalletsError> {
@@ -556,9 +736,17 @@ impl WalletsExt for Wallets {
         let wallet = Self::get_wallet(&guard, &wallet_id)?;
         if wallet.password.lock().as_str() == password {
             wallet.locked.store(false, Ordering::SeqCst);
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_meta(&wallet_id, &wallet.to_persisted_meta());
             Ok(())
         } else {
             wallet.locked.store(true, Ordering::SeqCst);
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_meta(&wallet_id, &wallet.to_persisted_meta());
             Err(WalletsError::InvalidPassword)
         }
     }
@@ -699,6 +887,204 @@ impl WalletsExt for Wallets {
             return Err(WalletsError::WalletLocked);
         }
         *wallet.representative.lock() = rep;
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(&wallet_id, &wallet.to_persisted_meta());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kernel_common::storage::{bpm::BufferPool, btree::BTree, StorageContext, SHARDS, SHARD_COUNT};
+
+    #[test]
+    fn compute_reps_and_foreach_representative() {
+        let wallets = Wallets::new_null();
+        let wallet_id = WalletId::from(1);
+        wallets.create(wallet_id);
+
+        let rep_key = PrivateKey::from_bytes(&[11u8; 32]);
+        let non_rep_key = PrivateKey::from_bytes(&[22u8; 32]);
+
+        // Give rep_key voting weight above vote_minimum
+        wallets
+            .ledger
+            .rep_weights_updater
+            .representation_put(rep_key.public_key(), Amount::nano(2_000_000));
+
+        let rep_pub = wallets
+            .insert_adhoc2(&wallet_id, rep_key.raw_key().as_bytes(), false)
+            .unwrap();
+        let non_rep_pub = wallets
+            .insert_adhoc2(&wallet_id, non_rep_key.raw_key().as_bytes(), false)
+            .unwrap();
+
+        assert_eq!(wallets.voting_reps_count(), 1);
+        assert!(wallets.voting_enabled());
+        assert!(wallets.wallet_reps.lock().exists(&rep_pub.into()));
+        assert!(!wallets.wallet_reps.lock().exists(&non_rep_pub.into()));
+
+        let mut active_reps = Vec::new();
+        wallets.foreach_representative(|k| active_reps.push(k.public_key()));
+        assert_eq!(active_reps, alloc::vec![rep_pub]);
+
+        // Later, non_rep_key receives delegated weight and compute_reps() runs
+        wallets
+            .ledger
+            .rep_weights_updater
+            .representation_put(non_rep_pub, Amount::nano(2_000_000));
+        wallets.compute_reps();
+
+        assert_eq!(wallets.voting_reps_count(), 2);
+        let mut active_reps2 = Vec::new();
+        wallets.foreach_representative(|k| active_reps2.push(k.public_key()));
+        assert_eq!(active_reps2.len(), 2);
+        assert!(active_reps2.contains(&rep_pub));
+        assert!(active_reps2.contains(&non_rep_pub));
+
+        // Removing a representative key updates voting_reps_count
+        wallets.remove_key(&wallet_id, &non_rep_pub).unwrap();
+        assert_eq!(wallets.voting_reps_count(), 1);
+    }
+
+    #[test]
+    fn btree_wallet_persistence_across_reboot() {
+        use kernel_common::storage::{init_wallet_storage, WALLET_SHARD};
+
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));
+        for i in 0..SHARD_COUNT {
+            let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 64);
+            *SHARDS[i].lock() = Some(BTree::new(bpm));
+        }
+        init_wallet_storage(storage.clone());
+        kernel_common::storage::bpm::NEED_CHECKPOINT
+            .store(false, core::sync::atomic::Ordering::SeqCst);
+
+        let wallet_id = WalletId::from(0xABCD);
+        let rep_key = PrivateKey::from_bytes(&[0x33; 32]);
+        let rep_pub = rep_key.public_key();
+        let custom_rep = PublicKey::from(777);
+        let watch_acc = Account::from(888);
+        let det_pub;
+
+        {
+            let wallets = Wallets::new_null();
+            wallets
+                .ledger
+                .rep_weights_updater
+                .representation_put(rep_pub, Amount::nano(5_000_000));
+
+            wallets.create(wallet_id);
+            wallets
+                .set_representative(wallet_id, custom_rep, false)
+                .unwrap();
+
+            let inserted = wallets
+                .insert_adhoc2(&wallet_id, rep_key.raw_key().as_bytes(), false)
+                .unwrap();
+            assert_eq!(inserted, rep_pub);
+
+            det_pub = wallets.deterministic_insert2(&wallet_id, false).unwrap();
+            wallets.insert_watch(&wallet_id, &[watch_acc]).unwrap();
+            wallets
+                .work_set(&wallet_id, &rep_pub, WorkNonce::from(0xCAFE_BABE))
+                .unwrap();
+            wallets.rekey(&wallet_id, "my_rep_pass").unwrap();
+            wallets.lock(&wallet_id).unwrap();
+        }
+
+        // Wallet writes must never set NEED_CHECKPOINT on the ledger WAL
+        assert!(
+            !kernel_common::storage::bpm::NEED_CHECKPOINT
+                .load(core::sync::atomic::Ordering::SeqCst)
+        );
+
+        // Wiping all 16 ledger SHARDS must NOT affect wallet storage
+        for i in 0..SHARD_COUNT {
+            if let Some(db) = SHARDS[i].lock().as_mut() {
+                db.wipe();
+            }
+        }
+
+        // Simulate cold hardware reboot: drop in-memory WALLET_SHARD BufferPool and reload from storage
+        *WALLET_SHARD.lock() = None;
+        init_wallet_storage(storage.clone());
+
+        {
+            let mut wallets_after_boot = Wallets::new_null();
+            wallets_after_boot
+                .ledger
+                .rep_weights_updater
+                .representation_put(rep_pub, Amount::nano(5_000_000));
+            wallets_after_boot.initialize().unwrap();
+
+            assert!(wallets_after_boot.wallet_exists(&wallet_id));
+            assert_eq!(
+                wallets_after_boot.get_representative(wallet_id).unwrap(),
+                custom_rep
+            );
+            assert_eq!(
+                wallets_after_boot.deterministic_index_get(&wallet_id).unwrap(),
+                1
+            );
+            assert_eq!(
+                wallets_after_boot.key_type(wallet_id, &rep_pub),
+                KeyType::Adhoc
+            );
+            assert_eq!(
+                wallets_after_boot.key_type(wallet_id, &det_pub),
+                KeyType::Deterministic
+            );
+            assert!(wallets_after_boot.exists(&watch_acc.into()));
+            assert_eq!(
+                wallets_after_boot.work_get2(&wallet_id, &rep_pub).unwrap(),
+                WorkNonce::from(0xCAFE_BABE)
+            );
+
+            // Representative weight was detected on boot via initialize() -> compute_reps()
+            assert_eq!(wallets_after_boot.voting_reps_count(), 1);
+            assert!(wallets_after_boot.voting_enabled());
+
+            // Locked state persisted; unlocking with password allows fetching private key
+            assert!(!wallets_after_boot.valid_password(&wallet_id).unwrap());
+            assert_eq!(
+                wallets_after_boot.enter_password(wallet_id, "wrong"),
+                Err(WalletsError::InvalidPassword)
+            );
+            wallets_after_boot
+                .enter_password(wallet_id, "my_rep_pass")
+                .unwrap();
+            assert!(wallets_after_boot.valid_password(&wallet_id).unwrap());
+
+            let fetched = wallets_after_boot
+                .fetch(&wallet_id, &rep_pub.into())
+                .unwrap();
+            assert_eq!(fetched.raw_key(), rep_key.raw_key());
+
+            let mut voted_keys = Vec::new();
+            wallets_after_boot.foreach_representative(|k| voted_keys.push(k.public_key()));
+            assert_eq!(voted_keys, alloc::vec![rep_pub]);
+
+            // Destroy removes from B-Tree
+            wallets_after_boot.destroy(&wallet_id);
+        }
+
+        // Cold reboot after destroy
+        *WALLET_SHARD.lock() = None;
+        init_wallet_storage(storage.clone());
+
+        {
+            let mut wallets_after_destroy = Wallets::new_null();
+            wallets_after_destroy.initialize().unwrap();
+            assert!(!wallets_after_destroy.wallet_exists(&wallet_id));
+        }
+
+        *WALLET_SHARD.lock() = None;
+        for i in 0..SHARD_COUNT {
+            *SHARDS[i].lock() = None;
+        }
     }
 }

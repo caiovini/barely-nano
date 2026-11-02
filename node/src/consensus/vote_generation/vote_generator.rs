@@ -131,6 +131,14 @@ impl VoteGenerator {
         self.vote_generation_queue.add((*root, *hash));
     }
 
+    pub(crate) fn run_once(&self) -> bool {
+        let mut worked = self.vote_generation_queue.run_once();
+        if self.shared_state.run_once() {
+            worked = true;
+        }
+        worked
+    }
+
     /// Queue blocks for vote generation, returning the number of successful candidates.
     pub(crate) fn generate(&self, blocks: &[SavedBlock], channel: &Arc<Channel>) -> usize {
         let req_candidates = {
@@ -243,6 +251,26 @@ impl SharedState {
                 queues = self.queues.lock();
             }
         }
+    }
+
+    fn run_once(&self) -> bool {
+        if self.stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut worked = false;
+        let mut queues = self.queues.lock();
+        let now = self.clock.now();
+        if queues.should_broadcast(now) {
+            queues = self.broadcast(queues);
+            queues.next_broadcast = self.clock.now() + self.vote_generator_delay;
+            worked = true;
+        }
+        if let Some(request) = queues.requests.pop_front() {
+            drop(queues);
+            self.reply(request);
+            worked = true;
+        }
+        worked
     }
 
     #[allow(dead_code)]

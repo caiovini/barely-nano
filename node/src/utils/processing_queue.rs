@@ -101,6 +101,41 @@ impl<T: Send + 'static> ProcessingQueue<T> {
     pub fn len(&self) -> usize {
         self.shared_state.queue.lock().len()
     }
+
+    pub fn run_once(&self) -> bool {
+        if self.shared_state.stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        let batch = {
+            let mut guard = self.shared_state.queue.lock();
+            if guard.is_empty() {
+                return false;
+            }
+            if self.shared_state.max_batch_size == 0
+                || guard.len() <= self.shared_state.max_batch_size
+            {
+                let mut queue_l = VecDeque::new();
+                core::mem::swap(&mut queue_l, &mut *guard);
+                queue_l
+            } else {
+                let mut queue_l = VecDeque::with_capacity(self.shared_state.max_batch_size);
+                for _ in 0..self.shared_state.max_batch_size {
+                    if let Some(item) = guard.pop_front() {
+                        queue_l.push_back(item);
+                    }
+                }
+                queue_l
+            }
+        };
+        if !batch.is_empty() {
+            self.stats
+                .inc_dir(self.stat_type, DetailType::Batch, Direction::In);
+            (self.shared_state.process_batch)(batch);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl<T: Send + 'static> Drop for ProcessingQueue<T> {

@@ -17,6 +17,7 @@ mod rep_weight_store;
 mod store;
 mod successor_store;
 mod version_store;
+mod wallet_store;
 
 pub use account_store::*;
 pub use block_store::*;
@@ -30,6 +31,7 @@ pub use rep_weight_store::*;
 pub use store::*;
 pub use successor_store::*;
 pub use version_store::*;
+pub use wallet_store::*;
 
 pub const STORE_VERSION_MINIMUM: i32 = 24;
 pub const STORE_VERSION_CURRENT: i32 = 10_001;

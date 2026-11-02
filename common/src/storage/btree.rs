@@ -514,7 +514,12 @@ pub struct BTree {
 }
 
 impl BTree {
-    pub fn new(mut bpm: BufferPool) -> Self {
+    pub fn new(bpm: BufferPool) -> Self {
+        let max_pages = crate::storage::SHARD_SIZE_PAGES.load(core::sync::atomic::Ordering::SeqCst);
+        Self::new_with_max_pages(bpm, max_pages)
+    }
+
+    pub fn new_with_max_pages(mut bpm: BufferPool, max_pages: usize) -> Self {
         crate::watchdog::kick();
 
         let meta = {
@@ -522,7 +527,6 @@ impl BTree {
             MetaData::from_bytes(guard.data())
         };
 
-        let max_pages = crate::storage::SHARD_SIZE_PAGES.load(core::sync::atomic::Ordering::SeqCst);
         let mut tree = Self {
             bpm,
             meta,

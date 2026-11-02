@@ -166,6 +166,43 @@ impl RequestAggregator {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn run_once(&self) -> bool {
+        let batch = {
+            let mut state = self.state.lock();
+            if state.stopped || state.queue.is_empty() {
+                return false;
+            }
+            state.queue.next_batch(self.config.batch_size)
+        };
+        if batch.is_empty() {
+            return false;
+        }
+        let aggregator_loop = RequestAggregatorLoop {
+            mutex: self.state.clone(),
+            condition: self.condition.clone(),
+            stats: self.stats.clone(),
+            config: self.config.clone(),
+            ledger: self.ledger.clone(),
+            vote_generators: self.vote_generators.clone(),
+        };
+        let mut any = self.ledger.any();
+        for (_, request) in &batch {
+            if any.should_refresh() {
+                any = self.ledger.any();
+            }
+            if !request.channel.should_drop(TrafficType::VoteReply) {
+                aggregator_loop.process(&any, request);
+            } else {
+                self.stats.inc_dir(
+                    StatType::RequestAggregator,
+                    DetailType::ChannelFull,
+                    Direction::Out,
+                );
+            }
+        }
+        true
+    }
 }
 
 impl Drop for RequestAggregator {

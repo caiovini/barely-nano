@@ -159,6 +159,9 @@ impl Drop for ShardGuard<'_> {
 }
 
 pub static SHARDS: [ShardMutex; SHARD_COUNT] = [const { ShardMutex::new() }; SHARD_COUNT];
+/// Dedicated B-Tree instance for persistent wallet keys and metadata, physically and logically
+/// isolated from the 16 ledger `SHARDS` and the ledger WAL.
+pub static WALLET_SHARD: ShardMutex = ShardMutex::new();
 
 pub fn reset_prof() {
     use core::sync::atomic::Ordering::Relaxed;
@@ -208,17 +211,54 @@ pub struct StorageContext {
     /// 64-byte-aligned 4 KB bounce buffer in Bank 0 (< 0x8000_0000) used when transferring frames
     /// located in High DRAM Bank 1 (>= 0x1_0000_0000) so U-Boot DMA always uses 32-bit addresses.
     dma_bounce: alloc::boxed::Box<AlignedBlock>,
+    /// Isolated backing buffer for wallet pages when running on `StorageBackend::RamDisk`
+    /// (empty `Vec` with 0 heap allocation on `StorageBackend::UBoot`).
+    wallet_ram: alloc::vec::Vec<u8>,
 }
 
 pub const STORAGE_BASE_LBA: u64 = 1_048_576; // 512 MB offset to prevent overwriting U-Boot boot partition/SPL
 pub const BLOOM_HEADER_LBA: u64 = 524_288;   // 256 MB offset (8 sectors = 4 KB bloom header)
 pub const BLOOM_DATA_LBA: u64 = 524_296;     // 256 MB + 4 KB offset (64 MB = 131,072 sectors)
 
+/// Dedicated NVMe LBA region for persistent Wallet B-Tree storage (384 MB offset).
+/// Strictly below `STORAGE_BASE_LBA` (512 MB, where the synced ledger + WAL reside) and
+/// strictly above the Bloom filter region (`256 MB .. 321 MB + 4 KB`), guaranteeing that
+/// wallet operations can NEVER overwrite or collide with a synced ledger.
+pub const WALLET_STORAGE_LBA: u64 = 786_432; // 384 MB offset
+/// Maximum 4 KB home pages in the dedicated wallet B-Tree region (4,096 pages = 16 MB).
+pub const WALLET_MAX_PAGES: usize = 4096;
+/// Redo-journal pages immediately following the wallet B-Tree pages (64 pages = 256 KB).
+pub const WALLET_JOURNAL_PAGES: usize = 64;
+const WALLET_JOURNAL_MAGIC: u64 = 0x5741_4C4C_4A52_4E31; // "WALLJRN1"
+const WALLET_JOURNAL_SEED: u64 = 0x5741_4C4C_243F_6A88;
+
+const _: () = assert!(WALLET_STORAGE_LBA >= 657_416);
+const _: () = assert!(
+    WALLET_STORAGE_LBA + ((WALLET_MAX_PAGES + WALLET_JOURNAL_PAGES) as u64) * 8 <= STORAGE_BASE_LBA
+);
+
+fn wallet_journal_checksum(pids: &[u32], pages: &[&[u8; 4096]]) -> u64 {
+    let mut h = WALLET_JOURNAL_SEED ^ (pids.len() as u64);
+    for &pid in pids {
+        h = (h ^ (pid as u64)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        h ^= h >> 32;
+    }
+    for page in pages {
+        for w in page.chunks_exact(8) {
+            let v = u64::from_le_bytes([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]);
+            h = (h ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            h ^= h >> 32;
+        }
+    }
+    h
+}
+
 impl StorageContext {
     pub fn new_uboot(info: uboot::DeviceInfo) -> Self {
         Self {
             backend: StorageBackend::UBoot(info),
             dma_bounce: alloc::boxed::Box::new(AlignedBlock::new()),
+            wallet_ram: alloc::vec::Vec::new(),
         }
     }
 
@@ -227,7 +267,186 @@ impl StorageContext {
         Self {
             backend: StorageBackend::RamDisk(alloc::vec![0; size]),
             dma_bounce: alloc::boxed::Box::new(AlignedBlock::new()),
+            wallet_ram: alloc::vec::Vec::new(),
         }
+    }
+
+    /// Reads a 4 KB page from the isolated wallet storage region (`WALLET_STORAGE_LBA`).
+    /// Enforces strict bounds so it can never address `< WALLET_STORAGE_LBA` or `>= STORAGE_BASE_LBA`.
+    pub fn read_wallet_block(&mut self, wallet_page_id: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+        if wallet_page_id >= WALLET_MAX_PAGES + WALLET_JOURNAL_PAGES || buf.len() < 4096 {
+            return Err(StorageError::IoError);
+        }
+        match &mut self.backend {
+            StorageBackend::UBoot(info) => {
+                let lba = WALLET_STORAGE_LBA + (wallet_page_id as u64) * 8;
+                if lba < WALLET_STORAGE_LBA || lba + 8 > STORAGE_BASE_LBA {
+                    return Err(StorageError::IoError);
+                }
+                let count = 8;
+                if (buf.as_ptr() as usize) >= HIGH_DRAM_THRESHOLD {
+                    let ret = uboot::dev_read(info, lba, count, self.dma_bounce.bytes.as_mut_ptr());
+                    if ret > 0 {
+                        buf[..4096].copy_from_slice(&self.dma_bounce.bytes);
+                        Ok(())
+                    } else {
+                        Err(StorageError::IoError)
+                    }
+                } else {
+                    let ret = uboot::dev_read(info, lba, count, buf.as_mut_ptr());
+                    if ret > 0 {
+                        Ok(())
+                    } else {
+                        Err(StorageError::IoError)
+                    }
+                }
+            }
+            StorageBackend::RamDisk(_) => {
+                let offset = wallet_page_id * 4096;
+                if offset + 4096 <= self.wallet_ram.len() {
+                    buf[..4096].copy_from_slice(&self.wallet_ram[offset..offset + 4096]);
+                } else {
+                    buf[..4096].fill(0);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Writes a 4 KB page to the isolated wallet storage region (`WALLET_STORAGE_LBA`).
+    /// Enforces strict bounds so it can never overwrite the synced ledger (`>= STORAGE_BASE_LBA`)
+    /// or boot/Bloom partitions (`< WALLET_STORAGE_LBA`).
+    pub fn write_wallet_block(&mut self, wallet_page_id: usize, buf: &[u8]) -> Result<(), StorageError> {
+        if wallet_page_id >= WALLET_MAX_PAGES + WALLET_JOURNAL_PAGES || buf.len() < 4096 {
+            return Err(StorageError::IoError);
+        }
+        match &mut self.backend {
+            StorageBackend::UBoot(info) => {
+                let lba = WALLET_STORAGE_LBA + (wallet_page_id as u64) * 8;
+                if lba < WALLET_STORAGE_LBA || lba + 8 > STORAGE_BASE_LBA {
+                    return Err(StorageError::IoError);
+                }
+                let count = 8;
+                let ret = if (buf.as_ptr() as usize) >= HIGH_DRAM_THRESHOLD {
+                    self.dma_bounce.bytes.copy_from_slice(&buf[..4096]);
+                    uboot::dev_write(info, lba, count, self.dma_bounce.bytes.as_ptr())
+                } else {
+                    uboot::dev_write(info, lba, count, buf.as_ptr())
+                };
+                if ret > 0 {
+                    Ok(())
+                } else {
+                    tracing::error!("Storage: FAILED to write wallet block {}", wallet_page_id);
+                    Err(StorageError::IoError)
+                }
+            }
+            StorageBackend::RamDisk(_) => {
+                let end = (wallet_page_id + 1) * 4096;
+                if self.wallet_ram.len() < end {
+                    self.wallet_ram.resize(end, 0);
+                }
+                let offset = wallet_page_id * 4096;
+                self.wallet_ram[offset..end].copy_from_slice(&buf[..4096]);
+                Ok(())
+            }
+        }
+    }
+
+    /// Atomically persists dirty wallet B-Tree pages using the dedicated wallet redo journal
+    /// (`WALLET_MAX_PAGES .. WALLET_MAX_PAGES + WALLET_JOURNAL_PAGES`), then writes home pages
+    /// with `pid > 0` first and `pid == 0` (`MetaData`) last before clearing the journal header.
+    pub fn flush_wallet_dirty_pages(
+        &mut self,
+        pages: &mut [(usize, &[u8; 4096])],
+    ) -> Result<(), StorageError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        // Order `pid > 0` (leaf/internal nodes) before `pid == 0` (B-Tree MetaData).
+        pages.sort_unstable_by_key(|&(pid, _)| if pid == 0 { usize::MAX } else { pid });
+
+        let max_batch = WALLET_JOURNAL_PAGES - 1;
+        for chunk in pages.chunks(max_batch) {
+            let mut pids = [0u32; WALLET_JOURNAL_PAGES];
+            let mut slice_refs: alloc::vec::Vec<&[u8; 4096]> = alloc::vec::Vec::with_capacity(chunk.len());
+            for (idx, &(pid, data)) in chunk.iter().enumerate() {
+                if pid >= WALLET_MAX_PAGES {
+                    return Err(StorageError::IoError);
+                }
+                pids[idx] = pid as u32;
+                slice_refs.push(data);
+                self.write_wallet_block(WALLET_MAX_PAGES + 1 + idx, data)?;
+            }
+            let sum = wallet_journal_checksum(&pids[..chunk.len()], &slice_refs);
+            let mut hdr = AlignedBlock::new();
+            hdr.bytes[0..8].copy_from_slice(&WALLET_JOURNAL_MAGIC.to_le_bytes());
+            hdr.bytes[8..12].copy_from_slice(&(chunk.len() as u32).to_le_bytes());
+            hdr.bytes[16..24].copy_from_slice(&sum.to_le_bytes());
+            for (idx, &pid) in pids[..chunk.len()].iter().enumerate() {
+                let off = 32 + idx * 4;
+                hdr.bytes[off..off + 4].copy_from_slice(&pid.to_le_bytes());
+            }
+            self.write_wallet_block(WALLET_MAX_PAGES, &hdr.bytes)?;
+
+            for &(pid, data) in chunk {
+                self.write_wallet_block(pid, data)?;
+            }
+
+            hdr.bytes.fill(0);
+            self.write_wallet_block(WALLET_MAX_PAGES, &hdr.bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Recovers any interrupted wallet flush from the dedicated wallet redo journal on boot.
+    pub fn recover_wallet_journal(&mut self) -> usize {
+        let mut hdr = AlignedBlock::new();
+        if self.read_wallet_block(WALLET_MAX_PAGES, &mut hdr.bytes).is_err() {
+            return 0;
+        }
+        let magic = u64::from_le_bytes(hdr.bytes[0..8].try_into().unwrap());
+        if magic != WALLET_JOURNAL_MAGIC {
+            return 0;
+        }
+        let count = u32::from_le_bytes(hdr.bytes[8..12].try_into().unwrap()) as usize;
+        if count == 0 || count >= WALLET_JOURNAL_PAGES {
+            let zero = AlignedBlock::new();
+            let _ = self.write_wallet_block(WALLET_MAX_PAGES, &zero.bytes);
+            return 0;
+        }
+        let stored_sum = u64::from_le_bytes(hdr.bytes[16..24].try_into().unwrap());
+        let mut pids = alloc::vec![0u32; count];
+        for i in 0..count {
+            let off = 32 + i * 4;
+            let pid = u32::from_le_bytes(hdr.bytes[off..off + 4].try_into().unwrap());
+            if (pid as usize) >= WALLET_MAX_PAGES {
+                let zero = AlignedBlock::new();
+                let _ = self.write_wallet_block(WALLET_MAX_PAGES, &zero.bytes);
+                return 0;
+            }
+            pids[i] = pid;
+        }
+        let mut blocks = alloc::vec![AlignedBlock::new(); count];
+        for i in 0..count {
+            if self.read_wallet_block(WALLET_MAX_PAGES + 1 + i, &mut blocks[i].bytes).is_err() {
+                return 0;
+            }
+        }
+        let refs: alloc::vec::Vec<&[u8; 4096]> = blocks.iter().map(|b| &b.bytes).collect();
+        if wallet_journal_checksum(&pids, &refs) != stored_sum {
+            let zero = AlignedBlock::new();
+            let _ = self.write_wallet_block(WALLET_MAX_PAGES, &zero.bytes);
+            return 0;
+        }
+        let mut replayed = 0usize;
+        for i in 0..count {
+            if self.write_wallet_block(pids[i] as usize, &blocks[i].bytes).is_ok() {
+                replayed += 1;
+            }
+        }
+        let zero = AlignedBlock::new();
+        let _ = self.write_wallet_block(WALLET_MAX_PAGES, &zero.bytes);
+        replayed
     }
 
     pub fn read_block(&mut self, block_id: usize, buf: &mut [u8]) -> Result<(), StorageError> {
@@ -610,6 +829,22 @@ fn init_shards(mut storage: StorageContext) {
         let btree = btree::BTree::new(bpm);
         *SHARDS[i].lock() = Some(btree);
     }
+
+    init_wallet_storage(shared_storage);
+}
+
+/// Initializes the dedicated `WALLET_SHARD` B-Tree in the isolated `WALLET_STORAGE_LBA` region
+/// (`384 MB` offset, strictly below `STORAGE_BASE_LBA = 512 MB`).
+pub fn init_wallet_storage(shared_storage: Arc<Mutex<StorageContext>>) {
+    let replayed = shared_storage.lock().recover_wallet_journal();
+    if replayed > 0 {
+        uart::print(b"[storage] Wallet journal recovery: replayed pages=");
+        uart::print_usize(replayed);
+        uart::print(b"\n");
+    }
+    let wallet_bpm = bpm::BufferPool::new_wallet(shared_storage, 64);
+    let wallet_btree = btree::BTree::new_with_max_pages(wallet_bpm, WALLET_MAX_PAGES);
+    *WALLET_SHARD.lock() = Some(wallet_btree);
 }
 
 pub fn process_delegated_requests() {}
