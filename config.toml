@@ -22,7 +22,7 @@ dns_server = "192.168.1.1"
 
 [node]
 peering_port = 7075
-enable_voting = true
+enable_voting = false
 enable_bounded_backlog = false
 allow_local_peers = true
 
