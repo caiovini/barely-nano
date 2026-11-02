@@ -34,14 +34,14 @@ impl SystemTime {
 impl Add<Duration> for SystemTime {
     type Output = SystemTime;
     fn add(self, rhs: Duration) -> SystemTime {
-        SystemTime(self.0 + rhs)
+        SystemTime(self.0.saturating_add(rhs))
     }
 }
 
 impl Sub<Duration> for SystemTime {
     type Output = SystemTime;
     fn sub(self, rhs: Duration) -> SystemTime {
-        SystemTime(self.0 - rhs)
+        SystemTime(self.0.saturating_sub(rhs))
     }
 }
 

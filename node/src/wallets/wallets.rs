@@ -12,21 +12,18 @@ use tracing::{info, warn};
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
-    Account, Amount, BlockHash, KeyDerivationFunction, Networks, PendingKey, PrivateKey,
+    Account, Amount, BlockDetails, BlockHash, Epoch, PendingKey, PrivateKey,
     PublicKey, RawKey, Root, SavedBlock, WalletId, WorkNonce,
 };
-use rsnano_ledger::{AnySet, Ledger, LedgerSet};
+use rsnano_ledger::{AnySet, ConfirmedSet, Ledger, LedgerSet};
 use rsnano_work::WorkThresholds;
 
 use super::{KeyType, Wallet, WalletRepresentatives};
 use crate::{
     block_processing::{BlockProcessorQueue, BlockSource},
-    cementation::ConfirmingSet,
     config::{NetworkParams, NodeConfig},
     representatives::OnlineReps,
-    transport::MessageFlooder,
-    utils::{ThreadPool, ThreadPoolImpl},
-    work::WorkFactory,
+    work::{WorkFactory, WorkRequest},
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -62,7 +59,6 @@ impl fmt::Display for WalletsError {
 
 impl core::error::Error for WalletsError {}
 
-#[allow(dead_code)]
 pub struct Wallets {
     pub mutex: Mutex<HashMap<WalletId, Arc<Wallet>>>,
     node_config: NodeConfig,
@@ -70,13 +66,10 @@ pub struct Wallets {
     work_factory: Arc<WorkFactory>,
     work_thresholds: WorkThresholds,
     network_params: NetworkParams,
-    pub delayed_work: Mutex<HashMap<Account, Root>>,
-    workers: Arc<dyn ThreadPool>,
     block_processor_queue: Arc<BlockProcessorQueue>,
     pub wallet_reps: Arc<Mutex<WalletRepresentatives>>,
     online_reps: Arc<Mutex<OnlineReps>>,
-    kdf: KeyDerivationFunction,
-    confirming_set: Arc<ConfirmingSet>,
+    start_election_callback: Mutex<Option<Box<dyn Fn(SavedBlock) + Send + Sync>>>,
 }
 
 impl Wallets {
@@ -86,39 +79,23 @@ impl Wallets {
         work: WorkThresholds,
         work_factory: Arc<WorkFactory>,
         network_params: NetworkParams,
-        workers: Arc<dyn ThreadPool>,
         block_processor_queue: Arc<BlockProcessorQueue>,
         online_reps: Arc<Mutex<OnlineReps>>,
-        confirming_set: Arc<ConfirmingSet>,
-        _message_flooder: MessageFlooder,
-        current_network: Networks,
     ) -> Self {
-        let kdf = KeyDerivationFunction::new(Self::kdf_work_for(current_network));
-
         Self {
             mutex: Mutex::new(HashMap::new()),
             node_config: node_config.clone(),
             ledger: Arc::clone(&ledger),
             work_factory,
-            work_thresholds: work.clone(),
+            work_thresholds: work,
             network_params,
-            delayed_work: Mutex::new(HashMap::new()),
-            workers,
             block_processor_queue,
             wallet_reps: Arc::new(Mutex::new(WalletRepresentatives::new(
                 node_config.vote_minimum,
                 ledger.rep_weights.clone(),
             ))),
             online_reps,
-            kdf: kdf.clone(),
-            confirming_set,
-        }
-    }
-
-    fn kdf_work_for(network: Networks) -> u32 {
-        match network {
-            Networks::NanoDevNetwork => 8,
-            _ => 1024 * 64,
+            start_election_callback: Mutex::new(None),
         }
     }
 
@@ -135,10 +112,15 @@ impl Wallets {
             .unwrap_or(self.network_params.ledger.genesis_account.into())
     }
 
-    pub fn start(&self) {}
-    pub fn stop(&self) {}
+    pub fn set_start_election_callback(&self, callback: Box<dyn Fn(SavedBlock) + Send + Sync>) {
+        *self.start_election_callback.lock() = Some(callback);
+    }
 
-    pub fn set_start_election_callback(&self, _callback: Box<dyn Fn(SavedBlock) + Send + Sync>) {}
+    fn notify_election(&self, block: SavedBlock) {
+        if let Some(cb) = self.start_election_callback.lock().as_ref() {
+            cb(block);
+        }
+    }
 
     pub fn initialize(&mut self) -> anyhow::Result<()> {
         let persisted = self.ledger.store.wallet.load_all();
@@ -583,12 +565,8 @@ impl Wallets {
             WorkThresholds::publish_dev().clone(),
             Arc::new(WorkFactory::new_null()),
             NetworkParams::new(rsnano_core::Networks::NanoDevNetwork),
-            Arc::new(ThreadPoolImpl::create(1, "null")),
             Arc::new(BlockProcessorQueue::new_null()),
             Arc::new(Mutex::new(OnlineReps::new_test_instance())),
-            Arc::new(ConfirmingSet::new_null()),
-            MessageFlooder::new_null(),
-            rsnano_core::Networks::NanoDevNetwork,
         )
     }
 }
@@ -637,6 +615,14 @@ pub trait WalletsExt {
         representative: PublicKey,
         amount: Amount,
         account: Account,
+        work: WorkNonce,
+        generate_work: bool,
+    ) -> Result<SavedBlock, WalletsError>;
+    fn change_sync(
+        &self,
+        wallet_id: WalletId,
+        source: Account,
+        representative: PublicKey,
         work: WorkNonce,
         generate_work: bool,
     ) -> Result<SavedBlock, WalletsError>;
@@ -755,15 +741,57 @@ impl WalletsExt for Wallets {
     }
 
     fn search_receivable_wallet(&self, wallet_id: WalletId) -> Result<(), WalletsError> {
-        let guard = self.mutex.lock();
-        let wallet = Self::get_wallet(&guard, &wallet_id)?;
-        if !wallet.valid_password() {
-            return Err(WalletsError::WalletLocked);
+        let (accounts, rep) = {
+            let guard = self.mutex.lock();
+            let wallet = Self::get_wallet(&guard, &wallet_id)?;
+            if !wallet.valid_password() {
+                return Err(WalletsError::WalletLocked);
+            }
+            let keys: Vec<Account> = wallet
+                .encrypted_keys
+                .lock()
+                .keys()
+                .map(|pk| (*pk).into())
+                .collect();
+            let rep = *wallet.representative.lock();
+            (keys, rep)
+        };
+
+        let receive_minimum = self.node_config.receive_minimum;
+        let mut to_receive = Vec::new();
+        {
+            let any = self.ledger.any();
+            for account in accounts {
+                for (key, info) in any.account_receivable_upper_bound(account, BlockHash::zero()) {
+                    if info.amount >= receive_minimum
+                        && any.confirmed().block_exists_or_pruned(&key.send_block_hash)
+                    {
+                        to_receive.push((account, key.send_block_hash, info.amount));
+                    }
+                }
+            }
+        }
+
+        for (account, send_hash, amount) in to_receive {
+            let _ = self.receive_sync(
+                wallet_id,
+                send_hash,
+                rep,
+                amount,
+                account,
+                WorkNonce::from(0),
+                true,
+            );
         }
         Ok(())
     }
 
-    fn search_receivable_all(&self) {}
+    fn search_receivable_all(&self) {
+        self.reload();
+        for wallet_id in self.wallet_ids() {
+            let _ = self.search_receivable_wallet(wallet_id);
+        }
+    }
 
     fn send_sync(
         &self,
@@ -771,8 +799,8 @@ impl WalletsExt for Wallets {
         source: Account,
         destination: Account,
         amount: Amount,
-        work: WorkNonce,
-        _generate_work: bool,
+        mut work: WorkNonce,
+        generate_work: bool,
         _id: Option<String>,
     ) -> BlockHash {
         let guard = self.mutex.lock();
@@ -794,6 +822,18 @@ impl WalletsExt for Wallets {
             return BlockHash::zero();
         };
 
+        if work.is_zero() && generate_work {
+            let details = BlockDetails::new(info.epoch, true, false, false);
+            let difficulty = self.work_thresholds.threshold(&details);
+            let Some(generated) = self
+                .work_factory
+                .generate_work(WorkRequest::new(info.head.into(), difficulty))
+            else {
+                return BlockHash::zero();
+            };
+            work = generated;
+        }
+
         match wallet.create_block(
             &source.into(),
             info.head,
@@ -808,7 +848,12 @@ impl WalletsExt for Wallets {
                     .block_processor_queue
                     .push_blocking(arc_block, BlockSource::Local)
                 {
-                    Ok(Ok(saved)) => saved.hash(),
+                    Ok(Ok(saved)) => {
+                        let hash = saved.hash();
+                        drop(guard);
+                        self.notify_election(saved);
+                        hash
+                    }
                     _ => BlockHash::zero(),
                 }
             }
@@ -823,8 +868,8 @@ impl WalletsExt for Wallets {
         representative: PublicKey,
         _amount: Amount,
         account: Account,
-        work: WorkNonce,
-        _generate_work: bool,
+        mut work: WorkNonce,
+        generate_work: bool,
     ) -> Result<SavedBlock, WalletsError> {
         let guard = self.mutex.lock();
         let wallet = guard.get(&wallet_id).ok_or(WalletsError::WalletNotFound)?;
@@ -842,16 +887,38 @@ impl WalletsExt for Wallets {
             .get_pending(&PendingKey::new(account, send_hash))
             .ok_or(WalletsError::Generic)?;
 
-        let (previous, balance, current_representative) =
-            if let Some(info) = any.get_account(&account) {
-                (
-                    info.head,
-                    info.balance + pending.amount,
-                    info.representative,
-                )
-            } else {
-                (BlockHash::zero(), pending.amount, representative)
-            };
+        let (previous, balance, current_representative, root, epoch): (
+            BlockHash,
+            Amount,
+            PublicKey,
+            Root,
+            Epoch,
+        ) = if let Some(info) = any.get_account(&account) {
+            (
+                info.head,
+                info.balance + pending.amount,
+                info.representative,
+                info.head.into(),
+                core::cmp::max(info.epoch, pending.epoch),
+            )
+        } else {
+            (
+                BlockHash::zero(),
+                pending.amount,
+                representative,
+                account.into(),
+                pending.epoch,
+            )
+        };
+
+        if work.is_zero() && generate_work {
+            let details = BlockDetails::new(epoch, false, true, false);
+            let difficulty = self.work_thresholds.threshold(&details);
+            work = self
+                .work_factory
+                .generate_work(WorkRequest::new(root, difficulty))
+                .ok_or(WalletsError::Generic)?;
+        }
 
         let block = wallet
             .create_block(
@@ -866,10 +933,68 @@ impl WalletsExt for Wallets {
 
         let arc_block = Arc::new(block);
 
-        self.block_processor_queue
+        let saved = self
+            .block_processor_queue
             .push_blocking(arc_block, BlockSource::Local)
             .map_err(|_| WalletsError::Generic)?
-            .map_err(|_| WalletsError::Generic)
+            .map_err(|_| WalletsError::Generic)?;
+        drop(guard);
+        self.notify_election(saved.clone());
+        Ok(saved)
+    }
+
+    fn change_sync(
+        &self,
+        wallet_id: WalletId,
+        source: Account,
+        representative: PublicKey,
+        mut work: WorkNonce,
+        generate_work: bool,
+    ) -> Result<SavedBlock, WalletsError> {
+        let guard = self.mutex.lock();
+        let wallet = guard.get(&wallet_id).ok_or(WalletsError::WalletNotFound)?;
+
+        if !wallet.valid_password() {
+            return Err(WalletsError::WalletLocked);
+        }
+
+        if !wallet.exists(&source.into()) {
+            return Err(WalletsError::AccountNotFound);
+        }
+
+        let any = self.ledger.any();
+        let info = any.get_account(&source).ok_or(WalletsError::Generic)?;
+
+        if work.is_zero() && generate_work {
+            let details = BlockDetails::new(info.epoch, false, false, false);
+            let difficulty = self.work_thresholds.threshold(&details);
+            work = self
+                .work_factory
+                .generate_work(WorkRequest::new(info.head.into(), difficulty))
+                .ok_or(WalletsError::Generic)?;
+        }
+
+        let block = wallet
+            .create_block(
+                &source.into(),
+                info.head,
+                representative,
+                info.balance,
+                rsnano_core::Link::zero(),
+                work,
+            )
+            .map_err(|_| WalletsError::Generic)?;
+
+        let arc_block = Arc::new(block);
+
+        let saved = self
+            .block_processor_queue
+            .push_blocking(arc_block, BlockSource::Local)
+            .map_err(|_| WalletsError::Generic)?
+            .map_err(|_| WalletsError::Generic)?;
+        drop(guard);
+        self.notify_election(saved.clone());
+        Ok(saved)
     }
 
     fn get_representative(&self, wallet_id: WalletId) -> Result<PublicKey, WalletsError> {
@@ -882,19 +1007,35 @@ impl WalletsExt for Wallets {
         &self,
         wallet_id: WalletId,
         rep: PublicKey,
-        _update_existing_accounts: bool,
+        update_existing_accounts: bool,
     ) -> Result<(), WalletsError> {
-        let guard = self.mutex.lock();
-        let wallet = Self::get_wallet(&guard, &wallet_id)?;
-        if !wallet.valid_password() {
-            return Err(WalletsError::WalletLocked);
+        let accounts = {
+            let guard = self.mutex.lock();
+            let wallet = Self::get_wallet(&guard, &wallet_id)?;
+            if !wallet.valid_password() {
+                return Err(WalletsError::WalletLocked);
+            }
+            *wallet.representative.lock() = rep;
+            wallet.refresh_meta_encryption();
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_meta(&wallet_id, &wallet.to_persisted_meta());
+            if update_existing_accounts {
+                wallet
+                    .encrypted_keys
+                    .lock()
+                    .keys()
+                    .map(|pk| (*pk).into())
+                    .collect::<Vec<Account>>()
+            } else {
+                Vec::new()
+            }
+        };
+
+        for account in accounts {
+            let _ = self.change_sync(wallet_id, account, rep, WorkNonce::from(0), true);
         }
-        *wallet.representative.lock() = rep;
-        wallet.refresh_meta_encryption();
-        self.ledger
-            .store
-            .wallet
-            .put_wallet_meta(&wallet_id, &wallet.to_persisted_meta());
         Ok(())
     }
 }

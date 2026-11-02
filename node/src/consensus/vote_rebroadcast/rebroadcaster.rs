@@ -1,6 +1,6 @@
-use alloc::sync::Arc;
-use alloc::boxed::Box;
-use crate::utils::{JoinHandle};
+use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
 
 use super::{
     history::RebroadcastHistoryConfig,
@@ -12,15 +12,12 @@ use rsnano_ledger::RepWeightCache;
 use rsnano_nullable_clock::SteadyClock;
 
 /// Rebroadcasts votes that were created by other nodes
-pub(crate) struct VoteRebroadcaster {
+pub struct VoteRebroadcaster {
     queue: Arc<VoteRebroadcastQueue>,
-    join_handle: Option<JoinHandle<()>>,
-    message_flooder: Option<MessageFlooder>,
-    rep_weights: Arc<RepWeightCache>,
-    clock: Arc<SteadyClock>,
+    processor: Mutex<RebroadcastProcessor>,
+    started: AtomicBool,
     vote_processed_callback: Option<Box<dyn Fn() + Send + Sync>>,
-    pub stats: Arc<RebroadcastStats>,
-    history_config: RebroadcastHistoryConfig,
+    pub(crate) stats: Arc<RebroadcastStats>,
 }
 
 impl VoteRebroadcaster {
@@ -31,60 +28,47 @@ impl VoteRebroadcaster {
         clock: Arc<SteadyClock>,
         history_config: RebroadcastHistoryConfig,
     ) -> Self {
-        Self {
-            queue,
-            join_handle: None,
-            message_flooder: Some(message_flooder),
+        let stats = Arc::new(RebroadcastStats::default());
+        let processor = RebroadcastProcessor::new(
+            message_flooder,
             rep_weights,
             clock,
-            vote_processed_callback: None,
-            stats: Arc::new(RebroadcastStats::default()),
+            stats.clone(),
             history_config,
-        }
-    }
-
-    /// TODO: Wire this to a secondary Hart or a background task scheduler
-    /// when multicore support is fully enabled for the Orange Pi RV2.
-    pub fn start(&mut self) {
-        let _queue = self.queue.clone();
-        let _rebroadcast_processor = RebroadcastProcessor::new(
-            self.message_flooder.take().unwrap(),
-            self.rep_weights.clone(),
-            self.clock.clone(),
-            self.stats.clone(),
-            self.history_config.clone(),
         );
-        let _callback = self.vote_processed_callback.take();
-
-        // let handle = std::/* /* /* thread::Builder::new()
-        //     .name("Vote rebroad".to_owned())
-        //     .spawn(move || {
-        //         while let Some((tier, vote)) = queue.dequeue_blocking() {
-        //             let mut success = false;
-        //             while !success && !queue.stopped() {
-        //                 success = rebroadcast_processor.rebroadcast(tier, &vote);
-        //                 if !success {
-        //                     // Wait for more capacity
-        //                     // std::thread::sleep(Duration::from_millis(100));
-        //                 }
-        //             }
-        //             if let Some(cb) = &callback {
-        //                 cb();
-        //             }
-        //         }
-        //     })
-        //     .unwrap(); */ */ */
-        // self.join_handle = Some(handle);
-    }
-
-    pub fn stop(&mut self) {
-        self.queue.stop();
-        if let Some(_handle) = self.join_handle.take() {
-            // handle.join().unwrap();
+        Self {
+            queue,
+            processor: Mutex::new(processor),
+            started: AtomicBool::new(false),
+            vote_processed_callback: None,
+            stats,
         }
     }
 
-    #[allow(dead_code)]
+    pub fn start(&self) {
+        self.started.store(true, Ordering::SeqCst);
+    }
+
+    pub fn stop(&self) {
+        self.started.store(false, Ordering::SeqCst);
+        self.queue.stop();
+    }
+
+    pub fn run_once(&self) -> bool {
+        if !self.started.load(Ordering::Relaxed) || self.queue.stopped() {
+            return false;
+        }
+        let Some((tier, vote)) = self.queue.try_dequeue() else {
+            return false;
+        };
+        let _ = self.processor.lock().rebroadcast(tier, &vote);
+        if let Some(cb) = &self.vote_processed_callback {
+            cb();
+        }
+        true
+    }
+
+    #[cfg(test)]
     pub fn on_vote_processed(&mut self, callback: impl Fn() + Send + Sync + 'static) {
         self.vote_processed_callback = Some(Box::new(callback));
     }
@@ -108,7 +92,7 @@ mod tests {
 
     #[test]
     fn rebroadcast() {
-        let (mut rebroadcaster, queue, flood_tracker) = create_fixture();
+        let (mut rebroadcaster, queue, flood_tracker, _rep_weights) = create_fixture();
 
         let done = OneShotNotification::new();
         let done2 = done.clone();
@@ -121,17 +105,19 @@ mod tests {
         queue.update_rep_tiers(rep_tiers);
         queue.enqueue(vote);
 
-        // done.wait();
+        assert!(rebroadcaster.run_once());
+        done.wait();
 
-        assert_eq!(flood_tracker.output().len(), 0); // Changed to 0 since we don't start the thread
+        assert_eq!(flood_tracker.output().len(), 1);
     }
 
     fn create_fixture() -> (
         VoteRebroadcaster,
         Arc<VoteRebroadcastQueue>,
         Arc<OutputTrackerMt<FloodEvent>>,
+        Arc<RepWeightCache>,
     ) {
-        let queue = Arc::new(VoteRebroadcastQueue::default());
+        let queue = Arc::new(VoteRebroadcastQueue::build().finish());
         let message_flooder = MessageFlooder::new_null();
         let flood_tracker = message_flooder.track_floods();
         let rep_weights = Arc::new(RepWeightCache::new());
@@ -139,11 +125,10 @@ mod tests {
         let rebroadcaster = VoteRebroadcaster::new(
             queue.clone(),
             message_flooder,
-            rep_weights,
+            rep_weights.clone(),
             clock,
             Default::default(),
         );
-
-        (rebroadcaster, queue, flood_tracker)
+        (rebroadcaster, queue, flood_tracker, rep_weights)
     }
 }

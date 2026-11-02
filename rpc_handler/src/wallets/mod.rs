@@ -33,6 +33,47 @@ mod wallet_work_get;
 mod work_get;
 mod work_set;
 
+use crate::RpcCommandHandler;
+use anyhow::bail;
+use rsnano_core::{BlockDetails, WorkNonce};
+use rsnano_node::wallets::WalletsExt;
+use rsnano_rpc_messages::{AccountRepresentativeSetArgs, BlockDto};
+
+impl RpcCommandHandler {
+    pub(crate) fn account_representative_set(
+        &self,
+        args: AccountRepresentativeSetArgs,
+    ) -> anyhow::Result<BlockDto> {
+        let work: WorkNonce = args.work.unwrap_or_default();
+        if work.is_zero() && !self.node.work_factory.work_generation_enabled() {
+            bail!("Work generation is disabled");
+        }
+        let any = self.node.ledger.any();
+        let info = self.load_account(&any, &args.account)?;
+        if !work.is_zero() {
+            let details = BlockDetails::new(info.epoch, false, false, false);
+            if self
+                .node
+                .network_params
+                .work
+                .difficulty(&info.head.into(), work)
+                < self.node.network_params.work.threshold(&details)
+            {
+                bail!("Invalid work");
+            }
+        }
+        let generate_work = work.is_zero();
+        let saved = self.node.wallets.change_sync(
+            args.wallet,
+            args.account,
+            args.representative.into(),
+            work,
+            generate_work,
+        )?;
+        Ok(BlockDto::new(saved.hash()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{test_rpc_command, test_rpc_command_requires_control, test_rpc_command_with_node};

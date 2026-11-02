@@ -19,6 +19,7 @@ pub struct PeerCacheUpdater {
     time_factory: SystemTimeFactory,
     stats: Arc<Stats>,
     erase_cutoff: Duration,
+    last_update_secs: core::sync::atomic::AtomicU64,
 }
 
 impl PeerCacheUpdater {
@@ -35,6 +36,7 @@ impl PeerCacheUpdater {
             time_factory,
             stats,
             erase_cutoff,
+            last_update_secs: core::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -87,12 +89,37 @@ impl PeerCacheUpdater {
             })
             .collect()
     }
+    pub fn update(&self) {
+        let now_secs = self
+            .time_factory
+            .now()
+            .duration_since(rsnano_nullable_clock::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now_secs < self.erase_cutoff.as_secs() {
+            return;
+        }
+        let last = self
+            .last_update_secs
+            .load(core::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            self.last_update_secs
+                .store(now_secs, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        if now_secs.saturating_sub(last) < 60 {
+            return;
+        }
+        self.last_update_secs
+            .store(now_secs, core::sync::atomic::Ordering::Relaxed);
+        self.stats.inc(StatType::PeerHistory, DetailType::Loop);
+        self.save_peers();
+        self.delete_old_peers();
+    }
 }
 
 impl Tickable for PeerCacheUpdater {
     fn tick(&mut self, _cancel_token: &CancellationToken) {
-        self.stats.inc(StatType::PeerHistory, DetailType::Loop);
-        self.save_peers();
-        self.delete_old_peers();
+        self.update();
     }
 }

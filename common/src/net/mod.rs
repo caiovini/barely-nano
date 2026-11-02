@@ -369,8 +369,12 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let hardware_addr = HardwareAddress::Ethernet(EthernetAddress(mac_bytes));
         let mut config = Config::new(hardware_addr);
         
-        // Better randomness for ISNs
-        let mut seed = mtime;
+        // Better randomness for ISNs mixed with hardware eFuse key
+        let hw_key = crate::storage::wallet_crypto::hardware_wallet_key();
+        let mut seed = mtime ^ u64::from_le_bytes([
+            hw_key[0], hw_key[1], hw_key[2], hw_key[3],
+            hw_key[4], hw_key[5], hw_key[6], hw_key[7],
+        ]);
         for _ in 0..16 {
             seed = seed.wrapping_mul(0x6364136229384751).wrapping_add(1);
         }

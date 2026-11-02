@@ -1,29 +1,27 @@
-use crate::utils::{Condvar, JoinHandle};
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use crate::utils::Condvar;
+use alloc::{sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 
 use rsnano_ledger::Ledger;
-use rsnano_network::Network;
 use rsnano_network::token_bucket::TokenBucket;
+use rsnano_network::Network;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{Stats, StatsCollection, StatsSource};
 
 use super::{
-    bootstrap_promise_runner::BootstrapPromiseRunner, channel_waiter::ChannelWaiter,
-    dependency_requester::DependencyRequester, frontier_requester::FrontierRequester,
-    priority::PriorityRequester, query_sender::QuerySender,
-    send_queries_promise::SendQueriesPromise,
+    channel_waiter::ChannelWaiter, dependency_requester::DependencyRequester,
+    frontier_requester::FrontierRequester, priority::PriorityRequester,
+    query_sender::QuerySender, send_queries_promise::SendQueriesPromise,
 };
 use crate::{
     block_processing::BlockProcessorQueue,
     bootstrap::{
-        AscPullQuerySpec, BootstrapConfig, BootstrapPromise, PollResult, state::BootstrapState,
+        state::BootstrapState, AscPullQuerySpec, BootstrapConfig, BootstrapPromise, PollResult,
     },
     transport::MessageSender,
 };
 
-/// Manages the threads that send out AscPullReqs
+/// Manages the async tasks that send out AscPullReqs
 pub(crate) struct Requesters {
     limiter: Arc<Mutex<TokenBucket>>,
     config: BootstrapConfig,
@@ -32,7 +30,6 @@ pub(crate) struct Requesters {
     state: Arc<Mutex<BootstrapState>>,
     state_changed: Arc<Condvar>,
     clock: Arc<SteadyClock>,
-    threads: Mutex<Option<RequesterThreads>>,
     ledger: Arc<Ledger>,
     block_processor_queue: Arc<BlockProcessorQueue>,
     pub(crate) network: Arc<RwLock<Network>>,
@@ -63,7 +60,6 @@ impl Requesters {
             ledger,
             block_processor_queue,
             network,
-            threads: Mutex::new(None),
             stats_sources: Mutex::new(Vec::new()),
         }
     }
@@ -74,15 +70,8 @@ impl Requesters {
         let channel_waiter =
             ChannelWaiter::new(self.network.clone(), limiter.clone(), max_requests);
 
-        let runner = Arc::new(BootstrapPromiseRunner {
-            state: self.state.clone(),
-            throttle_wait: self.config.throttle_wait,
-            state_changed: self.state_changed.clone(),
-            clock: self.clock.clone(),
-        });
-
-        let frontiers = if self.config.enable_frontier_scan {
-            Some(self.spawn_query(
+        if self.config.enable_frontier_scan {
+            self.spawn_query(
                 "Bootstrap front",
                 FrontierRequester::new(
                     self.stats.clone(),
@@ -90,13 +79,10 @@ impl Requesters {
                     self.config.frontier_rate_limit,
                     channel_waiter.clone(),
                 ),
-                runner.clone(),
-            ))
-        } else {
-            None
-        };
+            );
+        }
 
-        let priorities = if self.config.enable_priorities {
+        if self.config.enable_priorities {
             let mut requester = PriorityRequester::new(
                 self.block_processor_queue.clone(),
                 channel_waiter.clone(),
@@ -107,72 +93,47 @@ impl Requesters {
             requester.block_processor_threshold = self.config.block_processor_theshold;
             self.stats_sources.lock().push(requester.stats());
 
-            Some(self.spawn_priorities("Bootstrap", requester, runner.clone()))
-        } else {
-            None
-        };
+            self.spawn_priorities("Bootstrap", requester);
+        }
 
-        let dependencies = if self.config.enable_dependency_walker {
-            Some(self.spawn_query(
+        if self.config.enable_dependency_walker {
+            self.spawn_query(
                 "Bootstrap walker",
                 DependencyRequester::new(self.stats.clone(), channel_waiter),
-                runner.clone(),
-            ))
-        } else {
-            None
-        };
-
-        let requesters = RequesterThreads {
-            priorities,
-            frontiers,
-            dependencies,
-        };
-
-        *self.threads.lock() = Some(requesters);
+            );
+        }
     }
 
     pub fn stop(&self) {
-        {
-            let mut state = self.state.lock();
-            state.stopped = true;
-        }
+        self.state.lock().stopped = true;
         self.state_changed.notify_all();
-
-        let threads = self.threads.lock().take();
-        if let Some(mut threads) = threads {
-            threads.join();
-        }
     }
 
-    fn spawn_priorities(
-        &self,
-        name: &'static str,
-        mut requester: PriorityRequester,
-        runner: Arc<BootstrapPromiseRunner>,
-    ) -> JoinHandle<()> {
+    fn spawn_priorities(&self, name: &'static str, mut requester: PriorityRequester) {
         tracing::info!("Spawning bootstrap requester: {}", name);
         let message_sender = self.message_sender.clone();
         let clock = self.clock.clone();
         let stats = self.stats.clone();
+        let state_arc = self.state.clone();
         let request_timeout = self.config.request_timeout;
         kernel_common::async_rt::spawn_named(
             async move {
-                let mut query_sender = QuerySender::new(message_sender, clock, stats);
+                let mut query_sender = QuerySender::new(message_sender, clock.clone(), stats);
                 query_sender.set_request_timeout(request_timeout);
 
                 loop {
-                    if runner.state.lock().stopped {
+                    if state_arc.lock().stopped {
                         break;
                     }
 
                     let mut sent_any = false;
                     for _ in 0..64 {
-                        let now = runner.clock.now();
-                        let result = requester.poll_step(&runner.state, now);
+                        let now = clock.now();
+                        let result = requester.poll_step(&state_arc, now);
 
                         match result {
                             PollResult::Finished(spec) => {
-                                let mut state = runner.state.lock();
+                                let mut state = state_arc.lock();
                                 query_sender.send(spec, &mut state);
                                 sent_any = true;
                             }
@@ -192,15 +153,9 @@ impl Requesters {
             },
             Some(name),
         );
-        JoinHandle::new()
     }
 
-    fn spawn_query<T>(
-        &self,
-        name: &'static str,
-        query_factory: T,
-        runner: Arc<BootstrapPromiseRunner>,
-    ) -> JoinHandle<()>
+    fn spawn_query<T>(&self, name: &'static str, query_factory: T)
     where
         T: BootstrapPromise<AscPullQuerySpec> + Send + 'static,
     {
@@ -208,26 +163,24 @@ impl Requesters {
         let message_sender = self.message_sender.clone();
         let clock = self.clock.clone();
         let stats = self.stats.clone();
+        let state_arc = self.state.clone();
         let request_timeout = self.config.request_timeout;
         kernel_common::async_rt::spawn_named(
             async move {
-                let mut query_sender = QuerySender::new(message_sender, clock, stats);
+                let mut query_sender = QuerySender::new(message_sender, clock.clone(), stats);
                 query_sender.set_request_timeout(request_timeout);
-                let mut promise = SendQueriesPromise::new(
-                    query_factory,
-                    query_sender,
-                );
+                let mut promise = SendQueriesPromise::new(query_factory, query_sender);
 
                 loop {
-                    if runner.state.lock().stopped {
+                    if state_arc.lock().stopped {
                         break;
                     }
 
                     let mut sent_any = false;
                     for _ in 0..32 {
-                        let now = runner.clock.now();
+                        let now = clock.now();
                         let result = {
-                            let mut state = runner.state.lock();
+                            let mut state = state_arc.lock();
                             promise.poll(&mut state, now)
                         };
 
@@ -249,27 +202,6 @@ impl Requesters {
             },
             Some(name),
         );
-        JoinHandle::new()
-    }
-}
-
-pub struct RequesterThreads {
-    pub priorities: Option<JoinHandle<()>>,
-    pub dependencies: Option<JoinHandle<()>>,
-    pub frontiers: Option<JoinHandle<()>>,
-}
-
-impl RequesterThreads {
-    pub fn join(&mut self) {
-        if let Some(_handle) = self.priorities.take() {
-            // handle.join().unwrap();
-        }
-        if let Some(_dependencies) = self.dependencies.take() {
-            // dependencies.join().unwrap();
-        }
-        if let Some(_frontiers) = self.frontiers.take() {
-            // frontiers.join().unwrap();
-        }
     }
 }
 

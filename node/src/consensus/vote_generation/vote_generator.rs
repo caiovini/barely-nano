@@ -222,37 +222,6 @@ struct SharedState {
 }
 
 impl SharedState {
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut queues = self.queues.lock();
-        while !self.stopped.load(Ordering::SeqCst) {
-            queues = self
-                .condition
-                .wait_timeout_while(queues, self.vote_generator_delay, |i| {
-                    !self.stopped.load(Ordering::SeqCst)
-                        && i.requests.is_empty()
-                        && !i.should_broadcast(self.clock.now())
-                })
-                .unwrap()
-                .0;
-
-            if self.stopped.load(Ordering::SeqCst) {
-                return;
-            }
-
-            if queues.should_broadcast(self.clock.now()) {
-                queues = self.broadcast(queues);
-                queues.next_broadcast = self.clock.now() + self.vote_generator_delay;
-            }
-
-            if let Some(request) = queues.requests.pop_front() {
-                drop(queues);
-                self.reply(request);
-                queues = self.queues.lock();
-            }
-        }
-    }
-
     fn run_once(&self) -> bool {
         if self.stopped.load(Ordering::SeqCst) {
             return false;
@@ -273,7 +242,6 @@ impl SharedState {
         worked
     }
 
-    #[allow(dead_code)]
     fn broadcast<'a>(&'a self, mut queues: MutexGuard<'a, Queues>) -> MutexGuard<'a, Queues> {
         let mut hashes = Vec::with_capacity(VoteGenerator::MAX_HASHES);
         let mut roots = Vec::with_capacity(VoteGenerator::MAX_HASHES);
@@ -318,7 +286,6 @@ impl SharedState {
         queues
     }
 
-    #[allow(dead_code)]
     fn vote<F>(&self, hashes: &Vec<BlockHash>, roots: &Vec<Root>, action: F)
     where
         F: Fn(Arc<Vote>),
@@ -357,7 +324,6 @@ impl SharedState {
         }
     }
 
-    #[allow(dead_code)]
     fn reply(&self, request: VoteGeneratorRequest) {
         let mut i = request.candidates.iter().peekable();
         while i.peek().is_some() && !self.stopped.load(Ordering::SeqCst) {

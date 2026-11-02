@@ -77,9 +77,10 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
                 FrontierState::WaitAckProcessor => {
                     #[cfg(not(test))]
                     let should_pause_for_dependencies =
-                        boot_state.candidate_accounts.priority_half_full()
-                            || (boot_state.candidate_accounts.blocked_len() >= 16384
-                                && boot_state.candidate_accounts.blocking_unknown_len() >= 2048);
+                        boot_state.candidate_accounts.priority_len() >= 1024
+                            || (boot_state.candidate_accounts.blocked_len() >= 8192
+                                && (boot_state.candidate_accounts.priority_len() >= 64
+                                    || boot_state.candidate_accounts.blocking_unknown_len() > 0));
                     #[cfg(test)]
                     let should_pause_for_dependencies = false;
 

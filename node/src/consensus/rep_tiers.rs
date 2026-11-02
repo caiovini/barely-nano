@@ -1,11 +1,9 @@
-use crate::utils::JoinHandle;
 use core::ops::Deref;
 use hashbrown::HashSet;
 use alloc::sync::Arc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use spin::{ Mutex };
-// // // // // // // use std::{    collections::HashSet, mem::size_of, ops::Deref, thread::JoinHandle    }; // TODO: fix this
+use spin::Mutex;
 
 use strum_macros::{EnumCount, EnumIter};
 use tracing::debug;
@@ -126,7 +124,6 @@ where
 }
 
 pub struct RepTiersCalculator {
-    thread: Mutex<Option<JoinHandle<()>>>,
     rep_weights: Arc<RepWeightCache>,
     online_reps: Arc<Mutex<OnlineReps>>,
     stats: Arc<Stats>,
@@ -140,7 +137,6 @@ impl RepTiersCalculator {
         stats: Arc<Stats>,
     ) -> Self {
         Self {
-            thread: Mutex::new(None),
             rep_weights,
             online_reps,
             stats,
@@ -152,7 +148,7 @@ impl RepTiersCalculator {
         self.consumers.push(Box::new(consumer));
     }
 
-    fn calculate_tiers(&mut self) {
+    pub fn calculate_tiers(&self) {
         self.stats.inc(StatType::RepTiers, DetailType::Loop);
         let trended = self.online_reps.lock().trended_or_minimum_weight();
         let mut new_tier1 = HashSet::new();
@@ -214,13 +210,6 @@ impl RepTiersCalculator {
         }
 
         self.stats.inc(StatType::RepTiers, DetailType::Updated);
-    }
-}
-
-impl Drop for RepTiersCalculator {
-    fn drop(&mut self) {
-        // Thread must be stopped before destruction
-        debug_assert!(self.thread.lock().is_none());
     }
 }
 

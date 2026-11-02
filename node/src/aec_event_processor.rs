@@ -135,7 +135,7 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
             }
             AecEvent::VoteProcessed(vote, voter_weight, results) => {
                 // Cache the votes that didn't match any election
-                if vote.source != VoteSource::Cache {
+                if vote.source != VoteSource::Cache && !results.is_empty() {
                     self.vote_cache
                         .lock()
                         .insert(&vote.vote, voter_weight, &results);
@@ -164,11 +164,6 @@ impl BackpressureEventProcessor<AecEvent> for AecEventProcessor {
 }
 
 impl AecEventProcessor {
-    #[allow(dead_code)]
-    pub fn add(&mut self, handler: impl AecEventHandler + Send + 'static) {
-        self.plugins.push(Box::new(handler));
-    }
-
     fn clear_network_filter(&mut self, block: &Block) {
         let mut buf = MemoryStream::new();
         block.serialize_without_block_type(&mut buf);

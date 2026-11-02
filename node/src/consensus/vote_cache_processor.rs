@@ -1,8 +1,6 @@
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use spin::{ Mutex, MutexGuard };
-use hashbrown::{ HashSet };
-use crate::utils::{Condvar, JoinHandle};
+use alloc::{collections::VecDeque, sync::Arc};
+use hashbrown::HashSet;
+use spin::Mutex;
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
@@ -15,7 +13,6 @@ use super::{VoteCache, VoteProcessorConfig, VoteProcessorQueue};
 pub struct VoteCacheProcessor {
     state: Arc<Mutex<State>>,
     pending_count: core::sync::atomic::AtomicUsize,
-    condition: Arc<Condvar>,
     stats: Arc<Stats>,
     vote_cache: Arc<Mutex<VoteCache>>,
     vote_queue: Arc<VoteProcessorQueue>,
@@ -31,23 +28,19 @@ impl VoteCacheProcessor {
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
-                thread: None,
                 stopped: false,
                 triggered: VecDeque::new(),
             })),
             pending_count: core::sync::atomic::AtomicUsize::new(0),
-            condition: Arc::new(Condvar::new()),
             stats,
             vote_queue,
             vote_cache,
             config,
         }
     }
-}
 
-impl VoteCacheProcessor {
     pub fn start(&self) {
-        // ...
+        self.state.lock().stopped = false;
     }
 
     #[inline]
@@ -64,17 +57,18 @@ impl VoteCacheProcessor {
                 return false;
             };
             if state.stopped || state.triggered.is_empty() {
-                self.pending_count.store(0, core::sync::atomic::Ordering::Relaxed);
+                self.pending_count
+                    .store(0, core::sync::atomic::Ordering::Relaxed);
                 return false;
             }
             let mut triggered = VecDeque::new();
             core::mem::swap(&mut triggered, &mut state.triggered);
-            self.pending_count.store(0, core::sync::atomic::Ordering::Relaxed);
+            self.pending_count
+                .store(0, core::sync::atomic::Ordering::Relaxed);
             triggered
         };
 
-        //deduplicate
-        let hashes: HashSet<rsnano_core::BlockHash> = triggered.into_iter().collect();
+        let hashes: HashSet<BlockHash> = triggered.into_iter().collect();
 
         self.stats.add(
             StatType::VoteCacheProcessor,
@@ -93,17 +87,7 @@ impl VoteCacheProcessor {
     }
 
     pub fn stop(&self) {
-        {
-            let mut state = self.state.lock();
-            state.stopped = true;
-            state.thread.take();
-        }
-
-        self.condition.notify_all();
-
-        // if let Some(handle) = thread {
-        //     handle.join().unwrap(); */ */ */
-        // }
+        self.state.lock().stopped = true;
     }
 
     pub fn trigger(&self, hash: BlockHash) {
@@ -115,21 +99,15 @@ impl VoteCacheProcessor {
                     .inc(StatType::VoteCacheProcessor, DetailType::Overfill);
             }
             state.triggered.push_back(hash);
-            self.pending_count.store(state.triggered.len(), core::sync::atomic::Ordering::Release);
+            self.pending_count
+                .store(state.triggered.len(), core::sync::atomic::Ordering::Release);
         }
-        self.condition.notify_all();
         self.stats
             .inc(StatType::VoteCacheProcessor, DetailType::Triggered);
     }
 
     pub fn len(&self) -> usize {
         self.state.lock().triggered.len()
-    }
-}
-
-impl Drop for VoteCacheProcessor {
-    fn drop(&mut self) {
-        // debug_assert!(self.state.lock().thread.is_none())
     }
 }
 
@@ -140,58 +118,6 @@ impl ContainerInfoProvider for VoteCacheProcessor {
 }
 
 struct State {
-    thread: Option<JoinHandle<()>>,
     stopped: bool,
     triggered: VecDeque<BlockHash>,
-}
-
-#[allow(dead_code)]
-struct VoteCacheLoop {
-    state: Arc<Mutex<State>>,
-    condition: Arc<Condvar>,
-    stats: Arc<Stats>,
-    vote_cache: Arc<Mutex<VoteCache>>,
-    vote_queue: Arc<VoteProcessorQueue>,
-}
-
-impl VoteCacheLoop {
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut guard = self.state.lock();
-        while !guard.stopped {
-            if !guard.triggered.is_empty() {
-                self.run_batch(guard);
-                guard = self.state.lock();
-            } else {
-                guard = self
-                    .condition
-                    .wait_while(guard, |i| !i.stopped && i.triggered.is_empty())
-                    .unwrap();
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn run_batch(&self, mut state: MutexGuard<'_, State>) {
-        let mut triggered = VecDeque::new();
-        core::mem::swap(&mut triggered, &mut state.triggered);
-        drop(state);
-
-        //deduplicate
-        let hashes: HashSet<BlockHash> = triggered.drain(..).collect();
-
-        self.stats.add(
-            StatType::VoteCacheProcessor,
-            DetailType::Processed,
-            hashes.len() as u64,
-        );
-
-        for hash in hashes {
-            let cached = self.vote_cache.lock().find(&hash);
-            for cached_vote in cached {
-                self.vote_queue
-                    .enqueue(cached_vote, None, VoteSource::Cache, Some(hash));
-            }
-        }
-    }
 }

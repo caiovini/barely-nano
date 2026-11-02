@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use spin::{ Mutex, RwLock };
-use crate::utils::{Condvar, JoinHandle};
+use crate::utils::Condvar;
 use core::time::Duration;
 
 use rsnano_messages::{Keepalive, Message, NetworkFilter};
@@ -14,9 +14,6 @@ use rsnano_network_protocol::{LatestKeepalives, SynCookies};
 use kernel_common::async_rt;
 
 pub(crate) struct NetworkThreads {
-    cleanup_thread: Option<JoinHandle<()>>,
-    keepalive_thread: Option<JoinHandle<()>>,
-    reachout_thread: Option<JoinHandle<()>>,
     stopped: Arc<(Condvar, Mutex<bool>)>,
     network: Arc<RwLock<Network>>,
     peer_connector: Arc<PeerConnector>,
@@ -50,9 +47,6 @@ impl NetworkThreads {
         clock: Arc<SteadyClock>,
     ) -> Self {
         Self {
-            cleanup_thread: None,
-            keepalive_thread: None,
-            reachout_thread: None,
             stopped: Arc::new((Condvar::new(), Mutex::new(false))),
             network,
             peer_connector,
@@ -118,26 +112,6 @@ impl NetworkThreads {
         *self.stopped.1.lock() = true;
         self.stopped.0.notify_all();
         self.network.write().stop();
-        let _t = self.keepalive_thread.take();
-        // if let Some(t) = t {
-        //     t.join().unwrap(); */ */ */ */
-        // }
-        let _t = self.cleanup_thread.take();
-        // if let Some(t) = t {
-        //     t.join().unwrap();
-        // }
-        let _t = self.reachout_thread.take();
-        // if let Some(t) = t {
-        //     t.join().unwrap();
-        // }
-    }
-}
-
-impl Drop for NetworkThreads {
-    fn drop(&mut self) {
-        // All threads must be stopped before this destructor
-        // debug_assert!(self.cleanup_thread.is_none());
-        // debug_assert!(self.keepalive_thread.is_none());
     }
 }
 

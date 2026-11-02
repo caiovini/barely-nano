@@ -8,7 +8,7 @@ use core::time::Duration;
 use rsnano_nullable_clock::Timestamp as Instant;
 use core::mem::size_of;
 use core::cmp::min;
-use crate::utils::{Condvar, JoinHandle};
+use crate::utils::Condvar;
 
 use rsnano_core::{utils::ContainerInfo, Amount, BlockHash};
 use rsnano_ledger::{AnySet, ConfirmedSet, Ledger};
@@ -56,7 +56,6 @@ impl Default for HintedSchedulerConfig {
 
 /// Monitors inactive vote cache and schedules elections with the highest observed vote tally.
 pub struct HintedScheduler {
-    thread: Mutex<Option<JoinHandle<()>>>,
     config: HintedSchedulerConfig,
     active_elections: Arc<RwLock<ActiveElectionsContainer>>,
     condition: Condvar,
@@ -67,7 +66,6 @@ pub struct HintedScheduler {
     online_reps: Arc<Mutex<OnlineReps>>,
     clock: Arc<SteadyClock>,
     stopped: AtomicBool,
-    stopped_mutex: Mutex<()>,
     cooldowns: Mutex<OrderedCooldowns>,
     pub max_elections: usize,
     notification_threshold: usize,
@@ -91,7 +89,6 @@ impl HintedScheduler {
             max_elections * config.vacancy_threshold_percent as usize / 100;
 
         Self {
-            thread: Mutex::new(None),
             config,
             condition: Condvar::new(),
             active_elections,
@@ -102,7 +99,6 @@ impl HintedScheduler {
             online_reps,
             clock,
             stopped: AtomicBool::new(false),
-            stopped_mutex: Mutex::new(()),
             cooldowns: Mutex::new(OrderedCooldowns::new()),
             max_elections,
             notification_threshold,
@@ -112,10 +108,6 @@ impl HintedScheduler {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.notify();
-        let _handle = self.thread.lock().take();
-        // if let Some(handle) = handle {
-        //     handle.join().unwrap();
-        // }
     }
 
     /// Notify about changes in AEC vacancy
@@ -263,28 +255,6 @@ impl HintedScheduler {
                 self.stats
                     .inc(StatType::Hinting, DetailType::ActivateImmediate);
                 self.activate(&any, entry.hash, false);
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut guard = self.stopped_mutex.lock();
-        while !self.stopped.load(Ordering::SeqCst) {
-            self.stats.inc(StatType::Hinting, DetailType::Loop);
-            guard = self
-                .condition
-                .wait_timeout_while(guard, self.config.check_interval, |_| {
-                    !self.stopped.load(Ordering::SeqCst)
-                })
-                .unwrap()
-                .0;
-            if !self.stopped.load(Ordering::SeqCst) {
-                drop(guard);
-                if self.predicate() {
-                    self.run_interactive()
-                }
-                guard = self.stopped_mutex.lock();
             }
         }
     }

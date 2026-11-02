@@ -3,14 +3,53 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use rand::{CryptoRng, RngCore, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use rand_chacha::ChaCha20Rng;
 use spin::Mutex;
 
-static GLOBAL_RNG: Mutex<Option<ChaCha8Rng>> = Mutex::new(None);
+static GLOBAL_RNG: Mutex<Option<ChaCha20Rng>> = Mutex::new(None);
+
+fn expand_seed_u64(seed: u64) -> [u8; 32] {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let mut out = kernel_common::storage::wallet_crypto::hardware_wallet_key();
+        let mtime = kernel_common::clint::mtime().to_le_bytes();
+        let seed_bytes = seed.to_le_bytes();
+        for i in 0..8 {
+            out[i] ^= seed_bytes[i];
+            out[i + 8] ^= mtime[i];
+            out[i + 16] ^= seed_bytes[i].rotate_left(3) ^ mtime[7 - i];
+            out[i + 24] ^= mtime[i].rotate_right(2) ^ seed_bytes[7 - i];
+        }
+        out
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let mut out = [0u8; 32];
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15u64;
+        for chunk in out.chunks_exact_mut(8) {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            chunk.copy_from_slice(&z.to_le_bytes());
+        }
+        out
+    }
+}
 
 pub fn set_seed(seed: u64) {
     let mut lock = GLOBAL_RNG.lock();
-    *lock = Some(ChaCha8Rng::seed_from_u64(seed));
+    *lock = Some(ChaCha20Rng::from_seed(expand_seed_u64(seed)));
+}
+
+pub fn set_seed_bytes(seed: [u8; 32]) {
+    let mut lock = GLOBAL_RNG.lock();
+    *lock = Some(ChaCha20Rng::from_seed(seed));
+}
+
+pub fn random_u64() -> u64 {
+    RngCore::next_u64(&mut NullableRng::rng())
 }
 
 pub struct NullableRng {
@@ -54,7 +93,7 @@ impl NullableRng {
     fn get_global_rng() -> u32 {
         let mut lock = GLOBAL_RNG.lock();
         if lock.is_none() {
-            *lock = Some(ChaCha8Rng::seed_from_u64(Self::default_seed()));
+            *lock = Some(ChaCha20Rng::from_seed(expand_seed_u64(Self::default_seed())));
         }
         lock.as_mut().unwrap().next_u32()
     }
@@ -62,7 +101,7 @@ impl NullableRng {
     fn fill_global_bytes(dest: &mut [u8]) {
         let mut lock = GLOBAL_RNG.lock();
         if lock.is_none() {
-            *lock = Some(ChaCha8Rng::seed_from_u64(Self::default_seed()));
+            *lock = Some(ChaCha20Rng::from_seed(expand_seed_u64(Self::default_seed())));
         }
         lock.as_mut().unwrap().fill_bytes(dest);
     }

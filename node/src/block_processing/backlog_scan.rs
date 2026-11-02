@@ -1,18 +1,13 @@
-use crate::utils::{Condvar, JoinHandle};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cmp::max;
 use core::sync::atomic::{AtomicU64, Ordering};
-use core::time::Duration;
-use spin::{Mutex, MutexGuard};
+use spin::Mutex;
 
 use rsnano_core::{Account, AccountInfo, ConfirmationHeightInfo};
 use rsnano_ledger::{AnySet, ConfirmedSet, Ledger};
-use rsnano_network::token_bucket::TokenBucket;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{StatsCollection, StatsSource};
-use tracing::debug;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BacklogScanConfig {
@@ -36,33 +31,19 @@ impl Default for BacklogScanConfig {
     }
 }
 
-impl BacklogScanConfig {
-    fn wait_time(&self) -> Duration {
-        let wait_time =
-            Duration::from_millis(1000 / max(self.rate_limit / self.batch_size, 1) as u64 / 2);
-        max(wait_time, Duration::from_millis(10))
-    }
-}
-
 /// Continuously scan the ledger for unconfirmed blocks and activate them
 pub struct BacklogScan {
     scan_loop: Option<BacklogScanLoop>,
     stats: Arc<BacklogScanStats>,
     flags: Arc<Mutex<BacklogScanFlags>>,
-    condition: Arc<Condvar>,
-    /** Thread that runs the backlog implementation logic. The thread always runs, even if
-     *  backlog population is disabled, so that it can service a manual trigger (e.g. via RPC). */
-    thread: Option<JoinHandle<()>>,
     next_account: Account,
-    #[allow(dead_code)]
-    last_run: rsnano_core::utils::UnixMillisTimestamp,
 }
 
 impl BacklogScan {
     pub(crate) fn new(
         config: BacklogScanConfig,
         ledger: Arc<Ledger>,
-        clock: Arc<SteadyClock>,
+        _clock: Arc<SteadyClock>,
     ) -> Self {
         let stats = Arc::new(BacklogScanStats::default());
 
@@ -71,25 +52,16 @@ impl BacklogScan {
             triggered: false,
         }));
 
-        let condition = Arc::new(Condvar::new());
         Self {
             scan_loop: Some(BacklogScanLoop {
                 ledger,
-                stats: stats.clone(),
                 unconfirmed_observers: Vec::new(),
                 up_to_date_observers: Vec::new(),
-                limiter: Mutex::new(TokenBucket::new(config.rate_limit)),
                 config,
-                flags: flags.clone(),
-                condition: condition.clone(),
-                clock,
             }),
             stats,
             flags,
-            condition,
-            thread: None,
             next_account: Account::zero(),
-            last_run: rsnano_core::utils::UnixMillisTimestamp::ZERO,
         }
     }
 
@@ -154,38 +126,19 @@ impl BacklogScan {
     }
 
     pub fn stop(&mut self) {
-        {
-            let mut lock = self.flags.lock();
-            lock.stopped = true;
-        }
-        self.condition.notify_all();
-        let _handle = self.thread.take();
-        // if let Some(handle) = handle {
-        //     handle.join().unwrap()
-        // }
+        let mut lock = self.flags.lock();
+        lock.stopped = true;
     }
 
     /** Manually trigger backlog population */
     pub fn trigger(&self) {
         tracing::debug!("Backlog scan triggered");
-        {
-            let mut lock = self.flags.lock();
-            lock.triggered = true;
-        }
-        self.condition.notify_all();
+        let mut lock = self.flags.lock();
+        lock.triggered = true;
     }
 
     pub fn stats(&self) -> Arc<BacklogScanStats> {
         self.stats.clone()
-    }
-
-    #[allow(dead_code)]
-    fn predicate(&self, flags: &BacklogScanFlags) -> bool {
-        if let Some(loop_val) = &self.scan_loop {
-            flags.triggered || loop_val.config.enabled
-        } else {
-            false
-        }
     }
 
     fn add_stats(&self, result: &BacklogScanResult) {
@@ -220,86 +173,12 @@ struct BacklogScanFlags {
 
 struct BacklogScanLoop {
     ledger: Arc<Ledger>,
-    stats: Arc<BacklogScanStats>,
     unconfirmed_observers: Vec<Box<dyn Fn(&[UnconfirmedInfo]) + Send + Sync>>,
     up_to_date_observers: Vec<Box<dyn Fn(&[Account]) + Send + Sync>>,
     config: BacklogScanConfig,
-    flags: Arc<Mutex<BacklogScanFlags>>,
-    condition: Arc<Condvar>,
-    limiter: Mutex<TokenBucket>,
-    clock: Arc<SteadyClock>,
 }
 
 impl BacklogScanLoop {
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut flags = self.flags.lock();
-        while !flags.stopped {
-            if self.predicate(&flags) {
-                flags = self.iterate_all_accounts(flags);
-            } else {
-                flags = self
-                    .condition
-                    .wait_while(flags, |l| !l.stopped && !self.predicate(l))
-                    .unwrap();
-            }
-        }
-    }
-
-    fn predicate(&self, flags: &BacklogScanFlags) -> bool {
-        flags.triggered || self.config.enabled
-    }
-
-    #[allow(dead_code)]
-    fn iterate_all_accounts<'a>(
-        &'a self,
-        mut flags: MutexGuard<'a, BacklogScanFlags>,
-    ) -> MutexGuard<'a, BacklogScanFlags> {
-        self.stats.looped.fetch_add(1, Ordering::Relaxed);
-        flags.triggered = false;
-        let mut next = Account::zero();
-        let mut done = false;
-
-        while !flags.stopped && !done {
-            self.wait_for_rate_limiter(flags);
-            let result = Self::scan_batch(&self.ledger, next, self.config.batch_size);
-            done = result.done;
-            next = result.next;
-            self.add_stats(&result);
-            if !result.unconfirmed.is_empty() {
-                debug!(
-                    "BacklogScan: found {} unconfirmed accounts (next: {})",
-                    result.unconfirmed.len(),
-                    result.next.encode_account()
-                );
-            }
-            self.notify_observers(result);
-            flags = self.flags.lock();
-        }
-        debug!("BacklogScan: full scan finished");
-        flags
-    }
-
-    #[allow(dead_code)]
-    fn wait_for_rate_limiter<'a>(&'a self, mut lock: MutexGuard<'a, BacklogScanFlags>) {
-        // Wait for the rate limiter
-        while !self
-            .limiter
-            .lock()
-            .try_consume(self.config.batch_size, self.clock.now())
-        {
-            lock = self
-                .condition
-                .wait_timeout_while(lock, self.config.wait_time(), |i| !i.stopped)
-                .unwrap()
-                .0;
-
-            if lock.stopped {
-                break;
-            }
-        }
-    }
-
     fn scan_batch(ledger: &Ledger, next: Account, batch_size: usize) -> BacklogScanResult {
         let mut result = BacklogScanResult {
             next,
@@ -330,16 +209,6 @@ impl BacklogScanLoop {
         }
 
         result
-    }
-
-    fn add_stats(&self, result: &BacklogScanResult) {
-        self.stats
-            .scanned
-            .fetch_add(result.len() as u64, Ordering::Relaxed);
-
-        self.stats
-            .activated
-            .fetch_add(result.unconfirmed.len() as u64, Ordering::Relaxed);
     }
 
     fn notify_observers(&self, result: BacklogScanResult) {

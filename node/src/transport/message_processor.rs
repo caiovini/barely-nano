@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
-use crate::utils::JoinHandle;
 use core::sync::atomic::{ AtomicBool, Ordering };
 use core::cmp::{max, min};
 
@@ -30,22 +29,16 @@ impl MessageProcessorConfig {
 
 /// Process inbound messages from other nodes
 pub struct MessageProcessor {
-    #[allow(dead_code)]
-    config: NodeConfig,
-    #[allow(dead_code)]
-    processing_threads: Vec<JoinHandle<()>>,
     state: Arc<State>,
 }
 
 impl MessageProcessor {
     pub fn new(
-        config: NodeConfig,
+        _config: NodeConfig,
         inbound_queue: Arc<InboundMessageQueue>,
         realtime_handler: Arc<RealtimeMessageHandler>,
     ) -> Self {
         Self {
-            config,
-            processing_threads: Vec::new(),
             state: Arc::new(State {
                 inbound_queue,
                 realtime_handler,
@@ -147,20 +140,6 @@ struct State {
 impl State {
     const MAX_BATCH_SIZE: usize = 256;
 
-    #[allow(dead_code)]
-    async fn run(&self) {
-        while !self.stopped.load(Ordering::SeqCst) {
-            let batch = self.inbound_queue.next_batch(Self::MAX_BATCH_SIZE);
-            if !batch.is_empty() {
-                self.handle_batch(batch);
-                kernel_common::async_rt::yield_now().await;
-            } else {
-                kernel_common::async_rt::sleep(core::time::Duration::from_millis(10)).await;
-            }
-        }
-    }
-
-    #[allow(dead_code)]
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
         let _start = kernel_common::clint::mtime();
         let batch_size = batch.len();

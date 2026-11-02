@@ -1,9 +1,9 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use spin::Mutex;
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
-use core::time::Duration;
-
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider, Peer},
@@ -11,8 +11,6 @@ use rsnano_core::{
 };
 use rsnano_output_tracker::{OutputListenerMt, OutputTrackerMt};
 use rsnano_work::{WorkPool, WorkPoolBuilder};
-
-use super::distributed_work_client::DistributedWorkClient;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WorkRequest {
@@ -46,12 +44,7 @@ pub struct WorkFactory {
 }
 
 impl WorkFactory {
-    pub fn new(
-        work_pool: WorkPool,
-        _work_client: DistributedWorkClient,
-        work_peers: Vec<Peer>,
-        _timeout: Duration,
-    ) -> Self {
+    pub fn new(work_pool: WorkPool, work_peers: Vec<Peer>, _timeout: Duration) -> Self {
         Self {
             local_work_pool: work_pool,
             work_peers: Mutex::new(work_peers),
@@ -61,14 +54,19 @@ impl WorkFactory {
     }
 
     pub fn disabled() -> Self {
-        Self::new(WorkPool::builder().disabled().finish(), DistributedWorkClient::default(), Vec::new(), Duration::ZERO)
+        Self::new(
+            WorkPool::builder().disabled().finish(),
+            Vec::new(),
+            Duration::ZERO,
+        )
     }
 
     pub fn generate_work(&self, request: WorkRequest) -> Option<WorkNonce> {
         if self.stopped.load(Ordering::SeqCst) {
             return None;
         }
-        self.local_work_pool.generate(request.root, request.difficulty)
+        self.local_work_pool
+            .generate(request.root, request.difficulty)
     }
 
     pub fn cancel(&self, root: Root) {
@@ -134,7 +132,6 @@ impl WorkFactoryBuilder {
     pub fn finish(self) -> WorkFactory {
         WorkFactory::new(
             self.local_work_pool.unwrap_or_default(),
-            DistributedWorkClient::default(),
             self.work_peers,
             Duration::from_secs(30),
         )

@@ -14,7 +14,7 @@ use rsnano_core::{Account, AccountInfo};
 use rsnano_ledger::AnySet;
 use rsnano_node::Node;
 use rsnano_rpc_messages::{RpcCommand, RpcError, StatsType};
-use serde_json::{to_value, Value};
+use serde_json::to_value;
 use tracing::debug;
 use utils::*;
 
@@ -152,11 +152,9 @@ impl RpcCommandHandler {
             RpcCommand::WorkPeers => to_value(self.work_peers()),
             RpcCommand::WorkPeerAdd(args) => to_value(self.work_peer_add(args)),
             RpcCommand::WorkPeersClear => to_value(self.work_peers_clear()),
-
-            // Not implemented:
-            RpcCommand::AccountRepresentativeSet(_)
-            | RpcCommand::DatabaseTxnTracker(_)
-            | RpcCommand::ReceiveMinimumSet(_) => self.not_implemented(),
+            RpcCommand::AccountRepresentativeSet(args) => {
+                to_value(self.account_representative_set(args)?)
+            }
         }?;
 
         Ok(response)
@@ -186,12 +184,7 @@ impl RpcCommandHandler {
     }
 
     const BLOCK_NOT_FOUND: &str = "Block not found";
-    const NOT_IMPLEMENTED: &str = "Not implemented yet";
     const ACCOUNT_NOT_FOUND: &str = "Account not found";
-
-    fn not_implemented(&self) -> Result<Value, serde_json::Error> {
-        Ok(Value::String(Self::NOT_IMPLEMENTED.to_string()))
-    }
 }
 
 fn requires_control(command: &RpcCommand) -> bool {
@@ -203,15 +196,14 @@ fn requires_control(command: &RpcCommand) -> bool {
         | RpcCommand::AccountsCreate(_)
         | RpcCommand::BlockCreate(_)
         | RpcCommand::BootstrapLazy(_)
-        | RpcCommand::DatabaseTxnTracker(_)
         | RpcCommand::Keepalive(_)
         | RpcCommand::Ledger(_)
         | RpcCommand::NodeId
         | RpcCommand::PasswordChange(_)
+        | RpcCommand::PasswordEnter(_)
         | RpcCommand::PopulateBacklog
         | RpcCommand::Receive(_)
         | RpcCommand::ReceiveMinimum
-        | RpcCommand::ReceiveMinimumSet(_)
         | RpcCommand::SearchReceivable(_)
         | RpcCommand::SearchReceivableAll
         | RpcCommand::Send(_)
@@ -224,6 +216,7 @@ fn requires_control(command: &RpcCommand) -> bool {
         | RpcCommand::WalletChangeSeed(_)
         | RpcCommand::WalletCreate(_)
         | RpcCommand::WalletDestroy(_)
+        | RpcCommand::WalletExport(_)
         | RpcCommand::WalletLock(_)
         | RpcCommand::WalletLedger(_)
         | RpcCommand::WalletRepresentativeSet(_)
@@ -237,6 +230,7 @@ fn requires_control(command: &RpcCommand) -> bool {
         | RpcCommand::WorkPeerAdd(_)
         | RpcCommand::WorkPeers
         | RpcCommand::WorkPeersClear => true,
+        RpcCommand::Sign(args) => args.wallet.is_some() || args.account.is_some() || args.hash.is_some(),
         RpcCommand::Stats(s) => matches!(s.stats_type, StatsType::Objects),
         RpcCommand::Process(args) => args.force == Some(true.into()),
         _ => false,

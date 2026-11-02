@@ -33,13 +33,15 @@ impl SynCookies {
         }
     }
 
+    const MAX_TOTAL_COOKIES: usize = 4096;
+
     /// Returns `None` if the IP is rate capped on syn cookie requests,
     /// or if the endpoint already has a syn cookie query
     pub fn assign(&self, endpoint: &SocketAddrV6) -> Option<Cookie> {
         let ip_addr = endpoint.ip();
         let mut lock = self.data.lock();
 
-        if lock.cookies.contains_key(endpoint) {
+        if lock.cookies.contains_key(endpoint) || lock.cookies.len() >= Self::MAX_TOTAL_COOKIES {
             return None;
         }
 

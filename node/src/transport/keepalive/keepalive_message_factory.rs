@@ -1,10 +1,9 @@
-use core::net::{Ipv6Addr, SocketAddrV6};
+use core::net::{IpAddr, Ipv6Addr, SocketAddrV6};
 use alloc::sync::Arc;
 use rsnano_core::utils::{Peer, NULL_ENDPOINT};
 use rsnano_messages::{Keepalive, Message};
 use rsnano_network::Network;
-use spin::{ RwLock };
-// // // // // // // use std::{    net::Ipv6Addr, net::SocketAddrV6    }; // TODO: fix this
+use spin::RwLock;
 
 #[derive(Clone)]
 pub struct KeepaliveMessageFactory {
@@ -30,29 +29,20 @@ impl KeepaliveMessageFactory {
         result.peers[3] = result.peers[1];
         // Replace part of message with node external address or listening port
         result.peers[1] = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0); // For node v19 (response channels)
-        if self.external_addr.address != "::"
-            && self.external_addr.port != 0
-        {
-            // result.peers[0] = SocketAddrV6::new(
-            //     self.external_addr.address.parse().unwrap(),
-            //     self.external_addr.port,
-            //     0,
-            //     0,
-            // );
-            // TODO: implement Ipv6Addr parsing in no_std
-            result.peers[0] = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, self.external_addr.port, 0, 0);
+        if self.external_addr.address != "::" && self.external_addr.port != 0 {
+            let ip = self
+                .external_addr
+                .address
+                .parse::<IpAddr>()
+                .map(|addr| match addr {
+                    IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+                    IpAddr::V6(v6) => v6,
+                })
+                .unwrap_or(Ipv6Addr::UNSPECIFIED);
+            result.peers[0] = SocketAddrV6::new(ip, self.external_addr.port, 0, 0);
         } else {
-            // TODO Read external address from port_mapping!
-            //let external_address  node.port_mapping.external_address ());
-            let external_address = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
-            if !external_address.ip().is_unspecified() {
-                result.peers[0] =
-                    SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, network.listening_port(), 0, 0);
-                result.peers[1] = external_address;
-            } else {
-                result.peers[0] =
-                    SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, network.listening_port(), 0, 0);
-            }
+            result.peers[0] =
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, network.listening_port(), 0, 0);
         }
         Message::Keepalive(result)
     }

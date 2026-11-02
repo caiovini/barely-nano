@@ -31,6 +31,8 @@ pub struct WebsocketSessionEntry {
 }
 
 impl WebsocketSessionEntry {
+    const MAX_SEND_QUEUE_LEN: usize = 1024;
+
     pub fn new(wallets: Arc<Wallets>) -> Self {
         Self {
             subscriptions: Mutex::new(BTreeMap::new()),
@@ -43,7 +45,12 @@ impl WebsocketSessionEntry {
 
     pub fn blocking_write(&self, envelope: &MessageEnvelope) -> Result<()> {
         if !self.should_filter(envelope) {
-            self.send_queue.lock().push_back(envelope.clone());
+            let mut queue = self.send_queue.lock();
+            if queue.len() >= Self::MAX_SEND_QUEUE_LEN {
+                queue.pop_front();
+            }
+            queue.push_back(envelope.clone());
+            drop(queue);
             if let Some(waker) = self.waker.lock().take() {
                 waker.wake();
             }

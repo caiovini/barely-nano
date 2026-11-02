@@ -1,4 +1,3 @@
-use crate::utils::Receiver;
 use spin::MutexGuard;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -38,7 +37,7 @@ use rsnano_stats::{Direction, Stats, StatsCollection, StatsCollector};
 use crate::{
     aec_event_processor::AecEventProcessor,
     block_processing::{
-        BacklogScan, BacklogWaiter, BlockContext, BlockProcessor, BlockProcessorQueue, BlockSource,
+        BacklogScan, BlockContext, BlockProcessor, BlockProcessorQueue, BlockSource,
         BoundedBacklog, BoundedBacklogPlugin, LocalBlockBroadcaster, LocalBlockBroadcasterExt,
         LocalBlockBroadcasterPlugin, ProcessedResult, UncheckedMap,
     },
@@ -79,12 +78,11 @@ use crate::{
         RealtimeMessageHandler,
     },
     utils::{spawn_backpressure_processor, ThreadPool, ThreadPoolImpl},
-    wallets::{ReceivableSearch, WalletBackup, Wallets, WalletsExt},
+    wallets::{Wallets, WalletsExt},
     work::{WorkFactory, WorkRequest},
     NodeCallbacks, OnlineWeightSampler,
 };
 
-#[allow(dead_code)]
 pub struct Node {
     is_nulled: bool,
     pub steady_clock: Arc<SteadyClock>,
@@ -93,7 +91,6 @@ pub struct Node {
     pub network_params: NetworkParams,
     pub stats: Arc<Stats>,
     pub workers: Arc<dyn ThreadPool>,
-    wallet_workers: Arc<dyn ThreadPool>,
     pub flags: NodeFlags,
     pub work_factory: Arc<WorkFactory>,
     pub unchecked: Arc<UncheckedMap>,
@@ -134,23 +131,20 @@ pub struct Node {
     monitor: Arc<Mutex<NodeMonitor>>,
     stopped: AtomicBool,
     pub network_filter: Arc<NetworkFilter>,
-    pub message_sender: Arc<Mutex<MessageSender>>, // TODO remove this. It is needed right now
-    pub message_flooder: Arc<Mutex<MessageFlooder>>, // TODO remove this. It is needed right now
+    pub message_sender: Arc<Mutex<MessageSender>>,
+    pub message_flooder: Arc<Mutex<MessageFlooder>>,
     pub keepalive_publisher: Arc<KeepalivePublisher>,
     // to keep the weak pointer alive
     start_stop_listener: OutputListenerMt<&'static str>,
-    wallet_backup: WalletBackup,
-    receivable_search: ReceivableSearch,
     block_flooder: BlockFlooder,
-    vote_rebroadcaster: VoteRebroadcaster,
+    pub vote_rebroadcaster: VoteRebroadcaster,
     pub aec_ticker: Arc<Mutex<AecTicker>>,
     pub recently_cemented: Arc<Mutex<BoundedVecDeque<ConfirmedElection>>>,
     pub stats_collector: StatsCollector,
     container_info_factory: ContainerInfoFactory,
     wallet_reps_checker: Mutex<WalletRepsChecker>,
-    winner_block_broadcaster: Arc<Mutex<WinnerBlockBroadcaster>>,
     block_rate_calculator: Arc<Mutex<BlockRateCalculator>>,
-    block_rates: Arc<CurrentBlockRates>,
+    pub block_rates: Arc<CurrentBlockRates>,
     pub aec_voter: Mutex<AecVoter>,
     pub dead_channel_cleanup: Arc<Mutex<DeadChannelCleanup>>,
     pub syn_cookies: Arc<SynCookies>,
@@ -206,9 +200,12 @@ impl Node {
         if let Some(mut guard) = self.wallet_reps_checker.try_lock() {
             guard.tick(&cancel_token);
         }
+        self.peer_cache_updater.update();
     }
 
     pub fn tick_monitor(&self) {
+        self.rep_tiers_calculator.calculate_tiers();
+        self.telemetry.trigger_if_due();
         if let Some(mut guard) = self.monitor.try_lock() {
             let cancel_token = rsnano_core::utils::CancellationToken::new();
             rsnano_core::utils::Tickable::tick(&mut *guard, &cancel_token);
@@ -326,9 +323,7 @@ impl Node {
         // We increase the cookie limit to allow all connections to complete the handshake.
         let syn_cookies = Arc::new(SynCookies::new(64, steady_clock.clone()));
 
-        // In bare-metal we don't have multiple threads, so we use a dummy thread pool
         let workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::create(1, "Workers"));
-        let wallet_workers: Arc<dyn ThreadPool> = Arc::new(ThreadPoolImpl::create(1, "Wallet Workers"));
 
         let mut inbound_message_queue =
             InboundMessageQueue::new(4096);
@@ -460,12 +455,8 @@ impl Node {
             network_params.work.clone(),
             work_factory.clone(),
             network_params.clone(),
-            workers.clone(),
             block_processor_queue.clone(),
             online_reps.clone(),
-            confirming_set.clone(),
-            message_flooder.clone(),
-            current_network,
         );
         if !is_nulled {
             wallets.initialize().expect("Could not initialize wallets");
@@ -812,20 +803,12 @@ impl Node {
             true
         });
 
-        let backlog_waiter = Arc::new(BacklogWaiter::new(
-            block_processor_queue.clone(),
-            ledger.clone(),
-            steady_clock.clone(),
-            config.bounded_backlog.max_backlog,
-        ));
-
         let ledger_tx_clone = ledger_tx.clone();
         let signature_checker = Arc::new(crate::signatures::SignatureChecker::new());
         let block_processor = Arc::new(BlockProcessor::new(
             block_processor_queue.clone(),
             ledger.clone(),
             unchecked.clone(),
-            backlog_waiter.clone(),
             ledger_tx_clone,
             signature_checker.clone(),
         ));
@@ -1072,14 +1055,6 @@ impl Node {
         rep_tiers_calculator.add_tiers_consumer(vote_rebroadcast_queue.clone());
         rep_tiers_calculator.add_tiers_consumer(rep_tiers.clone());
 
-        let wallet_backup = WalletBackup {
-            workers: workers.clone(),
-            wallets: wallets.clone(),
-        };
-
-        let receivable_search =
-            ReceivableSearch::new(wallets.clone(), workers.clone(), current_network);
-
         let message_flooder = Arc::new(Mutex::new(message_flooder.clone()));
 
         let block_flooder = BlockFlooder {
@@ -1188,7 +1163,6 @@ impl Node {
         stats_collector.add_source(bootstrap_stale_stats);
         stats_collector.add_source(block_processor.clone());
         stats_collector.add_source(block_processor_queue.clone());
-        stats_collector.add_source(backlog_waiter.clone());
         stats_collector.add_source(conf_time_stats);
         stats_collector.add_source(winner_block_broadcaster.clone());
         stats_collector.add_source(bootstrapper.clone());
@@ -1230,7 +1204,6 @@ impl Node {
             peer_connector,
             node_id: node_id_key,
             workers,
-            wallet_workers,
             work_factory,
             unchecked,
             telemetry,
@@ -1275,8 +1248,6 @@ impl Node {
             keepalive_publisher,
             stopped: AtomicBool::new(false),
             start_stop_listener: OutputListenerMt::new(),
-            wallet_backup,
-            receivable_search,
             block_flooder,
             vote_rebroadcaster,
             aec_ticker,
@@ -1284,7 +1255,6 @@ impl Node {
             stats_collector,
             container_info_factory: container_info,
             wallet_reps_checker: Mutex::new(wallet_reps_checker),
-            winner_block_broadcaster,
             block_rate_calculator: Arc::new(Mutex::new(block_rate_calculator)),
             block_rates,
             aec_voter: Mutex::new(aec_voter),
@@ -1485,24 +1455,9 @@ impl Node {
         }
         kernel_common::uart::print(b"[node] start() genesis block verified.\n");
 
-        // In bare-metal we spawn async tasks instead of starting TimerThreads
-        // Block rate calculator is now ticked in Node::tick
-        
-        // self.online_weight_calculation
-        //     .run_once_then_start(OnlineReps::default_interval_for(
-        //         self.network_params.network.current_network,
-        //     ));
-        
-        // self.wallet_reps_checker.start(if is_dev_network {
-        //     Duration::from_millis(500)
-        // } else {
-        //     Duration::from_secs(5)
-        // });
-
         self.network_threads.lock().start();
         self.message_processor.lock().start();
         kernel_common::uart::print(b"[node] start() network & message processor threads running.\n");
-        // self.aec_voter.start(Duration::from_millis(20));
 
         if self.flags.enable_pruning {
             self.ledger_pruning.start();
@@ -1523,34 +1478,12 @@ impl Node {
             warn!("Peering is disabled");
         }
 
-        if !self.flags.disable_backup {
-            self.wallet_backup.start();
-        }
-
-        if !self.flags.disable_search_pending {
-            self.receivable_search.start();
-        }
-
         self.unchecked.start();
-        // self.wallets.start();
-        // self.rep_tiers_calculator.start(if is_dev_network {
-        //     Duration::from_millis(500)
-        // } else {
-        //     Duration::from_secs(10)
-        // });
         if self.config.enable_vote_processor {
             self.vote_processor.start();
         }
         self.vote_cache_processor.start();
         self.block_processor.start();
-        /*
-        if !self.flags.disable_request_loop {
-            self.aec_ticker
-                .start(self.network_params.network.aec_loop_interval);
-        }
-        */
-        // self.vote_generators.start();
-        // self.request_aggregator.start();
         self.confirming_set.start();
         self.election_schedulers.start();
         self.backlog_scan.lock().start();
@@ -1567,26 +1500,6 @@ impl Node {
             self.peer_cache_connector.start(Duration::from_secs(15));
         }
 
-
-        let cleanup = self.dead_channel_cleanup.clone();
-        let clock = self.steady_clock.clone();
-        async_rt::spawn_named(async move {
-            let mut last_cleanup = clock.now();
-            let cleanup_interval = core::time::Duration::from_secs(5);
-            loop {
-                let now = clock.now();
-                if now.millis() - last_cleanup.millis() >= cleanup_interval.as_millis() as i64 {
-                    cleanup.lock().clean_up();
-                    last_cleanup = now;
-                }
-                async_rt::sleep(core::time::Duration::from_secs(1)).await;
-            }
-        }, Some("Node Cleanup/Stats"));
-        /*
-        if self.config.enable_monitor {
-            self.monitor.start_delayed(self.config.monitor.interval);
-        }
-        */
         if self.config.enable_vote_rebroadcast {
             self.vote_rebroadcaster.start();
         }
@@ -1596,7 +1509,7 @@ impl Node {
     pub fn stop(&mut self) {
         self.start_stop_listener.emit("stop");
         if self.is_nulled {
-            return; // TODO better nullability implementation
+            return;
         }
 
         // Ensure stop can only be called once
@@ -1606,15 +1519,8 @@ impl Node {
         info!("Node stopping...");
 
         self.tcp_listener.stop();
-        // self.aec_voter.stop();
-        // self.wallet_reps_checker.stop();
-        // self.online_weight_calculation.stop();
         self.peer_connector.stop();
         self.ledger_pruning.stop();
-        // self.peer_cache_connector.stop();
-        // self.peer_cache_updater.stop();
-        // Cancels ongoing work generation tasks, which may be blocking other threads
-        // No tasks may wait for work generation in I/O threads, or termination signal capturing will be unable to call node::stop()
         self.work_factory.stop();
         self.backlog_scan.lock().stop();
         self.bootstrapper.stop();
@@ -1625,27 +1531,16 @@ impl Node {
         self.request_aggregator.stop();
         self.vote_cache_processor.stop();
         self.vote_processor.stop();
-        // self.rep_tiers_calculator.stop();
         self.election_schedulers.stop();
-        // self.aec_ticker.stop();
         self.active.write().stop();
         self.vote_generators.stop();
         self.confirming_set.stop();
         self.telemetry.stop();
         self.bootstrap_server.stop();
-        self.wallets.stop();
         self.local_block_broadcaster.stop();
         self.message_processor.lock().stop();
         self.network_threads.lock().stop(); // Stop network last to avoid killing in-use sockets
-        // self.monitor.stop();
         self.vote_rebroadcaster.stop();
-        // self.block_rate_calculator.stop();
-
-        // self.wallet_workers.stop();
-        // self.workers.stop();
-
-        // self.tokio_runner.stop();
-        // work pool is not stopped on purpose due to testing setup
     }
 }
 
@@ -1661,28 +1556,12 @@ pub trait NodeEventHandler {
     fn handle(&mut self, event: &NodeEvent);
 }
 
+#[derive(Default)]
 pub struct CompositeNodeEventHandler {
-    receiver: Option<Receiver<NodeEvent>>,
     handlers: Vec<Box<dyn NodeEventHandler + Send>>,
 }
 
-impl Default for CompositeNodeEventHandler {
-    fn default() -> Self {
-        Self {
-            receiver: None,
-            handlers: Vec::new(),
-        }
-    }
-}
-
 impl CompositeNodeEventHandler {
-    pub fn new(receiver: Receiver<NodeEvent>) -> Self {
-        Self {
-            receiver: Some(receiver),
-            handlers: Vec::new(),
-        }
-    }
-
     pub fn add(&mut self, handler: impl NodeEventHandler + Send + 'static) {
         self.handlers.push(Box::new(handler));
     }
@@ -1690,16 +1569,6 @@ impl CompositeNodeEventHandler {
     pub fn handle(&mut self, event: &NodeEvent) {
         for handler in self.handlers.iter_mut() {
             handler.handle(event);
-        }
-    }
-
-    pub fn run(&mut self) {
-        if let Some(receiver) = &self.receiver {
-            while let Ok(event) = receiver.recv() {
-                for handler in self.handlers.iter_mut() {
-                    handler.handle(&event);
-                }
-            }
         }
     }
 }

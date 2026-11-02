@@ -16,7 +16,10 @@ impl NodeIdKeyFile {
         let mut bytes = [0u8; 32];
         use rand::RngCore;
         rng.fill_bytes(&mut bytes);
-        tracing::info!("Generated Node ID private key starting with: {:02X} {:02X}", bytes[0], bytes[1]);
-        Ok(PrivateKey::from_bytes(&bytes))
+        let key = PrivateKey::from_bytes(&bytes);
+        let pub_key = key.public_key();
+        let pub_bytes = pub_key.as_bytes();
+        tracing::info!("Generated Node ID public key starting with: {:02X} {:02X}", pub_bytes[0], pub_bytes[1]);
+        Ok(key)
     }
 }

@@ -278,7 +278,7 @@ impl BlockBatchProcessor {
             let keep = match status {
                 Ok(()) => true,
                 Err(BlockError::GapPrevious) if !cfg!(test) => {
-                    if let Some(&(prev_depth, _prev_bal)) = in_batch_failed.get(&prev) {
+                    if let Some(&(prev_depth, prev_bal)) = in_batch_failed.get(&prev) {
                         const MAX_TAIL_DEPTH: usize = 64;
                         let missing_source = match b {
                             Block::LegacyReceive(_) | Block::LegacyOpen(_) => {
@@ -287,10 +287,24 @@ impl BlockBatchProcessor {
                                     && !playable_hashes.contains_key(&source)
                                     && !self.ledger.store.block.may_exist(&source)
                             }
+                            Block::State(s) => {
+                                let is_receive = prev_bal.is_some_and(|pb| s.balance() >= pb);
+                                let source = s.link().into();
+                                is_receive
+                                    && !s.link().is_zero()
+                                    && !self.ledger.constants.epochs.is_epoch_link(&s.link())
+                                    && !playable_hashes.contains_key(&source)
+                                    && !self.ledger.store.block.may_exist(&source)
+                            }
                             _ => false,
                         };
-                        if prev_depth < MAX_TAIL_DEPTH && !missing_source {
-                            in_batch_failed.insert(hash, (prev_depth + 1, b.balance_field()));
+                        if prev_depth < MAX_TAIL_DEPTH {
+                            let next_depth = if missing_source {
+                                usize::MAX
+                            } else {
+                                prev_depth + 1
+                            };
+                            in_batch_failed.insert(hash, (next_depth, b.balance_field()));
                             true
                         } else {
                             in_batch_failed.insert(hash, (usize::MAX, b.balance_field()));

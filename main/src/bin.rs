@@ -684,15 +684,15 @@ fn boot_hart_main(hart_id: usize) {
         kernel_common::async_rt::set_global_executor(exec.clone());
 
         let mut config = daemon_config.node;
-        config.bootstrap.max_requests = config.bootstrap.max_requests.min(1024);
-        config.bootstrap.channel_limit = config.bootstrap.channel_limit.min(16);
-        config.bootstrap.rate_limit = config.bootstrap.rate_limit.max(1500).min(2000);
-        config.bootstrap.frontier_rate_limit = config.bootstrap.frontier_rate_limit.max(48).min(64);
+        config.bootstrap.max_requests = config.bootstrap.max_requests.min(4096);
+        config.bootstrap.channel_limit = config.bootstrap.channel_limit.min(64);
+        config.bootstrap.rate_limit = config.bootstrap.rate_limit.max(1500).min(10000);
+        config.bootstrap.frontier_rate_limit = config.bootstrap.frontier_rate_limit.max(16).min(64);
         config.bootstrap.frontier_scan.cooldown = core::time::Duration::from_millis(250);
         config.bootstrap.request_timeout = config
             .bootstrap
             .request_timeout
-            .min(core::time::Duration::from_secs(5));
+            .min(core::time::Duration::from_secs(15));
         config.priority_bucket.reserved_elections = config.priority_bucket.reserved_elections.max(250);
         config.priority_bucket.max_elections = config.priority_bucket.max_elections.max(1500);
         config.optimistic_scheduler.optimistic_limit_percentage =
@@ -1077,6 +1077,9 @@ fn run_vote_processor_loop(
         if node_arc.vote_processor.run_once() {
             worked = true;
         }
+        if node_arc.config.enable_vote_rebroadcast && node_arc.vote_rebroadcaster.run_once() {
+            worked = true;
+        }
         for _ in 0..4 {
             if exec.run_once(hart_id) {
                 worked = true;
@@ -1244,6 +1247,27 @@ fn run_crypto_worker_2_loop(
     }
 }
 
+fn is_http_request_complete(req: &str) -> bool {
+    let Some((headers, body)) = req.split_once("\r\n\r\n").or_else(|| req.split_once("\n\n")) else {
+        return false;
+    };
+    if headers.starts_with("GET ") {
+        return true;
+    }
+    for line in headers.lines() {
+        let lower = line.trim();
+        if lower.len() >= 15 && lower.as_bytes()[..15].eq_ignore_ascii_case(b"content-length:") {
+            if let Ok(expected_len) = lower[15..].trim().parse::<usize>() {
+                return body.len() >= expected_len;
+            }
+        }
+    }
+    let trimmed = body.trim();
+    !trimmed.is_empty() && trimmed.ends_with('}')
+}
+
+static RPC_ACTIVE_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Node>) {
     let net_cfg = kernel_common::net::get_net_config();
     if !net_cfg.rpc_enable {
@@ -1251,20 +1275,49 @@ fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Nod
     }
     use smoltcp::socket::tcp::{Socket as SmolTcpSocket, State as SmolTcpState};
     let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handle);
+    let now = kernel_common::clint::mtime();
     match socket.state() {
         SmolTcpState::Closed => {
+            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
             let _ = socket.listen(net_cfg.rpc_port);
         }
+        SmolTcpState::Listen => {
+            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+        }
         SmolTcpState::TimeWait | SmolTcpState::CloseWait | SmolTcpState::LastAck | SmolTcpState::Closing => {
+            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
             socket.abort();
             let _ = socket.listen(net_cfg.rpc_port);
         }
+        SmolTcpState::SynReceived => {
+            let since = RPC_ACTIVE_SINCE.load(Ordering::Relaxed);
+            if since == 0 {
+                RPC_ACTIVE_SINCE.store(now, Ordering::Relaxed);
+            } else if now.wrapping_sub(since) > seconds(5) {
+                RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+                socket.abort();
+                let _ = socket.listen(net_cfg.rpc_port);
+            }
+        }
         SmolTcpState::Established => {
+            let since = RPC_ACTIVE_SINCE.load(Ordering::Relaxed);
+            if since == 0 {
+                RPC_ACTIVE_SINCE.store(now, Ordering::Relaxed);
+            } else if now.wrapping_sub(since) > seconds(5) {
+                RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+                socket.abort();
+                let _ = socket.listen(net_cfg.rpc_port);
+                return;
+            }
+
             if socket.can_recv() {
                 let mut response: Option<alloc::string::String> = None;
                 let enable_control = net_cfg.rpc_enable_control;
                 let _ = socket.recv(|buffer| {
                     let request = core::str::from_utf8(buffer).unwrap_or("");
+                    if !is_http_request_complete(request) && buffer.len() < 60_000 {
+                        return (0, ());
+                    }
                     let handler = RpcCommandHandler::new(node.clone(), enable_control);
                     let server = BareMetalRpcServer::new(handler);
 
@@ -1278,6 +1331,7 @@ fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Nod
                     (buffer.len(), ())
                 });
                 if let Some(resp_str) = response {
+                    RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
                     let _ = socket.send_slice(resp_str.as_bytes());
                     socket.close();
                 }

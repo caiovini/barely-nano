@@ -123,30 +123,6 @@ impl BlockProcessorQueue {
         None
     }
 
-    pub(crate) fn pop_blocking(&self) -> Option<VecDeque<Arc<BlockContext>>> {
-        loop {
-            {
-                let mut queue = self.queue.lock();
-                if queue.stopped {
-                    return None;
-                }
-
-                if !queue.cool_down {
-                    let batch = queue.process_queue.next_batch();
-                    if !batch.is_empty() {
-                        return Some(batch);
-                    }
-                    if self.is_nulled {
-                        queue.stopped = true;
-                        return None;
-                    }
-                }
-            }
-
-            core::hint::spin_loop();
-        }
-    }
-
     // TODO: Remove and replace all checks with calls to size (block_source)
     pub fn total_queue_len(&self) -> usize {
         self.queue.lock().process_queue.len()

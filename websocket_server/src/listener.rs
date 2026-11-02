@@ -26,6 +26,8 @@ pub struct WebsocketListener {
 }
 
 impl WebsocketListener {
+    const MAX_SESSIONS: usize = 32;
+
     pub fn new(endpoint: SocketAddr, wallets: Arc<Wallets>, ledger: Arc<Ledger>) -> Self {
         Self {
             endpoint: Mutex::new(endpoint),
@@ -70,6 +72,9 @@ impl WebsocketListener {
                     {
                         let mut sessions_lock = sessions.lock();
                         sessions_lock.retain(|s| s.strong_count() > 0);
+                        if sessions_lock.len() >= Self::MAX_SESSIONS {
+                            continue;
+                        }
                         sessions_lock.push(Arc::downgrade(&entry));
                     }
 

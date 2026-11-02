@@ -56,7 +56,7 @@ impl MessageFlooder {
         &mut self,
         message: &Message,
         traffic_type: TrafficType,
-        _scale: f32,
+        scale: f32,
     ) -> FloodCount {
         let mut flood_count = FloodCount::default();
         let peered_prs = self.online_reps.lock().peered_principal_reps();
@@ -70,7 +70,7 @@ impl MessageFlooder {
         let fanout;
         {
             let network = self.network.read();
-            fanout = network.fanout(1.0); // TODO: use scale
+            fanout = network.fanout(scale);
             channels = network.shuffled_channels(traffic_type)
         }
 

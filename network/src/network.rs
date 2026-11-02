@@ -1,7 +1,7 @@
 use crate::{
     bandwidth_limiter::BandwidthLimiter, channel_stats::ChannelStats,
-    utils::into_core_addr, Channel, ChannelDirection, ChannelId, ChannelMode,
-    DataReceiver, DataReceiverFactory, NetworkConfig, TrafficType,
+    peer_exclusion::PeerExclusion, utils::into_core_addr, Channel, ChannelDirection, ChannelId,
+    ChannelMode, DataReceiver, DataReceiverFactory, NetworkConfig, TrafficType,
 };
 use rsnano_core::NodeId;
 use rsnano_nullable_clock::{SteadyClock, Timestamp};
@@ -22,6 +22,7 @@ use tracing::debug;
 pub struct Network {
     channels: HashMap<ChannelId, Arc<Channel>>,
     attempts: HashMap<SocketAddrV6, Timestamp>,
+    excluded_peers: PeerExclusion,
     next_channel_id: usize,
     stopped: core::sync::atomic::AtomicBool,
     #[allow(dead_code)]
@@ -37,6 +38,8 @@ pub struct Network {
 }
 
 impl Network {
+    const MAX_PEERS_PER_SUBNET: usize = 4;
+
     pub fn new(
         clock: Arc<SteadyClock>,
         limiter: Arc<BandwidthLimiter>,
@@ -56,6 +59,7 @@ impl Network {
         Self {
             channels: HashMap::new(),
             attempts: HashMap::new(),
+            excluded_peers: PeerExclusion::new(),
             next_channel_id: 1,
             stopped: core::sync::atomic::AtomicBool::new(false),
             clock,
@@ -135,11 +139,21 @@ impl Network {
             return Err(NetworkError::Stopped);
         }
 
+        if self.excluded_peers.is_excluded(peer_addr.ip()) {
+            kernel_common::uart::putchar(b'-');
+            return Err(NetworkError::PeerExcluded);
+        }
+
         if let Some(existing) = self.find_channel_by_ip(&peer_addr.ip()) {
             if !existing.is_closed() {
                 kernel_common::uart::putchar(b'-');
                 return Err(NetworkError::DuplicateConnection);
             }
+        }
+
+        if self.count_by_subnet(peer_addr.ip()) >= Self::MAX_PEERS_PER_SUBNET {
+            kernel_common::uart::putchar(b'-');
+            return Err(NetworkError::MaxConnectionsPerSubnetwork);
         }
 
         // Also reject inbound connections if we already have a pending outbound
@@ -223,6 +237,9 @@ impl Network {
     }
 
     pub fn add_outbound_attempt(&mut self, peer: SocketAddrV6, now: Timestamp) -> Result<(), NetworkError> {
+        if self.excluded_peers.is_excluded(peer.ip()) {
+            return Err(NetworkError::PeerExcluded);
+        }
         if !self.is_outbound_slot_available() {
             debug!("Rejecting outbound attempt to {}: max connections/attempts reached ({})", peer, self.config.max_outbound_connections);
             kernel_common::uart::print(b"[peer] Rejecting outbound attempt: slots full\n");
@@ -235,6 +252,9 @@ impl Network {
         if self.find_channel_by_ip(&peer.ip()).is_some() {
             kernel_common::uart::print(b"[peer] Rejecting outbound attempt: already connected\n");
             return Err(NetworkError::DuplicateConnection);
+        }
+        if self.count_by_subnet(peer.ip()) >= Self::MAX_PEERS_PER_SUBNET {
+            return Err(NetworkError::MaxConnectionsPerSubnetwork);
         }
         self.attempts.insert(peer, now);
         Ok(())
@@ -284,6 +304,62 @@ impl Network {
                 && c.is_alive() 
                 && c.peer_addr().ip() == ip
         }).cloned()
+    }
+
+    fn is_exempt_subnet(ip: &core::net::Ipv6Addr) -> bool {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return true;
+        }
+        let o = ip.octets();
+        // IPv4-mapped IPv6 address (::ffff:a.b.c.d)
+        if o[0..10] == [0; 10] && o[10] == 0xff && o[11] == 0xff {
+            let a = o[12];
+            let b = o[13];
+            return a == 127
+                || a == 10
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 169 && b == 254);
+        }
+        // IPv6 Unique Local (fc00::/7) or Link-Local (fe80::/10)
+        (o[0] & 0xfe) == 0xfc || (o[0] == 0xfe && (o[1] & 0xc0) == 0x80)
+    }
+
+    fn same_subnet(a: &core::net::Ipv6Addr, b: &core::net::Ipv6Addr) -> bool {
+        let oa = a.octets();
+        let ob = b.octets();
+        let a_v4 = oa[0..10] == [0; 10] && oa[10] == 0xff && oa[11] == 0xff;
+        let b_v4 = ob[0..10] == [0; 10] && ob[10] == 0xff && ob[11] == 0xff;
+        if a_v4 && b_v4 {
+            // /24 subnet for IPv4
+            oa[12..15] == ob[12..15]
+        } else if !a_v4 && !b_v4 {
+            // /48 subnet for IPv6
+            oa[0..6] == ob[0..6]
+        } else {
+            false
+        }
+    }
+
+    fn count_by_subnet(&self, ip: &core::net::Ipv6Addr) -> usize {
+        if Self::is_exempt_subnet(ip) {
+            return 0;
+        }
+        let active = self
+            .channels
+            .values()
+            .filter(|c| {
+                (c.mode() == ChannelMode::Realtime || c.mode() == ChannelMode::Undefined)
+                    && c.is_alive()
+                    && Self::same_subnet(c.peer_addr().ip(), ip)
+            })
+            .count();
+        let pending = self
+            .attempts
+            .keys()
+            .filter(|a| Self::same_subnet(a.ip(), ip))
+            .count();
+        active + pending
     }
 
     pub fn on_new_realtime_channel(&mut self, callback: Arc<dyn Fn(Arc<Channel>) + Send + Sync>) {
@@ -352,16 +428,25 @@ impl Network {
                 removed.push(channel);
             }
         }
+        self.excluded_peers.purge(now, Duration::from_secs(3600));
         removed
     }
 
     pub fn fanout(&self, scale: f32) -> usize {
+        if self.channels.is_empty() {
+            return 0;
+        }
         let fanout = (self.channels.len() as f32).ln();
         (scale * fanout).ceil() as usize
     }
 
-    pub fn check_capacity(&self, _traffic_type: TrafficType, _scale: f32) -> bool {
-        true
+    pub fn check_capacity(&self, traffic_type: TrafficType, scale: f32) -> bool {
+        let available = self
+            .channels
+            .values()
+            .filter(|c| c.mode() == ChannelMode::Realtime && !c.should_drop(traffic_type))
+            .count();
+        available >= self.fanout(scale)
     }
 
     pub fn idle_channels(&self, min_idle_period: Duration, now: Timestamp) -> Vec<Arc<Channel>> {
@@ -405,7 +490,8 @@ impl Network {
         }
     }
 
-    pub fn perma_ban(&mut self, _addr: SocketAddrV6) {
+    pub fn perma_ban(&mut self, addr: SocketAddrV6) {
+        self.excluded_peers.exclude(*addr.ip(), self.clock.now());
     }
 
     pub fn count_by_mode(&self, mode: ChannelMode) -> usize {
@@ -440,27 +526,28 @@ impl Network {
     }
 
     pub fn random_fill_realtime(&self, peers: &mut [SocketAddrV6; 8]) {
-        let mut i = 0;
-        for channel in self.channels.values() {
-            if channel.mode() == ChannelMode::Realtime {
-                let mut peer = if let Some(peering) = channel.peering_addr() {
-                    peering
-                } else {
-                    channel.peer_addr()
-                };
-                
-                // For the Nano network, we should always advertise the standard listening port
-                // unless we explicitly know otherwise. Ephemeral ports must never be sent.
-                if peer.port() != 7075 {
-                    peer.set_port(7075);
-                }
+        let mut candidates: Vec<&Arc<Channel>> = self
+            .channels
+            .values()
+            .filter(|c| c.mode() == ChannelMode::Realtime && c.is_alive())
+            .collect();
+        let mut rng = NullableRng::rng();
+        candidates.shuffle(&mut rng);
 
-                peers[i] = peer;
-                i += 1;
-                if i >= 8 {
-                    break;
-                }
+        for (i, channel) in candidates.into_iter().take(8).enumerate() {
+            let mut peer = if let Some(peering) = channel.peering_addr() {
+                peering
+            } else {
+                channel.peer_addr()
+            };
+
+            // For the Nano network, we should always advertise the standard listening port
+            // unless we explicitly know otherwise. Ephemeral ports must never be sent.
+            if peer.port() != 7075 {
+                peer.set_port(7075);
             }
+
+            peers[i] = peer;
         }
     }
 

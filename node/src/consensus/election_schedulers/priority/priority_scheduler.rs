@@ -222,29 +222,6 @@ impl PriorityScheduler {
         self.len() == 0
     }
 
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut stopped = self.stopped.lock();
-        while !*stopped {
-            stopped = self
-                .condition
-                .wait_while(stopped, |s| !*s && !self.predicate())
-                .unwrap();
-
-            if !*stopped {
-                drop(stopped);
-                self.run_one();
-                stopped = self.stopped.lock();
-            }
-        }
-    }
-
-    fn predicate(&self) -> bool {
-        let buckets = self.buckets.lock();
-        let aec = self.aec.read();
-        buckets.iter().any(|b| b.available(&aec))
-    }
-
     pub fn run_one(&self) {
         if self.queued_count.load(Ordering::Relaxed) == 0 {
             return;

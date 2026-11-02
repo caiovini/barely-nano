@@ -79,8 +79,6 @@ pub use blocks::*;
 mod unchecked_info;
 pub use unchecked_info::{UncheckedInfo, UncheckedKey};
 
-mod kdf;
-pub use kdf::KeyDerivationFunction;
 use alloc::format;
 use alloc::string::String;
 use core::{

@@ -17,7 +17,6 @@ use rsnano_stats::{DetailType, StatType, Stats};
 
 pub(crate) struct VoteRebroadcastQueueBuilder {
     stats: Option<Arc<Stats>>,
-    block_when_empty: bool,
     max_len: usize,
 }
 
@@ -27,13 +26,6 @@ impl VoteRebroadcastQueueBuilder {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn block_when_empty(mut self, block: bool) -> Self {
-        self.block_when_empty = block;
-        self
-    }
-
-    #[allow(dead_code)]
     pub fn max_len(mut self, max: usize) -> Self {
         self.max_len = max;
         self
@@ -41,7 +33,7 @@ impl VoteRebroadcastQueueBuilder {
 
     pub fn finish(self) -> VoteRebroadcastQueue {
         let stats = self.stats.unwrap_or_default();
-        VoteRebroadcastQueue::new(stats, self.block_when_empty, self.max_len)
+        VoteRebroadcastQueue::new(stats, self.max_len)
     }
 }
 
@@ -49,7 +41,6 @@ impl Default for VoteRebroadcastQueueBuilder {
     fn default() -> Self {
         Self {
             stats: Default::default(),
-            block_when_empty: true,
             max_len: VoteRebroadcastQueue::DEFAULT_MAX_QUEUE,
         }
     }
@@ -60,7 +51,6 @@ pub(crate) struct VoteRebroadcastQueue {
     enqueued: Condvar,
     stopped: AtomicBool,
     stats: Arc<Stats>,
-    block_when_empty: bool,
 }
 
 impl VoteRebroadcastQueue {
@@ -70,13 +60,12 @@ impl VoteRebroadcastQueue {
         Default::default()
     }
 
-    fn new(stats: Arc<Stats>, block_when_empty: bool, max_queue: usize) -> Self {
+    fn new(stats: Arc<Stats>, max_queue: usize) -> Self {
         Self {
             queue: Mutex::new(QueueImpl::new(max_queue)),
             enqueued: Condvar::new(),
             stopped: AtomicBool::new(false),
             stats,
-            block_when_empty,
         }
     }
 
@@ -119,21 +108,11 @@ impl VoteRebroadcastQueue {
         }
     }
 
-    /// This will wait for a vote to be enqueued or for the
-    /// queue to be stopped.
-    #[allow(dead_code)]
-    pub fn dequeue_blocking(&self) -> Option<(RepTier, Arc<Vote>)> {
-        let mut queue = self.queue.lock();
-        if queue.len() == 0 && !self.block_when_empty {
+    pub fn try_dequeue(&self) -> Option<(RepTier, Arc<Vote>)> {
+        if self.stopped() {
             return None;
         }
-
-        queue = self
-            .enqueued
-            .wait_while(queue, |q| q.len() == 0 && !self.stopped())
-            .unwrap();
-
-        return queue.dequeue();
+        self.queue.try_lock()?.dequeue()
     }
 
     pub fn stopped(&self) -> bool {
@@ -310,48 +289,9 @@ mod tests {
         queue.enqueue(test_vote());
         assert_eq!(queue.len(), 1);
 
-        let dequeued = queue.dequeue_blocking();
+        let dequeued = queue.try_dequeue();
         assert!(dequeued.is_some());
         assert_eq!(queue.len(), 0);
-    }
-
-    #[test]
-    fn dequeue_waits_when_queue_empty() {
-        // let queue = VoteRebroadcastQueue::build().finish();
-        // set_rep_tiers(&queue);
-        //
-        // let notify = Condvar::new();
-        // let waiting = Mutex::new(false);
-        // let mut dequeued = None;
-        //
-        // std::thread::scope(|s| {
-        //     // spawn blocking dequeue
-        //     s.spawn(|| {
-        //         *waiting.lock() = true;
-        //         notify.notify_one();
-        //         dequeued = queue.dequeue_blocking();
-        //     });
-        //
-        //     // enqueue when waiting
-        //     {
-        //         let guard = waiting.lock();
-        //         drop(notify.wait_while(guard, |i| !*i).unwrap());
-        //     }
-        //     queue.enqueue(test_vote());
-        // });
-        //
-        // assert!(dequeued.is_some());
-        // assert_eq!(queue.len(), 0);
-    }
-
-    #[test]
-    fn disable_blocking_dequeue() {
-        let queue = VoteRebroadcastQueue::build()
-            .block_when_empty(false)
-            .finish();
-
-        let result = queue.dequeue_blocking();
-        assert!(result.is_none());
     }
 
     #[test]
@@ -364,7 +304,7 @@ mod tests {
 
         assert!(queue.stopped());
         assert_eq!(queue.len(), 0);
-        assert!(queue.dequeue_blocking().is_none());
+        assert!(queue.try_dequeue().is_none());
 
         queue.enqueue(test_vote());
         assert_eq!(queue.len(), 0);

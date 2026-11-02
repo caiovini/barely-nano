@@ -22,9 +22,6 @@ pub struct CandidateAccountsConfig {
 
 impl Default for CandidateAccountsConfig {
     fn default() -> Self {
-        #[cfg(not(test))]
-        let cooldown = Duration::from_secs(15);
-        #[cfg(test)]
         let cooldown = Duration::from_secs(3);
         #[cfg(not(test))]
         let blocking_max = 256 * 1024;

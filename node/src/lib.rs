@@ -31,9 +31,7 @@ pub mod transport;
 pub mod utils;
 pub mod wallets;
 pub mod work;
-pub mod working_path;
 
 pub use node::*;
 pub use node_builder::*;
 pub use representatives::OnlineWeightSampler;
-pub use working_path::*;

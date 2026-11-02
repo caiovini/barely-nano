@@ -108,46 +108,6 @@ impl ManualScheduler {
         }
     }
 
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut guard = self.mutex.lock();
-        while !guard.stopped {
-            guard = self
-                .condition
-                .wait_while(guard, |g| !g.stopped && !g.predicate())
-                .unwrap();
-
-            if !guard.stopped {
-                self.stats
-                    .inc(StatType::ElectionScheduler, DetailType::Loop);
-
-                if guard.predicate() {
-                    let block = guard.queue.pop_front().unwrap();
-                    drop(guard);
-
-                    let hash = block.hash();
-                    let priority = self.ledger.any().block_priority(&block);
-                    self.stats
-                        .inc(StatType::ElectionScheduler, DetailType::InsertManual);
-
-                    let now = self.clock.now();
-
-                    let mut aec = self.active_elections.write();
-                    if aec
-                        .insert(AecInsertRequest::new_manual(block, priority), now)
-                        .is_ok()
-                    {
-                        aec.transition_active(&hash);
-                    }
-                } else {
-                    drop(guard);
-                }
-                self.notify();
-                guard = self.mutex.lock();
-            }
-        }
-    }
-
     pub fn container_info(&self) -> ContainerInfo {
         let guard = self.mutex.lock();
         [(

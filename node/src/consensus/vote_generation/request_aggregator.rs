@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::{ Mutex, MutexGuard };
-use crate::utils::{Condvar, JoinHandle};
+use spin::Mutex;
 use core::cmp::{max, min};
 
 use rsnano_core::{
@@ -44,16 +43,11 @@ impl RequestAggregatorConfig {
  * Votes are generated for uncached hashes.
  */
 pub struct RequestAggregator {
-#[allow(dead_code)]
     config: RequestAggregatorConfig,
     stats: Arc<Stats>,
-    #[allow(dead_code)]
     vote_generators: Arc<VoteGenerators>,
-    #[allow(dead_code)]
     ledger: Arc<Ledger>,
     pub(crate) state: Arc<Mutex<RequestAggregatorState>>,
-    condition: Arc<Condvar>,
-    threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl RequestAggregator {
@@ -69,35 +63,14 @@ impl RequestAggregator {
             vote_generators,
             ledger,
             config,
-            condition: Arc::new(Condvar::new()),
             state: Arc::new(Mutex::new(RequestAggregatorState {
                 queue: FairQueue::new(move |_| max_queue, |_| 1),
                 stopped: false,
             })),
-            threads: Mutex::new(Vec::new()),
         }
     }
 
-    pub fn start(&self) {
-        // let mut guard = self.threads.lock();
-        // for _ in 0..self.config.threads {
-        //     let aggregator_loop = RequestAggregatorLoop {
-        //         mutex: self.state.clone(),
-        //         condition: self.condition.clone(),
-        //         stats: self.stats.clone(),
-        //         config: self.config.clone(),
-        //         ledger: self.ledger.clone(),
-        //         vote_generators: self.vote_generators.clone(),
-        //     };
-        //
-        //     guard.push(
-        //         std::/* /* /* thread::Builder::new()
-        //             .name("Req aggregator".to_string())
-        //             .spawn(move || aggregator_loop.run())
-        //             .unwrap(),
-        //     );
-        // }
-    }
+    pub fn start(&self) {}
 
     pub fn request(&self, request: AggregatorRequest) -> bool {
         if request.roots_hashes.is_empty() {
@@ -121,7 +94,6 @@ impl RequestAggregator {
                 DetailType::RequestHashes,
                 request_len as u64,
             );
-            self.condition.notify_one();
         } else {
             self.stats
                 .inc(StatType::RequestAggregator, DetailType::Overfill);
@@ -147,15 +119,6 @@ impl RequestAggregator {
 
     pub fn stop(&self) {
         self.state.lock().stopped = true;
-        self.condition.notify_all();
-        let mut _threads = Vec::new();
-        {
-            let mut guard = self.threads.lock();
-            core::mem::swap(&mut _threads, &mut *guard);
-        }
-        // for thread in threads {
-        //     thread.join().unwrap(); */ */ */
-        // }
     }
 
     /// Returns the number of currently queued request pools
@@ -178,21 +141,13 @@ impl RequestAggregator {
         if batch.is_empty() {
             return false;
         }
-        let aggregator_loop = RequestAggregatorLoop {
-            mutex: self.state.clone(),
-            condition: self.condition.clone(),
-            stats: self.stats.clone(),
-            config: self.config.clone(),
-            ledger: self.ledger.clone(),
-            vote_generators: self.vote_generators.clone(),
-        };
         let mut any = self.ledger.any();
         for (_, request) in &batch {
             if any.should_refresh() {
                 any = self.ledger.any();
             }
             if !request.channel.should_drop(TrafficType::VoteReply) {
-                aggregator_loop.process(&any, request);
+                self.process(&any, request);
             } else {
                 self.stats.inc_dir(
                     StatType::RequestAggregator,
@@ -203,11 +158,49 @@ impl RequestAggregator {
         }
         true
     }
-}
 
-impl Drop for RequestAggregator {
-    fn drop(&mut self) {
-        // debug_assert!(self.threads.lock().is_empty())
+    fn process(&self, any: &dyn AnySet, request: &AggregatorRequest) {
+        let remaining = self.aggregate(any, request);
+
+        if !remaining.remaining_normal.is_empty() {
+            self.stats
+                .inc(StatType::RequestAggregatorReplies, DetailType::NormalVote);
+
+            let generated = self.vote_generators.generate_votes(
+                &remaining.remaining_normal,
+                &request.channel,
+                VoteType::NonFinal,
+            );
+            self.stats.add_dir(
+                StatType::Requests,
+                DetailType::RequestsCannotVote,
+                Direction::In,
+                (remaining.remaining_normal.len() - generated) as u64,
+            );
+        }
+
+        if !remaining.remaining_final.is_empty() {
+            self.stats
+                .inc(StatType::RequestAggregatorReplies, DetailType::FinalVote);
+
+            let generated = self.vote_generators.generate_votes(
+                &remaining.remaining_final,
+                &request.channel,
+                VoteType::Final,
+            );
+            self.stats.add_dir(
+                StatType::Requests,
+                DetailType::RequestsCannotVote,
+                Direction::In,
+                (remaining.remaining_final.len() - generated) as u64,
+            );
+        }
+    }
+
+    fn aggregate(&self, any: &dyn AnySet, requests: &AggregatorRequest) -> AggregateResult {
+        let mut aggregator = RequestAggregatorImpl::new(&self.stats, any);
+        aggregator.add_votes(&requests.roots_hashes);
+        aggregator.get_result()
     }
 }
 
@@ -229,112 +222,6 @@ pub struct AggregatorRequest {
 pub(crate) struct RequestAggregatorState {
     queue: FairQueue<ChannelId, AggregatorRequest>,
     stopped: bool,
-}
-
-#[allow(dead_code)]
-struct RequestAggregatorLoop {
-    mutex: Arc<Mutex<RequestAggregatorState>>,
-    condition: Arc<Condvar>,
-    stats: Arc<Stats>,
-    config: RequestAggregatorConfig,
-    ledger: Arc<Ledger>,
-    vote_generators: Arc<VoteGenerators>,
-}
-
-impl RequestAggregatorLoop {
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut guard = self.mutex.lock();
-        while !guard.stopped {
-            if !guard.queue.is_empty() {
-                guard = self.run_batch(guard);
-            } else {
-                guard = self
-                    .condition
-                    .wait_while(guard, |g| !g.stopped && g.queue.is_empty())
-                    .unwrap();
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn run_batch<'a>(
-        &'a self,
-        mut state: MutexGuard<'a, RequestAggregatorState>,
-    ) -> MutexGuard<'a, RequestAggregatorState> {
-        let batch = state.queue.next_batch(self.config.batch_size);
-        drop(state);
-
-        let mut any = self.ledger.any();
-
-        for (_, request) in &batch {
-            if any.should_refresh() {
-                any = self.ledger.any();
-            }
-
-            let should_drop = request.channel.should_drop(TrafficType::VoteReply);
-
-            if !should_drop {
-                self.process(&any, request);
-            } else {
-                self.stats.inc_dir(
-                    StatType::RequestAggregator,
-                    DetailType::ChannelFull,
-                    Direction::Out,
-                );
-            }
-        }
-
-        self.mutex.lock()
-    }
-
-    #[allow(dead_code)]
-    fn process(&self, any: &dyn AnySet, request: &AggregatorRequest) {
-        let remaining = self.aggregate(any, request);
-
-        if !remaining.remaining_normal.is_empty() {
-            self.stats
-                .inc(StatType::RequestAggregatorReplies, DetailType::NormalVote);
-
-            // Generate votes for the remaining hashes
-            let generated = self.vote_generators.generate_votes(
-                &remaining.remaining_normal,
-                &request.channel,
-                VoteType::NonFinal,
-            );
-            self.stats.add_dir(
-                StatType::Requests,
-                DetailType::RequestsCannotVote,
-                Direction::In,
-                (remaining.remaining_normal.len() - generated) as u64,
-            );
-        }
-
-        if !remaining.remaining_final.is_empty() {
-            self.stats
-                .inc(StatType::RequestAggregatorReplies, DetailType::FinalVote);
-
-            // Generate final votes for the remaining hashes
-            let generated = self.vote_generators.generate_votes(
-                &remaining.remaining_final,
-                &request.channel,
-                VoteType::Final,
-            );
-            self.stats.add_dir(
-                StatType::Requests,
-                DetailType::RequestsCannotVote,
-                Direction::In,
-                (remaining.remaining_final.len() - generated) as u64,
-            );
-        }
-    }
-
-    #[allow(dead_code)]
-    fn aggregate(&self, any: &dyn AnySet, requests: &AggregatorRequest) -> AggregateResult {
-        let mut aggregator = RequestAggregatorImpl::new(&self.stats, any);
-        aggregator.add_votes(&requests.roots_hashes);
-        aggregator.get_result()
-    }
 }
 
 pub(crate) struct RequestAggregatorCleanup {

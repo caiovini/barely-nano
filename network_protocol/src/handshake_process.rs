@@ -21,6 +21,7 @@ pub struct HandshakeProcess {
     pub syn_cookies: Arc<SynCookies>,
     pub stats: Arc<Stats>,
     pub genesis_block_hash: BlockHash,
+    pub protocol: rsnano_core::ProtocolInfo,
 }
 
 impl HandshakeProcess {
@@ -31,30 +32,44 @@ impl HandshakeProcess {
         stats: Arc<Stats>,
         genesis_block_hash: BlockHash,
     ) -> Self {
+        Self::with_protocol(
+            channel,
+            node_id_key,
+            syn_cookies,
+            stats,
+            genesis_block_hash,
+            rsnano_core::ProtocolInfo::default_for(rsnano_core::Networks::NanoLiveNetwork),
+        )
+    }
+
+    pub fn with_protocol(
+        channel: Arc<Channel>,
+        node_id_key: PrivateKey,
+        syn_cookies: Arc<SynCookies>,
+        stats: Arc<Stats>,
+        genesis_block_hash: BlockHash,
+        protocol: rsnano_core::ProtocolInfo,
+    ) -> Self {
         Self {
             channel,
             node_id_key,
             syn_cookies,
             stats,
             genesis_block_hash,
+            protocol,
         }
     }
 
     pub fn initiate_handshake(&self, peer: &SocketAddrV6) -> anyhow::Result<()> {
         let cookie = self.syn_cookies.assign(peer);
         if let Some(cookie) = cookie {
-            let mut hex = alloc::string::String::new();
-            for b in cookie {
-                hex.push_str(&alloc::format!("{:02x}", b));
-            }
-
             let message = Message::NodeIdHandshake(NodeIdHandshake {
                 query: Some(rsnano_messages::NodeIdHandshakeQuery { cookie }),
                 response: None,
                 is_v2: true,
             });
             let mut serializer = rsnano_messages::MessageSerializer::new_with_buffer_size(
-                rsnano_core::ProtocolInfo::default_for(rsnano_core::Networks::NanoLiveNetwork),
+                self.protocol.clone(),
                 512,
             );
             let buffer = serializer.serialize(&message);
@@ -95,8 +110,19 @@ impl HandshakeProcess {
         // Handle incoming response
         if let Some(response) = &message.response {
             let node_id = response.node_id;
+            let own_node_id = rsnano_core::NodeId::from(self.node_id_key.public_key());
 
-            if let Some(cookie) = self.syn_cookies.cookie(&self.channel.peer_addr()) {
+            if node_id == own_node_id {
+                kernel_common::uart::putchar(b'X');
+                status = HandshakeStatus::AbortOwnNodeId;
+            } else if response
+                .v2
+                .as_ref()
+                .is_some_and(|v2| v2.genesis != self.genesis_block_hash)
+            {
+                kernel_common::uart::putchar(b'X');
+                status = HandshakeStatus::Abort;
+            } else if let Some(cookie) = self.syn_cookies.cookie(&self.channel.peer_addr()) {
                 if let Err(_) = response.validate(&cookie) {
                     kernel_common::uart::putchar(b'X'); // X for validation fail
                     status = HandshakeStatus::Abort;

@@ -124,12 +124,6 @@ impl NodeBuilder {
             None => {
                 let cpu_count = get_cpu_count();
                 let daemon_config = DaemonConfig::new(&network_params, cpu_count);
-                let _config_path = "/tmp/node.toml";
-                // if config_path.exists() {
-                //     let toml_str = // // // std::fs::read_to_string(config_path)?;
-                //     let daemon_toml: DaemonToml = toml::de::from_str(&toml_str)?;
-                //     daemon_config.merge_toml(&daemon_toml);
-                // }
                 daemon_config.node
             }
         };

@@ -204,7 +204,7 @@ impl BlockingContainer {
         }
         let mut slow = *start;
         let mut fast = *start;
-        for step in 0..64 {
+        for step in 0..128 {
             let Some(fast_entry1) = self.get(&fast) else {
                 return (Some(fast), None);
             };
@@ -232,8 +232,8 @@ impl BlockingContainer {
             if slow == fast {
                 return (None, Some(slow));
             }
-            if step == 63 {
-                return (Some(fast), None);
+            if step == 127 {
+                return (None, Some(fast));
             }
         }
         (None, None)

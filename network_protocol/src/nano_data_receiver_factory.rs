@@ -54,12 +54,13 @@ impl NanoDataReceiverFactory {
 
 impl DataReceiverFactory for NanoDataReceiverFactory {
     fn create_receiver_for(&self, channel: Arc<Channel>) -> alloc::boxed::Box<dyn DataReceiver + Send> {
-        let handshake_process = HandshakeProcess::new(
+        let handshake_process = HandshakeProcess::with_protocol(
             channel.clone(),
             self.node_id_key.clone(),
             self.syn_cookies.clone(),
             self.stats.clone(),
             self.genesis_block_hash,
+            self.protocol.clone(),
         );
 
         let message_deserializer = MessageDeserializer::with_filter(

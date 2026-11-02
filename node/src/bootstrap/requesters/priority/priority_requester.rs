@@ -116,14 +116,26 @@ impl PriorityRequester {
                         return PollResult::Wait;
                     }
 
-                    // Query account head with NO BootstrapState lock held!
-                    let head = self.query_factory.get_account_head(&next.account);
+                    // Query account head/confirmed frontier with NO BootstrapState lock held!
+                    // `optimistic_request_percentage` (config.toml) selects Optimistic (start at
+                    // the local head) vs Safe (start at the confirmed frontier, re-downloads the
+                    // unconfirmed segment and yields `Old` blocks on hot accounts). 100 = never Safe.
+                    let pull_type = self.query_factory.pull_type_decider.decide_pull_type();
+                    let (head, confirmed_frontier) = match pull_type {
+                        crate::bootstrap::state::PullType::Optimistic => (
+                            self.query_factory.get_account_head(&next.account),
+                            rsnano_core::BlockHash::zero(),
+                        ),
+                        crate::bootstrap::state::PullType::Safe => {
+                            self.query_factory.get_account_info(&next.account)
+                        }
+                    };
                     let query = self.query_factory.create_priority_query(
                         &next,
                         channel.clone(),
-                        crate::bootstrap::state::PullType::Optimistic,
+                        pull_type,
                         head,
-                        rsnano_core::BlockHash::zero(),
+                        confirmed_frontier,
                     );
 
                     self.state = PriorityState::Initial;

@@ -1,8 +1,9 @@
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::boxed::Box;
-use spin::{ Mutex };
-use core::time::Duration;
+use alloc::{boxed::Box, string::String, sync::Arc};
+use core::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
+use spin::Mutex;
 
 #[cfg(feature = "output_tracking")]
 use super::timer::TimerEvent;
@@ -21,17 +22,11 @@ pub trait ThreadPool: Send + Sync {
 pub struct ThreadPoolImpl<T: TimerStrategy + 'static = TimerWrapper> {
     data: Arc<Mutex<Option<ThreadPoolData<T>>>>,
     stopped: Arc<Mutex<bool>>,
+    queued_tasks: Arc<AtomicUsize>,
 }
 
 struct ThreadPoolData<T: TimerStrategy> {
     timer: Timer<T>,
-}
-
-impl<T: TimerStrategy> ThreadPoolData<T> {
-    fn push_task(&self, callback: Box<dyn FnOnce() + Send>) {
-        // Stub: In bare-metal, execute directly or put in a task queue
-        callback();
-    }
 }
 
 impl ThreadPoolImpl<TimerWrapper> {
@@ -54,9 +49,8 @@ impl<T: TimerStrategy> ThreadPoolImpl<T> {
     pub fn new(_num_threads: usize, _thread_name: String, timer: Timer<T>) -> Self {
         Self {
             stopped: Arc::new(Mutex::new(false)),
-            data: Arc::new(Mutex::new(Some(ThreadPoolData {
-                timer,
-            }))),
+            data: Arc::new(Mutex::new(Some(ThreadPoolData { timer }))),
+            queued_tasks: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -72,7 +66,20 @@ impl<T: TimerStrategy + 'static> ThreadPool for ThreadPoolImpl<T> {
             let stopped_guard = self.stopped.lock();
             !*stopped_guard && self.data.lock().is_some()
         };
-        if can_run {
+        if !can_run {
+            return;
+        }
+        if kernel_common::async_rt::EXECUTOR.lock().is_some() {
+            let queued = self.queued_tasks.clone();
+            let stopped = self.stopped.clone();
+            queued.fetch_add(1, Ordering::Relaxed);
+            kernel_common::async_rt::spawn(async move {
+                if !*stopped.lock() {
+                    callback();
+                }
+                queued.fetch_sub(1, Ordering::Relaxed);
+            });
+        } else {
             callback();
         }
     }
@@ -83,24 +90,15 @@ impl<T: TimerStrategy + 'static> ThreadPool for ThreadPoolImpl<T> {
             let data_guard = self.data.lock();
             drop(stopped_guard);
             let mut option_callback = Some(callback);
-            let data_clone = self.data.clone();
             let stopped_clone = self.stopped.clone();
             if let Some(data) = data_guard.as_ref() {
-                data.timer.schedule_with_delay(
-                    delay,
-                    move || {
-                        if let Some(cb) = option_callback.take() {
-                            let stopped_guard = stopped_clone.lock();
-                            if !*stopped_guard {
-                                let data_guard = data_clone.lock();
-                                drop(stopped_guard);
-                                if let Some(data) = data_guard.as_ref() {
-                                    data.push_task(cb);
-                                }
-                            }
+                data.timer.schedule_with_delay(delay, move || {
+                    if let Some(cb) = option_callback.take() {
+                        if !*stopped_clone.lock() {
+                            cb();
                         }
-                    },
-                );
+                    }
+                });
             }
         }
     }
@@ -111,19 +109,11 @@ impl<T: TimerStrategy + 'static> ThreadPool for ThreadPoolImpl<T> {
             let mut data_guard = self.data.lock();
             *stopped_guard = true;
             drop(stopped_guard);
-            if let Some(_data) = data_guard.take() {
-                drop(data_guard);
-            }
+            let _ = data_guard.take();
         }
     }
 
     fn num_queued_tasks(&self) -> usize {
-        0
-    }
-}
-
-impl<T: TimerStrategy + 'static> Drop for ThreadPoolImpl<T> {
-    fn drop(&mut self) {
-        self.stop()
+        self.queued_tasks.load(Ordering::Relaxed)
     }
 }

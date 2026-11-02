@@ -1,25 +1,21 @@
 use alloc::sync::Arc;
-use alloc::vec::Vec;
-use spin::{ Mutex };
-use crate::utils::JoinHandle;
+use spin::Mutex;
 
 use rsnano_core::utils::BackpressureSender;
 use rsnano_ledger::Ledger;
 use rsnano_stats::{StatsCollection, StatsSource};
 
 use super::{
-    backlog_waiter::BacklogWaiter, block_batch_processor::BlockBatchProcessorStats,
-    BlockContext, BlockProcessorQueue, LedgerEvent, UncheckedMap,
+    block_batch_processor::BlockBatchProcessorStats, BlockContext, BlockProcessorQueue,
+    LedgerEvent, UncheckedMap,
 };
 use crate::block_processing::block_batch_processor::BlockBatchProcessor;
 
 pub struct BlockProcessor {
-    threads: Mutex<Vec<JoinHandle<()>>>,
     queue: Arc<BlockProcessorQueue>,
     ledger: Arc<Ledger>,
     unchecked: Arc<UncheckedMap>,
     process_stats: Arc<BlockBatchProcessorStats>,
-    backlog_waiter: Arc<BacklogWaiter>,
     event_publisher: Mutex<Option<BackpressureSender<LedgerEvent>>>,
     pub signature_checker: Arc<crate::signatures::SignatureChecker>,
     cached_loop: Mutex<Option<BlockProcessorLoop>>,
@@ -30,7 +26,6 @@ impl BlockProcessor {
         queue: Arc<BlockProcessorQueue>,
         ledger: Arc<Ledger>,
         unchecked: Arc<UncheckedMap>,
-        backlog_waiter: Arc<BacklogWaiter>,
         event_publisher: BackpressureSender<LedgerEvent>,
         signature_checker: Arc<crate::signatures::SignatureChecker>,
     ) -> Self {
@@ -47,7 +42,6 @@ impl BlockProcessor {
         let cached_loop = BlockProcessorLoop {
             queue: queue.clone(),
             process,
-            backlog_waiter: backlog_waiter.clone(),
         };
 
         Self {
@@ -55,23 +49,13 @@ impl BlockProcessor {
             ledger,
             unchecked,
             process_stats,
-            threads: Mutex::new(Vec::new()),
-            backlog_waiter,
             event_publisher: Mutex::new(Some(event_publisher)),
             signature_checker,
             cached_loop: Mutex::new(Some(cached_loop)),
         }
     }
 
-    /// In bare-metal mode, the BlockProcessor is driven manually
-    /// by Hart 6 in main/src/bin.rs. This start() method remains as a
-    /// no-op placeholder for architectural consistency.
     pub fn start(&self) {}
-
-    pub fn run(&self) {
-        let mut loop_state = self.create_loop();
-        loop_state.run();
-    }
 
     pub fn run_once(&self) {
         if let Some(mut guard) = self.cached_loop.try_lock() {
@@ -89,7 +73,6 @@ impl BlockProcessor {
         BlockProcessorLoop {
             queue: self.queue.clone(),
             process: self.create_block_batch_processor(),
-            backlog_waiter: self.backlog_waiter.clone(),
         }
     }
 
@@ -104,7 +87,7 @@ impl BlockProcessor {
                 .as_ref()
                 .unwrap()
                 .clone(),
-            clock: Arc::new(rsnano_nullable_clock::SteadyClock::default()), // TODO: use real clock
+            clock: Arc::new(rsnano_nullable_clock::SteadyClock::default()),
             signature_checker: self.signature_checker.clone(),
         }
     }
@@ -113,10 +96,6 @@ impl BlockProcessor {
         drop(self.event_publisher.lock().take());
         drop(self.cached_loop.lock().take());
         self.queue.stop();
-        let mut threads = self.threads.lock();
-        for _join_handle in threads.drain(..) {
-            // join_handle.join().unwrap(); */ */ */ */ */
-        }
     }
 
     pub fn total_queue_len(&self) -> usize {
@@ -159,32 +138,12 @@ impl StatsSource for BlockProcessor {
 struct BlockProcessorLoop {
     queue: Arc<BlockProcessorQueue>,
     process: BlockBatchProcessor,
-    #[allow(dead_code)]
-    backlog_waiter: Arc<BacklogWaiter>,
 }
 
 impl BlockProcessorLoop {
-    #[allow(dead_code)]
-    pub fn run(&mut self) {
-        while let Some(blocks) = self.queue.pop_blocking() {
-            if self.queue.stopped() {
-                break;
-            }
-
-            self.process.process_blocks(blocks);
-        }
-    }
-
     pub fn run_once(&mut self) {
-        let mut count = 0;
-        while let Some(blocks) = self.queue.pop() {
+        if let Some(blocks) = self.queue.pop() {
             self.process.process_blocks(blocks);
-            
-            count += 1;
-            if count >= 1 || self.queue.stopped() {
-                break;
-            }
         }
     }
 }
-

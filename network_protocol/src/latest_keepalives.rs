@@ -40,9 +40,12 @@ impl LatestKeepalives {
         self.entries.get(&channel_id)
     }
 
-    //TODO: randomize
     pub fn pop_random(&mut self) -> Option<Keepalive> {
-        let channel_id = *self.entries.keys().next()?;
+        if self.entries.is_empty() {
+            return None;
+        }
+        let idx = (rsnano_nullable_random::random_u64() as usize) % self.entries.len();
+        let channel_id = *self.entries.keys().nth(idx)?;
         self.entries.remove(&channel_id)
     }
 

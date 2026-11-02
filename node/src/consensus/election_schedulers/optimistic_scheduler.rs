@@ -172,36 +172,6 @@ impl OptimisticScheduler {
         }
     }
 
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut guard = self.candidates.lock();
-        while !self.stopped.load(Ordering::SeqCst) {
-            self.stats
-                .inc(StatType::OptimisticScheduler, DetailType::Loop);
-
-            if self.predicate(&guard) {
-                let any = self.ledger.any();
-
-                while self.predicate(&guard) {
-                    let (account, time) = guard.pop_front().unwrap();
-                    drop(guard);
-                    self.run_one(&any, account, time);
-                    guard = self.candidates.lock();
-                }
-            }
-
-            guard = self
-                .condition
-                .wait_timeout_while(
-                    guard,
-                    self.network_constants.optimistic_activation_delay / 2,
-                    |g| !self.stopped.load(Ordering::SeqCst) && !self.predicate(g),
-                )
-                .unwrap()
-                .0;
-        }
-    }
-
     pub fn run_once(&self) {
         if self.stopped.load(Ordering::Relaxed) {
             return;

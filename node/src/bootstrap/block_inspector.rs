@@ -137,7 +137,13 @@ impl BlockInspector {
                     BlockSource::Live | BlockSource::LiveOriginator
                 );
                 if !is_live
-                    && (cfg!(test) || state.candidate_accounts.prioritized(&account))
+                    && (cfg!(test)
+                        || result.source == BlockSource::Unchecked
+                        || state.candidate_accounts.prioritized(&account)
+                        || state
+                            .candidate_accounts
+                            .count_by_dependency_account(&account)
+                            > 0)
                 {
                     match state.candidate_accounts.priority_up(&account) {
                         PriorityUpResult::Updated => {

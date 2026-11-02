@@ -14,11 +14,18 @@ pub trait TimerStrategy: Send {
 pub struct TimerWrapper;
 
 impl TimerStrategy for TimerWrapper {
-    fn schedule_with_delay<F>(&self, _delay: Duration, mut _cb: F)
+    fn schedule_with_delay<F>(&self, delay: Duration, mut cb: F)
     where
         F: 'static + FnMut() + Send,
     {
-        // Stub: In bare-metal, use a hardware timer
+        if kernel_common::async_rt::EXECUTOR.lock().is_some() {
+            kernel_common::async_rt::spawn(async move {
+                kernel_common::async_rt::sleep(delay).await;
+                cb();
+            });
+        } else if delay < Duration::from_secs(1) {
+            cb();
+        }
     }
 }
 
@@ -83,7 +90,7 @@ impl<T: TimerStrategy> Timer<T> {
     {
         #[cfg(feature = "output_tracking")]
         let cb = {
-            let option_cb = Arc::new(Mutex::new(Some(cb)));
+            let option_cb = Arc::new(spin::Mutex::new(Some(cb)));
             let arc_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 let cb = option_cb.lock().take();
                 if let Some(mut cb) = cb {

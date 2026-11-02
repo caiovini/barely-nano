@@ -58,6 +58,15 @@ pub use wallet_representative::*;
 pub use wallet_representative_set::*;
 pub use wallet_with_account::*;
 pub use wallet_with_count::*;
+
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct AccountRepresentativeSetArgs {
+    pub wallet: WalletId,
+    pub account: rsnano_core::Account,
+    pub representative: rsnano_core::Account,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<rsnano_core::WorkNonce>,
+}
 pub use wallet_with_password::*;
 pub use wallet_work_get::*;
 pub use work_get::*;

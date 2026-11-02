@@ -1,12 +1,9 @@
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::boxed::Box;
-use spin::{ Mutex, MutexGuard };
-use crate::utils::{Condvar, JoinHandle};
+use spin::Mutex;
 use core::sync::atomic::{ AtomicBool, Ordering };
-use core::ops::DerefMut;
 
 use rsnano_stats::{DetailType, Direction, StatType, Stats};
 
@@ -14,10 +11,7 @@ use rsnano_stats::{DetailType, Direction, StatType, Stats};
  * Queue that processes enqueued elements in (possibly parallel) batches
  */
 pub struct ProcessingQueue<T: Send + 'static> {
-    _thread_name: String,
-    _thread_count: usize,
     max_queue_size: usize,
-    threads: Mutex<Vec<JoinHandle<()>>>,
     shared_state: Arc<SharedState<T>>,
     stats: Arc<Stats>,
     stat_type: StatType,
@@ -32,55 +26,28 @@ impl<T: Send + 'static> ProcessingQueue<T> {
     pub fn new(
         stats: Arc<Stats>,
         stat_type: StatType,
-        thread_name: String,
-        thread_count: usize,
+        _thread_name: String,
+        _thread_count: usize,
         max_queue_size: usize,
         max_batch_size: usize,
         process_batch: Box<dyn Fn(VecDeque<T>) + Send + Sync>,
     ) -> Self {
         Self {
-            _thread_name: thread_name,
-            _thread_count: thread_count,
             stats: Arc::clone(&stats),
             stat_type,
             max_queue_size,
-            threads: Mutex::new(Vec::with_capacity(thread_count)),
             shared_state: Arc::new(SharedState::new(
                 max_batch_size,
-                stats,
-                stat_type,
                 process_batch,
             )),
         }
     }
 
-    pub fn start(&self) {
-        // let mut threads = self.threads.lock();
-        // for _ in 0..self.thread_count {
-        //     let state = Arc::clone(&self.shared_state);
-        //     threads.push(
-        //         std::/* /* thread::Builder::new()
-        //             .name(self.thread_name.clone())
-        //             .spawn(move || state.run())
-        //             .unwrap(),
-        //     )
-        // }
-    }
+    pub fn start(&self) {}
 
     pub fn stop(&self) {
-        {
-            let _guard = self.shared_state.queue.lock();
-            self.shared_state.stopped.store(true, Ordering::SeqCst);
-        }
-        self.shared_state.condition.notify_all();
-        let mut _threads = Vec::new();
-        {
-            let mut guard = self.threads.lock();
-            core::mem::swap(guard.deref_mut(), &mut _threads);
-        }
-        // for thread in threads {
-        //     thread.join().unwrap(); */ */
-        // }
+        let _guard = self.shared_state.queue.lock();
+        self.shared_state.stopped.store(true, Ordering::SeqCst);
     }
 
     /// Queues item for batch processing
@@ -89,7 +56,6 @@ impl<T: Send + 'static> ProcessingQueue<T> {
         if queue.len() < self.max_queue_size {
             queue.push_back(item);
             drop(queue);
-            self.shared_state.condition.notify_one();
             self.stats
                 .inc_dir(self.stat_type, DetailType::Queue, Direction::In);
         } else {
@@ -145,75 +111,22 @@ impl<T: Send + 'static> Drop for ProcessingQueue<T> {
 }
 
 struct SharedState<T> {
-    condition: Condvar,
     queue: Mutex<VecDeque<T>>,
     stopped: AtomicBool,
     max_batch_size: usize,
-    stats: Arc<Stats>,
-    stat_type: StatType,
     process_batch: Box<dyn Fn(VecDeque<T>) + Send + Sync>,
 }
 
 impl<T> SharedState<T> {
     pub fn new(
         max_batch_size: usize,
-        stats: Arc<Stats>,
-        stat_type: StatType,
         process_batch: Box<dyn Fn(VecDeque<T>) + Send + Sync>,
     ) -> Self {
         Self {
-            condition: Condvar::new(),
             queue: Mutex::new(VecDeque::new()),
             stopped: AtomicBool::new(false),
             max_batch_size,
-            stats,
-            stat_type,
             process_batch,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut guard = self.queue.lock();
-        while !self.stopped.load(Ordering::SeqCst) {
-            let batch = self.next_batch(guard);
-            if !batch.is_empty() {
-                self.stats
-                    .inc_dir(self.stat_type, DetailType::Batch, Direction::In);
-                (self.process_batch)(batch);
-            }
-            guard = self.queue.lock();
-        }
-    }
-
-    #[allow(dead_code)]
-    fn next_batch<'a>(&self, guard: MutexGuard<'a, VecDeque<T>>) -> VecDeque<T> {
-        let mut guard = self
-            .condition
-            .wait_while(guard, |queue| {
-                queue.is_empty() && !self.stopped.load(Ordering::SeqCst)
-            })
-            .unwrap();
-
-        if self.stopped.load(Ordering::SeqCst) {
-            VecDeque::new()
-        }
-        // Unlimited batch size or queue smaller than max batch size, return the whole current queue
-        else if self.max_batch_size == 0 || guard.len() < self.max_batch_size {
-            let mut queue_l = VecDeque::new();
-            core::mem::swap(&mut queue_l, &mut guard);
-            queue_l
-        }
-        // Larger than max batch size, return limited number of elements
-        else {
-            let mut queue_l = VecDeque::with_capacity(self.max_batch_size);
-            for _ in 0..self.max_batch_size {
-                if let Some(item) = guard.pop_front() {
-                    queue_l.push_back(item);
-                }
-            }
-
-            queue_l
         }
     }
 }
@@ -240,7 +153,6 @@ mod tests {
 
     struct TestFixture {
         _processed: Arc<Mutex<usize>>,
-        _condition: Arc<Condvar>,
         queue: ProcessingQueue<i32>,
     }
 
@@ -248,9 +160,7 @@ mod tests {
 
     fn create_fixture() -> TestFixture {
         let processed = Arc::new(Mutex::new(0));
-        let condition = Arc::new(Condvar::new());
         let processed_clone = Arc::clone(&processed);
-        let condition_clone = Arc::clone(&condition);
 
         let queue = ProcessingQueue::new(
             Arc::new(Stats::new(Default::default())),
@@ -260,17 +170,13 @@ mod tests {
             MAX_TEST_QUEUE_LEN,
             2,
             Box::new(move |i| {
-                {
-                    *processed_clone.lock() += i.len();
-                }
-                condition_clone.notify_all();
+                *processed_clone.lock() += i.len();
             }),
         );
         queue.start();
         TestFixture {
             queue,
             _processed: processed,
-            _condition: condition,
         }
     }
 }

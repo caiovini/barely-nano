@@ -58,6 +58,12 @@ impl BlockAckProcessor {
             VerifyResult::Invalid => {
                 self.stats
                     .inc(StatType::BootstrapVerifyBlocks, DetailType::Invalid);
+                #[cfg(not(test))]
+                if !query.account.is_zero() {
+                    let mut guard = self.state.lock();
+                    guard.candidate_accounts.priority_down(&query.account);
+                    guard.candidate_accounts.reset_last_request(&query.account);
+                }
                 false
             }
         };
@@ -117,7 +123,12 @@ impl BlockAckProcessor {
                             match res {
                                 Ok(()) => {
                                     let mut guard = state.lock();
-                                    if is_full_batch {
+                                    if is_full_batch
+                                        || guard
+                                            .candidate_accounts
+                                            .count_by_dependency_account(&account)
+                                            > 0
+                                    {
                                         guard.candidate_accounts.reset_last_request(&account);
                                     } else {
                                         guard.candidate_accounts.priority_erase(&account);
@@ -126,8 +137,14 @@ impl BlockAckProcessor {
                                 Err(rsnano_ledger::BlockError::Old) => {
                                     let mut guard = state.lock();
                                     guard.candidate_accounts.priority_down(&account);
+                                    guard.candidate_accounts.reset_last_request(&account);
                                 }
-                                _ => {}
+                                Err(rsnano_ledger::BlockError::GapSource)
+                                | Err(rsnano_ledger::BlockError::GapEpochOpenPending) => {}
+                                Err(_) => {
+                                    let mut guard = state.lock();
+                                    guard.candidate_accounts.reset_last_request(&account);
+                                }
                             }
                         }),
                     )
@@ -175,7 +192,6 @@ impl BlockAckProcessor {
                 PriorityDownResult::InvalidAccount => {}
             }
 
-            #[cfg(test)]
             guard.candidate_accounts.reset_last_request(&query.account);
         }
     }

@@ -150,10 +150,6 @@ impl ConfirmingSet {
         self.thread.add(election.winner.hash(), Some(election));
     }
 
-    pub fn run(&self) {
-        self.thread.run();
-    }
-
     pub fn run_once(&self) {
         self.thread.run_once();
     }
@@ -316,54 +312,6 @@ impl ConfirmingSetThread {
         guard.set.len() + guard.current.len()
     }
 
-    #[allow(dead_code)]
-    fn run(&self) {
-        let mut guard = self.mutex.lock();
-        while !self.stopped.load(Ordering::SeqCst) {
-            self.stats.inc(StatType::ConfirmingSet, DetailType::Loop);
-            let evicted = guard.cleanup(self.clock.now());
-
-            if !evicted.is_empty() {
-                drop(guard);
-                {
-                    for entry in evicted {
-                        self.notify(LedgerEvent::ConfirmationFailed(entry.confirmation_root));
-                    }
-                }
-                guard = self.mutex.lock();
-            }
-
-            if !guard.set.is_empty() && !guard.cool_down {
-                let batch = guard.next_batch(self.config.batch_size);
-
-                debug_assert!(guard.current.is_empty());
-                for entry in &batch {
-                    guard.current.insert(entry.confirmation_root);
-                }
-                let recovered = guard.near_full && guard.set.len() < guard.recovered_limit;
-                if recovered {
-                    guard.near_full = false;
-                }
-
-                drop(guard);
-
-                self.run_batch(batch);
-                if recovered {
-                    self.notify(LedgerEvent::ConfirmingSetRecovered);
-                }
-
-                guard = self.mutex.lock();
-            } else {
-                guard = self
-                    .condition
-                    .wait_while(guard, |i| {
-                        (i.set.is_empty() || i.cool_down) && !self.stopped.load(Ordering::SeqCst)
-                    })
-                    .unwrap();
-            }
-        }
-    }
-
     fn run_once(&self) {
         let mut guard = self.mutex.lock();
         if self.stopped.load(Ordering::SeqCst) || guard.set.is_empty() || guard.cool_down {
@@ -479,16 +427,11 @@ pub struct ConfirmationContext {
 
 struct CementedNotifier<'a> {
     confirming_set: &'a ConfirmingSetThread,
-    #[allow(dead_code)]
-    already_confirmed: VecDeque<BlockHash>,
 }
 
 impl<'a> CementedNotifier<'a> {
     fn new(confirming_set: &'a ConfirmingSetThread) -> Self {
-        Self {
-            confirming_set,
-            already_confirmed: Default::default(),
-        }
+        Self { confirming_set }
     }
 }
 

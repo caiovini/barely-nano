@@ -60,13 +60,18 @@ enable = true
 enable_priorities = true
 enable_dependency_walker = true
 enable_frontier_scan = true
-rate_limit = 1500
-database_rate_limit = 256
-frontier_rate_limit = 48
+rate_limit = 5000
+database_rate_limit = 1024
+frontier_rate_limit = 32
 channel_limit = 16
-max_requests = 1024
-request_timeout = 5000
+max_requests = 2048
+request_timeout = 10000
 block_processor_threshold = 16384
+# Percentage of priority pulls that start at the local account head (Optimistic).
+# The rest start at the confirmed frontier (Safe): resistant to bootstrap poisoning
+# but re-downloads unconfirmed blocks (slower). 100 = Optimistic only (trusted peers only).
+# RSNano default is 75. Peers are mostly public/untrusted, so keep Safe pulls enabled.
+optimistic_request_percentage = 90
 
 [node.bootstrap.frontier_scan]
 max_pending = 128
@@ -89,7 +94,7 @@ max_system_queue = 131072
 batch_size = 256
 
 [node.bounded_backlog]
-enable = false
+enable = true
 batch_size = 32
 scan_rate = 64
 
