@@ -245,7 +245,7 @@ pub fn recover(storage: &mut StorageContext, base: usize, area_pages: usize, epo
     if checksum(&pages[..dp + batch.n], CHECKSUM_SEED) != stored_sum {
         // Torn batch: it was never committed, so nothing of it may be applied. The previous
         // batch was fully applied before this one was started.
-        crate::uart::print(b"[wal] newest batch failed checksum, ignored\n");
+        tracing::warn!("[wal] newest batch failed checksum, ignored");
         return 0;
     }
 

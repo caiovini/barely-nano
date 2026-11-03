@@ -188,7 +188,7 @@ impl Ledger {
 
     fn initialize(&mut self, _thread_count: usize) -> anyhow::Result<()> {
         kernel_common::watchdog::kick();
-        kernel_common::uart::print(b"[ledger] Initializing ledger...\n");
+        tracing::info!("[ledger] Initializing ledger...");
         let genesis = self.constants.genesis_block.clone();
         let genesis_account = self.constants.genesis_block.account();
 
@@ -201,39 +201,30 @@ impl Ledger {
 
             // 1. Ensure genesis block exists
             let exists = self.any().block_exists_or_pruned(&genesis.hash());
-            kernel_common::uart::print(b"[ledger] Checked genesis block. Exists=");
-            if exists {
-                kernel_common::uart::print(b"true\n");
-            } else {
-                kernel_common::uart::print(b"false\n");
-            }
+            tracing::debug!("[ledger] Checked genesis block. Exists={}", exists);
 
             if !exists {
-                kernel_common::uart::print(b"[ledger] Genesis block not found, inserting (attempt ");
-                kernel_common::uart::print_usize(attempt);
-                kernel_common::uart::print(b")...\n");
-                
+                tracing::info!(
+                    "[ledger] Genesis block not found, inserting (attempt {})...",
+                    attempt
+                );
+
                 if let Err(e) = self.process_one(&genesis) {
-                    tracing::error!("Failed to process genesis block: {:?}", e);
-                    kernel_common::uart::print(b"[ledger] FAILED to process genesis block!\n");
+                    tracing::error!("[ledger] Failed to process genesis block: {:?}", e);
                     if attempt == 0 {
-                        tracing::error!("FATAL: Ledger corruption detected during genesis insertion. Wiping database...");
-                        kernel_common::uart::print(b"[ledger] FATAL: Corruption during genesis insertion. Wiping database...\n");
+                        tracing::error!("[ledger] FATAL: Ledger corruption detected during genesis insertion. Wiping database...");
                         self.store.wipe();
                         continue;
                     } else {
                         return Err(anyhow::anyhow!("Could not insert genesis: {:?}", e));
                     }
                 } else {
-                    tracing::debug!("Genesis block processed successfully.");
-                    kernel_common::uart::print(b"[ledger] Genesis block processed successfully.\n");
+                    tracing::info!("[ledger] Genesis block processed successfully.");
                     // Diagnostic: Verify we can retrieve it immediately
                     if let Some(_found) = self.any().get_block(&genesis.hash()) {
-                        tracing::debug!("VERIFIED: Genesis block is retrievable from store.");
-                        kernel_common::uart::print(b"[ledger] VERIFIED: Genesis block is retrievable from store.\n");
+                        tracing::debug!("[ledger] VERIFIED: Genesis block is retrievable from store.");
                     } else {
-                        tracing::error!("CRITICAL: Genesis block NOT FOUND in store immediately after processing!");
-                        kernel_common::uart::print(b"[ledger] CRITICAL: Genesis block NOT FOUND in store immediately after processing!\n");
+                        tracing::error!("[ledger] CRITICAL: Genesis block NOT FOUND in store immediately after processing!");
                     }
                 }
                 self.confirm(genesis.hash());
@@ -251,10 +242,9 @@ impl Ledger {
                     // Check if head block exists
                     if !self.any().block_exists_or_pruned(&info.head) {
                         tracing::warn!(
-                            "Ledger inconsistency: Head block {} NOT found for genesis account. Resetting to genesis...",
+                            "[ledger] Ledger inconsistency: Head block {} NOT found for genesis account. Resetting to genesis...",
                             info.head
                         );
-                        kernel_common::uart::print(b"[ledger] Ledger inconsistency: Head block NOT found for genesis account. Resetting...\n");
                         // Reset account info to genesis
                         let mut new_info = info.clone();
                         new_info.head = genesis.hash();
@@ -262,17 +252,15 @@ impl Ledger {
                         new_info.block_count = 1;
                         self.store.account.put(&genesis_account, &new_info);
                         self.store.flush().expect("Could not flush during recovery");
-                        tracing::debug!("Ledger: Genesis account reset to consistent state.");
-                        kernel_common::uart::print(b"[ledger] Genesis account reset to consistent state.\n");
+                        tracing::info!("[ledger] Genesis account reset to consistent state.");
                         continue;
                     }
                 }
                 None => {
                     tracing::warn!(
-                        "Genesis account info NOT found for account {}! Recreating from genesis block...",
+                        "[ledger] Genesis account info NOT found for account {}! Recreating from genesis block...",
                         genesis_account.encode_account()
                     );
-                    kernel_common::uart::print(b"[ledger] Ledger inconsistency: Genesis account info NOT found. Recreating...\n");
                     let mut info = AccountInfo::default();
                     info.head = genesis.hash();
                     info.open_block = genesis.hash();
@@ -280,41 +268,37 @@ impl Ledger {
                     info.block_count = 1;
                     self.store.account.put(&genesis_account, &info);
                     self.store.flush().expect("Could not flush during recovery");
-                    tracing::debug!("Ledger: Genesis account info recreated successfully.");
-                    kernel_common::uart::print(b"[ledger] Genesis account info recreated successfully.\n");
+                    tracing::info!("[ledger] Genesis account info recreated successfully.");
                     continue;
                 }
             }
 
             // If we reached here, basic integrity is confirmed
             if attempt > 0 {
-                tracing::debug!("Ledger successfully recovered and initialized.");
-                kernel_common::uart::print(b"[ledger] Ledger successfully recovered and initialized.\n");
+                tracing::info!("[ledger] Ledger successfully recovered and initialized.");
             }
             break;
         }
 
-        kernel_common::uart::print(b"[ledger] Fetching genesis account info...\n");
+        tracing::debug!("[ledger] Fetching genesis account info...");
         let _info = self.any().get_account(&genesis_account).unwrap();
-        kernel_common::uart::print(b"[ledger] Fetching genesis account info done.\n");
+        tracing::debug!("[ledger] Fetching genesis account info done.");
 
-        kernel_common::uart::print(b"[ledger] Tracing block successors...\n");
+        tracing::debug!("[ledger] Tracing block successors...");
         let mut current = genesis.hash();
         let mut count = 0;
         while !current.is_zero() && count < 10 {
             kernel_common::watchdog::kick();
             if let Some(_block) = self.any().get_block(&current) {
-                kernel_common::uart::print(b"[ledger]   Block successor: ");
-                kernel_common::uart::print_usize(count);
-                kernel_common::uart::print(b"\n");
+                tracing::debug!("[ledger]   Block successor: {}", count);
                 current = self.any().block_successor(&current).unwrap_or_default();
             } else {
-                kernel_common::uart::print(b"[ledger]   Block successor NOT FOUND.\n");
+                tracing::warn!("[ledger]   Block successor NOT FOUND.");
                 break;
             }
             count += 1;
         }
-        kernel_common::uart::print(b"[ledger] Tracing block successors done.\n");
+        tracing::debug!("[ledger] Tracing block successors done.");
 
         Ok(())
     }

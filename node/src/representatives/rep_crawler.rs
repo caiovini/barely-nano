@@ -174,15 +174,14 @@ impl RepCrawler {
         let mut guard = self.rep_crawler_impl.lock();
 
         for channel in target_channels {
+            guard.track_rep_request(hash_root, channel.channel_id(), self.steady_clock.now());
+            drop(guard);
             let req = Message::ConfirmReq(ConfirmReq::new(vec![hash_root]));
 
-            let result = self.message_sender
+            let result = self
+                .message_sender
                 .lock()
                 .try_send(&channel, &req, TrafficType::RepCrawler);
-            
-            if result {
-                guard.track_rep_request(hash_root, channel.channel_id(), self.steady_clock.now());
-            }
 
             debug!(
                 "RepCrawler: query sent for block: {} to: {} (result: {:?})",
@@ -192,6 +191,7 @@ impl RepCrawler {
             );
             self.stats
                 .inc_dir(StatType::RepCrawler, DetailType::QuerySent, Direction::In);
+            guard = self.rep_crawler_impl.lock();
         }
     }
 

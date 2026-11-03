@@ -92,10 +92,14 @@ impl ResponseProcessor {
         };
 
         if !query.is_valid_response_type(response) {
+            // The running query was consumed, so release the peer's in-flight slot now.
+            // Skipping this would leak the slot forever: the query is gone from the tracker,
+            // so it can never time out either.
+            guard.scoring.request_finished(query.channel_id);
             return Err(ProcessError::InvalidResponseType);
         }
 
-        guard.scoring.received_message(channel_id);
+        guard.scoring.received_message(query.channel_id);
         Ok(query)
     }
 

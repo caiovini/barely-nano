@@ -1,19 +1,50 @@
 use crate::uart;
+use core::sync::atomic::{AtomicU8, Ordering};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
+
+/// Log level filter threshold:
+/// 0 = OFF, 1 = ERROR, 2 = WARN, 3 = INFO (default), 4 = DEBUG, 5 = TRACE
+static MAX_LOG_LEVEL: AtomicU8 = AtomicU8::new(3);
+
+#[inline]
+const fn level_to_u8(level: &Level) -> u8 {
+    match *level {
+        Level::ERROR => 1,
+        Level::WARN => 2,
+        Level::INFO => 3,
+        Level::DEBUG => 4,
+        Level::TRACE => 5,
+    }
+}
+
+/// Sets the maximum log level from a configuration string (`"off"`, `"error"`, `"warn"`,
+/// `"info"`, `"debug"`, `"trace"`). Defaults to `"info"` if unrecognized.
+pub fn set_log_level(level: &str) {
+    let trimmed = level.trim();
+    let code = if trimmed.eq_ignore_ascii_case("off") || trimmed.eq_ignore_ascii_case("none") {
+        0
+    } else if trimmed.eq_ignore_ascii_case("error") {
+        1
+    } else if trimmed.eq_ignore_ascii_case("warn") || trimmed.eq_ignore_ascii_case("warning") {
+        2
+    } else if trimmed.eq_ignore_ascii_case("info") {
+        3
+    } else if trimmed.eq_ignore_ascii_case("debug") {
+        4
+    } else if trimmed.eq_ignore_ascii_case("trace") {
+        5
+    } else {
+        3
+    };
+    MAX_LOG_LEVEL.store(code, Ordering::Relaxed);
+}
 
 pub struct UartSubscriber;
 
 impl Subscriber for UartSubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        if metadata.level() <= &Level::INFO {
-            metadata.target().contains("node_monitor")
-                || metadata.target().contains("rep_crawler")
-                || metadata.target().contains("keepalive")
-                || metadata.level() == &Level::ERROR
-        } else {
-            false
-        }
+        level_to_u8(metadata.level()) <= MAX_LOG_LEVEL.load(Ordering::Relaxed)
     }
 
     fn new_span(&self, _span: &Attributes<'_>) -> Id {
@@ -25,6 +56,10 @@ impl Subscriber for UartSubscriber {
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
+        if !self.enabled(event.metadata()) {
+            return;
+        }
+        let _intr = uart::InterruptGuard::new();
         let _guard = uart::UART_LOCK.lock();
         let mut visitor = UartVisitor;
         event.record(&mut visitor);

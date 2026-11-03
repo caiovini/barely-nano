@@ -31,14 +31,14 @@ impl<'a> BlockValidator<'a> {
         };
         
         if result.is_err() {
-            tracing::error!(
+            tracing::debug!(
                 "Validation: BadSignature - Hash: {}, Account: {}, is_epoch: {}",
                 self.block.hash(),
                 self.account,
                 self.is_epoch_block()
             );
         }
-        
+
         result.map_err(|_| BlockError::BadSignature)
     }
 
@@ -57,8 +57,11 @@ impl<'a> BlockValidator<'a> {
 
     fn ensure_previous_block_exists(&self) -> Result<(), BlockError> {
         if self.account_exists() && self.previous_block.is_none() {
-            tracing::error!("Validation: GapPrevious - account {} exists but previous block {} NOT found in store", self.account.encode_account(), self.block.previous());
-            tracing::debug!("Validation: GapPrevious - account exists but previous block NOT found in store");
+            tracing::debug!(
+                "Validation: GapPrevious - account {} exists but previous block {} NOT found in store",
+                self.account.encode_account(),
+                self.block.previous()
+            );
             return Err(BlockError::GapPrevious);
         }
 

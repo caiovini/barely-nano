@@ -79,6 +79,17 @@ impl RealtimeMessageHandler {
             n as u64,
         );
 
+        if self.bootstrapper.is_bootstrapping() {
+            // We ignore live blocks during bootstrap, so that those live blocks won't
+            // fill up the bootstrap queue
+            for (publish, _) in publishes {
+                self.network_filter.clear(publish.digest);
+            }
+            self.stats
+                .add_dir(StatType::Drop, DetailType::Publish, Direction::In, n as u64);
+            return;
+        }
+
         let mut valid_flags = alloc::vec![false; n];
         let mut i = 0;
         while i + 4 <= n {
@@ -190,11 +201,17 @@ impl RealtimeMessageHandler {
                         BlockSource::Live
                     };
 
-                    ok = self.block_processor_queue.push(BlockContext::new(
-                        publish.block,
-                        source,
-                        channel.channel_id(),
-                    ));
+                    if self.bootstrapper.is_bootstrapping() {
+                        // We ignore live blocks during bootstrap, so that those live blocks won't
+                        // fill up the bootstrap queue
+                        ok = false;
+                    } else {
+                        ok = self.block_processor_queue.push(BlockContext::new(
+                            publish.block,
+                            source,
+                            channel.channel_id(),
+                        ));
+                    }
                 }
 
                 if !ok {

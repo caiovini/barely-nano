@@ -350,9 +350,7 @@ pub fn init() -> bool {
         i2c_reset(I2C4_BASE);
 
         let ibmr = rd(I2C4_BASE, IBMR);
-        crate::uart::print(b"[oled] I2C4 IBMR=0x");
-        crate::uart::print_usize_hex(ibmr as usize);
-        crate::uart::print(b"\r\n");
+        tracing::debug!("[oled] I2C4 IBMR={:#x}", ibmr);
 
         let mut detected = false;
         for &addr in &[0x3Cu8, 0x3Du8] {
@@ -360,9 +358,10 @@ pub fn init() -> bool {
                 OLED_MODE.store(1, Ordering::SeqCst);
                 OLED_I2C_BASE.store(I2C4_BASE, Ordering::SeqCst);
                 OLED_I2C_ADDR.store(addr, Ordering::SeqCst);
-                crate::uart::print(b"[oled] Detected display on HW I2C4 (Pin3=SDA, Pin5=SCL) at 0x");
-                crate::uart::print_usize_hex(addr as usize);
-                crate::uart::print(b"\r\n");
+                tracing::info!(
+                    "[oled] Detected display on HW I2C4 (Pin3=SDA, Pin5=SCL) at {:#x}",
+                    addr
+                );
                 detected = true;
                 break;
             }
@@ -371,13 +370,13 @@ pub fn init() -> bool {
         // 2. Fallback: scan candidate header pin pairs via Open-Drain GPIO I2C
         //    (handles swapped SCK/SDA on Pins 3/5, or connection on Pins 8/10 or 23/24)
         if !detected {
-            const CANDIDATE_PAIRS: [(u8, u8, &[u8]); 6] = [
-                (51, 52, b"Pin5=SCL(GPIO51), Pin3=SDA(GPIO52)"),
-                (52, 51, b"Pin3=SCL(GPIO52), Pin5=SDA(GPIO51) [swapped]"),
-                (47, 48, b"Pin8=SCL(GPIO47), Pin10=SDA(GPIO48)"),
-                (48, 47, b"Pin10=SCL(GPIO48), Pin8=SDA(GPIO47) [swapped]"),
-                (75, 76, b"Pin23=SCL(GPIO75), Pin24=SDA(GPIO76)"),
-                (76, 75, b"Pin24=SCL(GPIO76), Pin23=SDA(GPIO75) [swapped]"),
+            const CANDIDATE_PAIRS: [(u8, u8, &str); 6] = [
+                (51, 52, "Pin5=SCL(GPIO51), Pin3=SDA(GPIO52)"),
+                (52, 51, "Pin3=SCL(GPIO52), Pin5=SDA(GPIO51) [swapped]"),
+                (47, 48, "Pin8=SCL(GPIO47), Pin10=SDA(GPIO48)"),
+                (48, 47, "Pin10=SCL(GPIO48), Pin8=SDA(GPIO47) [swapped]"),
+                (75, 76, "Pin23=SCL(GPIO75), Pin24=SDA(GPIO76)"),
+                (76, 75, "Pin24=SCL(GPIO76), Pin23=SDA(GPIO75) [swapped]"),
             ];
 
             for &(scl, sda, label) in &CANDIDATE_PAIRS {
@@ -388,11 +387,11 @@ pub fn init() -> bool {
                         OLED_SCL_GPIO.store(scl, Ordering::SeqCst);
                         OLED_SDA_GPIO.store(sda, Ordering::SeqCst);
                         OLED_I2C_ADDR.store(addr, Ordering::SeqCst);
-                        crate::uart::print(b"[oled] Detected display via GPIO I2C on ");
-                        crate::uart::print(label);
-                        crate::uart::print(b" at 0x");
-                        crate::uart::print_usize_hex(addr as usize);
-                        crate::uart::print(b"\r\n");
+                        tracing::info!(
+                            "[oled] Detected display via GPIO I2C on {} at {:#x}",
+                            label,
+                            addr
+                        );
                         detected = true;
                         break;
                     }
@@ -406,15 +405,13 @@ pub fn init() -> bool {
         if !detected {
             bb_init_pins(51, 52);
             bb_init_pins(47, 48);
-            crate::uart::print(b"[oled] No display ACKed. Pin levels: GPIO51(Pin5)=");
-            crate::uart::print_usize(gpio_read(51) as usize);
-            crate::uart::print(b" GPIO52(Pin3)=");
-            crate::uart::print_usize(gpio_read(52) as usize);
-            crate::uart::print(b" GPIO47(Pin8)=");
-            crate::uart::print_usize(gpio_read(47) as usize);
-            crate::uart::print(b" GPIO48(Pin10)=");
-            crate::uart::print_usize(gpio_read(48) as usize);
-            crate::uart::print(b"\r\n");
+            tracing::debug!(
+                "[oled] No display ACKed. Pin levels: GPIO51(Pin5)={} GPIO52(Pin3)={} GPIO47(Pin8)={} GPIO48(Pin10)={}",
+                gpio_read(51),
+                gpio_read(52),
+                gpio_read(47),
+                gpio_read(48)
+            );
             return false;
         }
 
@@ -443,7 +440,7 @@ pub fn init() -> bool {
         ];
 
         if !oled_write_stream(0x00, &INIT_CMDS) {
-            crate::uart::print(b"[oled] Init command stream failed\r\n");
+            tracing::warn!("[oled] Init command stream failed");
             OLED_MODE.store(0, Ordering::SeqCst);
             return false;
         }
@@ -464,7 +461,7 @@ pub fn init() -> bool {
             b"STATUS: BOOTING",
             b"INIT LEDGER... ",
         ]);
-        crate::uart::print(b"[oled] Boot screen rendered!\r\n");
+        tracing::info!("[oled] Boot screen rendered!");
         true
     }
 }

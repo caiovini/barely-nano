@@ -21,7 +21,6 @@ impl Default for AlignedBlock {
     }
 }
 
-use crate::uart;
 use crate::uboot;
 
 use spin::Mutex;
@@ -628,21 +627,20 @@ pub fn flush_all_shards() {
 }
 
 pub fn init_uboot_blk() {
-    uart::print(b"[storage] Scanning U-Boot devices for Storage...\n");
-    
+    tracing::debug!("[storage] Scanning U-Boot devices for Storage...");
+
     let mut ssd_info = None;
     let mut fallback_info = None;
     let mut last_info = None;
     let mut max_devices = 32;
     while max_devices > 0 {
         if let Some(info) = uboot::dev_enum(last_info.as_ref()) {
-            uart::print(b"[storage] Discovered Device - Type: ");
-            uart::print_usize(info.type_ as usize);
-            uart::print(b", Cookie: ");
-            uart::print_usize(info.cookie as usize);
-            uart::print(b", Blocks: ");
-            uart::print_usize(info.block_count as usize);
-            uart::print(b"\n");
+            tracing::debug!(
+                "[storage] Discovered Device - Type: {}, Cookie: {:#x}, Blocks: {}",
+                info.type_,
+                info.cookie as usize,
+                info.block_count
+            );
 
             if info.type_ == uboot::DEV_TYP_STOR {
                 let if_type = if !info.cookie.is_null() {
@@ -650,24 +648,18 @@ pub fn init_uboot_blk() {
                 } else {
                     -1
                 };
-                
-                uart::print(b"[storage] -> Block Storage Device found! if_type: ");
-                if if_type >= 0 {
-                    uart::print_usize(if_type as usize);
-                } else {
-                    uart::print(b"unknown/none");
-                }
-                uart::print(b"\n");
+
+                tracing::debug!("[storage] -> Block Storage Device found! if_type: {}", if_type);
 
                 // Target NVMe SSD / NVMe/SCSI device, ignore MMC/SD card (if_type 6 and 7)
                 if if_type != 6 && if_type != 7 && if_type != -1 {
-                    uart::print(b"[storage] -> Selected as NVMe SSD Device!\n");
+                    tracing::info!("[storage] -> Selected as NVMe SSD Device!");
                     ssd_info = Some(info);
                     break;
                 }
-                
+
                 if fallback_info.is_none() {
-                    uart::print(b"[storage] -> Registered as Fallback Storage (MMC/SD Card).\n");
+                    tracing::debug!("[storage] -> Registered as Fallback Storage (MMC/SD Card).");
                     fallback_info = Some(info);
                 }
             }
@@ -679,27 +671,28 @@ pub fn init_uboot_blk() {
     }
 
     let target_info = if let Some(info) = ssd_info {
-        uart::print(b"[storage] Selecting NVMe SSD as primary storage.\n");
+        tracing::info!("[storage] Selecting NVMe SSD as primary storage.");
         Some(info)
     } else if let Some(info) = fallback_info {
-        uart::print(b"[storage] WARNING: NVMe SSD not found, falling back to SD card.\n");
+        tracing::warn!("[storage] WARNING: NVMe SSD not found, falling back to SD card.");
         Some(info)
     } else {
         None
     };
 
     if let Some(mut info) = target_info {
-        uart::print(b"[storage] Opening U-Boot Storage Device...\n");
+        tracing::debug!("[storage] Opening U-Boot Storage Device...");
         let res = uboot::dev_open(&mut info);
         if res != 0 {
-            uart::print(b"[storage] WARNING: Failed to open U-Boot Storage Device: ");
-            uart::print_usize(res as usize);
-            uart::print(b"\n");
+            tracing::warn!(
+                "[storage] WARNING: Failed to open U-Boot Storage Device: {}",
+                res
+            );
         }
         let storage = StorageContext::new_uboot(info);
         init_shards(storage);
     } else {
-        uart::print(b"[storage] No U-Boot Storage Device found. Allocating 128MB RAM Disk!\n");
+        tracing::warn!("[storage] No U-Boot Storage Device found. Allocating 128MB RAM Disk!");
         let storage = StorageContext::new_ramdisk(128);
         init_shards(storage);
     }
@@ -728,11 +721,11 @@ fn write_header(
 fn init_shards(mut storage: StorageContext) {
     let capacity_sectors = storage.capacity();
     let total_pages = (capacity_sectors / 8) as usize;
-    uart::print(b"[storage] Drive Capacity: ");
-    uart::print_usize(total_pages * 4 / 1024);
-    uart::print(b" MB (");
-    uart::print_usize(total_pages);
-    uart::print(b" pages)\n");
+    tracing::info!(
+        "[storage] Drive Capacity: {} MB ({} pages)",
+        total_pages * 4 / 1024,
+        total_pages
+    );
 
     // Read header from Page 0
     let mut header_data = AlignedBlock::new();
@@ -763,13 +756,13 @@ fn init_shards(mut storage: StorageContext) {
         // WAL: up to 256 MB (two 128 MB areas), at most 1/8 of a small device.
         wal_pages = core::cmp::min(wal::WAL_PAGES, (total_pages / 8) & !1);
         if wal_pages < 64 || total_pages <= 1 + wal_pages + 2 * SHARD_COUNT {
-            uart::print(b"[storage] Drive too small for WAL layout!\n");
+            tracing::error!("[storage] Drive too small for WAL layout!");
             return;
         }
         shard_size = (total_pages - 1 - wal_pages) / SHARD_COUNT - 1;
         wal_base = 1 + SHARD_COUNT * (shard_size + 1);
         wal_epoch = 1;
-        uart::print(b"[storage] Initializing new storage header (WAL layout)...\n");
+        tracing::info!("[storage] Initializing new storage header (WAL layout)...");
 
         let zero = AlignedBlock::new();
         let _ = storage.write_raw_lba(BLOOM_HEADER_LBA, &zero.bytes);
@@ -779,18 +772,16 @@ fn init_shards(mut storage: StorageContext) {
         }
         // Invalidate any stale WAL by writing the (new) header with a fresh epoch.
         if write_header(&mut storage, shard_size, wal_epoch, wal_base, wal_pages).is_err() {
-            uart::print(b"[storage] FAILED to write header\n");
+            tracing::error!("[storage] FAILED to write header");
         }
     } else {
         // Crash recovery: re-apply the last committed WAL batch (idempotent), then start a new
         // epoch so every previous batch becomes invalid before any direct write happens.
         let replayed = wal::recover(&mut storage, wal_base, wal_pages / 2, wal_epoch);
-        uart::print(b"[storage] WAL recovery: replayed pages=");
-        uart::print_usize(replayed);
-        uart::print(b"\n");
+        tracing::info!("[storage] WAL recovery: replayed pages={}", replayed);
         wal_epoch += 1;
         if write_header(&mut storage, shard_size, wal_epoch, wal_base, wal_pages).is_err() {
-            uart::print(b"[storage] FAILED to write header\n");
+            tracing::error!("[storage] FAILED to write header");
         }
     }
 
@@ -804,15 +795,14 @@ fn init_shards(mut storage: StorageContext) {
         && crate::trap::probe_rw_u64(high_dram_end - 8);
 
     if use_high_dram {
-        uart::print(b"[storage] High DRAM Bank 1 verified (");
-        uart::print(crate::soc::SOC_NAME.as_bytes());
-        uart::print(b", ");
-        uart::print_usize((SHARD_COUNT * bpm::HIGH_DRAM_TARGET_FRAMES * bpm::BLOCK_SIZE) / (1024 * 1024));
-        uart::print(b" MB Sector Cache enabled, ");
-        uart::print_usize(bpm::HIGH_DRAM_TARGET_FRAMES);
-        uart::print(b" frames/shard)\n");
+        tracing::info!(
+            "[storage] High DRAM Bank 1 verified ({}, {} MB Sector Cache enabled, {} frames/shard)",
+            crate::soc::SOC_NAME,
+            (SHARD_COUNT * bpm::HIGH_DRAM_TARGET_FRAMES * bpm::BLOCK_SIZE) / (1024 * 1024),
+            bpm::HIGH_DRAM_TARGET_FRAMES
+        );
     } else {
-        uart::print(b"[storage] Using Bank 0 Heap Sector Cache (640 MB, 10240 frames/shard)\n");
+        tracing::info!("[storage] Using Bank 0 Heap Sector Cache (640 MB, 10240 frames/shard)");
     }
 
     let shared_storage = Arc::new(Mutex::new(storage));
@@ -840,9 +830,7 @@ pub fn init_wallet_storage(shared_storage: Arc<Mutex<StorageContext>>) {
     let _ = wallet_crypto::hardware_wallet_key();
     let replayed = shared_storage.lock().recover_wallet_journal();
     if replayed > 0 {
-        uart::print(b"[storage] Wallet journal recovery: replayed pages=");
-        uart::print_usize(replayed);
-        uart::print(b"\n");
+        tracing::info!("[storage] Wallet journal recovery: replayed pages={}", replayed);
     }
     let wallet_bpm = bpm::BufferPool::new_wallet(shared_storage, 64);
     let wallet_btree = btree::BTree::new_with_max_pages(wallet_bpm, WALLET_MAX_PAGES);

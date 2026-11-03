@@ -23,7 +23,7 @@ pub(crate) struct BootstrapStaleElections {
 }
 
 impl BootstrapStaleElections {
-    pub const DEFAULT_STALE_THRESHOLD: Duration = Duration::from_secs(5);
+    pub const DEFAULT_STALE_THRESHOLD: Duration = Duration::from_secs(60);
 
     pub(crate) fn new(bootstrapper: Arc<Bootstrapper>, clock: Arc<SteadyClock>) -> Self {
         Self {
@@ -44,12 +44,11 @@ impl BootstrapStaleElections {
         self.stale_threshold
     }
 
-    #[allow(dead_code)]
     fn bootstrap_stale_accounts(&mut self) {
         let mut state = self.bootstrapper.state();
 
         for account in &self.stale_accounts {
-            state.candidate_accounts.priority_set_initial(account);
+            state.candidate_accounts.priority_set_safe(account);
         }
         self.stats
             .bootstrap_stale
@@ -64,27 +63,24 @@ impl AecTickerPlugin for BootstrapStaleElections {
         }
 
         let now = self.clock.now();
-        let mut stale = Vec::new();
+
+        // Stale elections must NOT be force-confirmed: cementing a block without a quorum of
+        // votes lets any peer-supplied fork become permanent. Only re-bootstrap the account so
+        // that missing dependencies are pulled (RSNano behaviour).
+        self.stale_accounts.clear();
         {
             let guard = aec.read();
-            for election in guard.iter_round_robin() {
-                if election.start().elapsed(now) >= self.stale_threshold {
-                    stale.push(election.winner().hash());
-                    if stale.len() >= 128 {
-                        break;
-                    }
-                }
-            }
-        }
-        if !stale.is_empty() {
-            tracing::debug!(
-                "BootstrapStaleElections: force-confirming {} stale elections",
-                stale.len()
+            self.stale_accounts.extend(
+                guard
+                    .iter_round_robin()
+                    .filter(|e| e.start().elapsed(now) >= self.stale_threshold)
+                    .map(|e| e.account())
+                    .take(128),
             );
-            let mut guard = aec.write();
-            for hash in stale {
-                let _ = guard.try_force_confirm(&hash, now);
-            }
+        }
+
+        if !self.stale_accounts.is_empty() {
+            self.bootstrap_stale_accounts();
         }
     }
 
@@ -145,11 +141,13 @@ mod tests {
         let aec = RwLock::new(aec);
         plugin.run(&aec);
 
-        assert!(aec
+        assert!(!aec
             .read()
             .election_for_block(&hash)
             .unwrap()
             .is_confirmed());
+        assert_eq!(bootstrapper.state().candidate_accounts.priority_len(), 1);
+        assert_eq!(plugin.stats.bootstrap_stale.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -238,12 +238,6 @@ impl Node {
         let node_id = NodeId::from(&node_id_key);
         info!("Node started");
         info!("Node ID: {}", node_id);
-        kernel_common::uart::print(b"[node] Node ID: ");
-        let pk = node_id_key.public_key(); tracing::info!("My Node ID: {:?}", pk);
-        for b in pk.as_bytes() {
-            kernel_common::uart::print_u8_hex(*b);
-        }
-        kernel_common::uart::print(b"\n");
         let (ledger_tx, ledger_rx) = backpressure_channel(1024 * 5);
         let mut event_queues_info = ContainerInfoFactory::new();
         let ledger_tx_clone = ledger_tx.clone();
@@ -294,14 +288,14 @@ impl Node {
         let ledger = if is_nulled {
             Ledger::new_null()
         } else {
-            kernel_common::uart::print(b"[node] Loading ledger via LedgerBuilder...\n");
+            tracing::debug!("[node] Loading ledger via LedgerBuilder...");
             let ledger = LedgerBuilder::new()
                 .constants(network_params.ledger.clone())
                 .min_rep_weight(config.representative_vote_weight_minimum)
                 .bootstrap_weights(bootstrap_weights.clone())
                 .stats(stats.clone())
                 .finish();
-            kernel_common::uart::print(b"[node] Loading ledger done.\n");
+            tracing::debug!("[node] Loading ledger done.");
 
             match ledger {
                 Ok(i) => i,
@@ -361,7 +355,6 @@ impl Node {
                 .rep_weights(rep_weights.clone())
                 .online_weight_minimum(config.online_weight_minimum)
                 .representative_weight_minimum(config.representative_vote_weight_minimum)
-                .weight_interval(OnlineReps::default_interval_for(current_network))
                 .finish(),
         ));
 
@@ -1114,6 +1107,7 @@ impl Node {
             fork_processor,
             stats: stats.clone(),
             winner_block_broadcaster: winner_block_broadcaster.clone(),
+            bootstrapper: bootstrapper.clone(),
             plugins: Vec::new(),
         };
 
@@ -1262,7 +1256,7 @@ impl Node {
             syn_cookies,
             signature_checker,
         };
-        kernel_common::uart::print(b"[node] Node construction completed successfully!\n");
+        tracing::debug!("[node] Node construction completed successfully!");
         node_instance
     }
 
@@ -1438,7 +1432,7 @@ impl Node {
 
     /// Note: Start must not be called from an async thread, because it blocks!
     pub fn start(&mut self) {
-        kernel_common::uart::print(b"[node] start() entered...\n");
+        tracing::debug!("[node] start() entered...");
         self.start_stop_listener.emit("start");
         if self.is_nulled {
             return; // TODO better nullability implementation
@@ -1453,11 +1447,11 @@ impl Node {
 
             panic!("Genesis block not found!");
         }
-        kernel_common::uart::print(b"[node] start() genesis block verified.\n");
+        tracing::debug!("[node] start() genesis block verified.");
 
         self.network_threads.lock().start();
         self.message_processor.lock().start();
-        kernel_common::uart::print(b"[node] start() network & message processor threads running.\n");
+        tracing::debug!("[node] start() network & message processor threads running.");
 
         if self.flags.enable_pruning {
             self.ledger_pruning.start();
@@ -1503,7 +1497,7 @@ impl Node {
         if self.config.enable_vote_rebroadcast {
             self.vote_rebroadcaster.start();
         }
-        kernel_common::uart::print(b"[node] start() completed successfully!\n");
+        tracing::info!("[node] start() completed successfully!");
     }
 
     pub fn stop(&mut self) {

@@ -36,8 +36,6 @@ pub struct OnlineReps {
     peered_reps: PeeredContainer,
     trended_weight: Amount,
     online_weight: Amount,
-    /// Time between collecting online representative samples
-    weight_interval: Duration,
     online_weight_minimum: Amount,
     representative_weight_minimum: Amount,
     trim_counter: u64,
@@ -55,7 +53,6 @@ impl OnlineReps {
 
     pub(crate) fn new(
         rep_weights: Arc<RepWeightCache>,
-        weight_interval: Duration,
         online_weight_minimum: Amount,
         representative_weight_minimum: Amount,
     ) -> Self {
@@ -65,7 +62,6 @@ impl OnlineReps {
             peered_reps: PeeredContainer::new(),
             trended_weight: Amount::zero(),
             online_weight: Amount::zero(),
-            weight_interval,
             online_weight_minimum,
             representative_weight_minimum,
             trim_counter: 0,
@@ -80,7 +76,6 @@ impl OnlineReps {
 
         let mut online_reps = Self::new(
             rep_weights,
-            Duration::from_secs(1),
             Amount::nano(60_000_000),
             Amount::nano(1000),
         );
@@ -246,7 +241,7 @@ impl OnlineReps {
         self.trim_counter += 1;
         let trimmed = self
             .online_reps
-            .trim(now.checked_sub(self.weight_interval).unwrap_or_default());
+            .trim(now.checked_sub(Duration::from_secs(60 * 10)).unwrap_or_default());
 
         for (rep_key, time) in &trimmed {
             debug!(
@@ -508,17 +503,14 @@ mod tests {
         weights.set(rep_a, Amount::nano(100_000));
         weights.set(rep_b, Amount::nano(200_000));
         weights.set(rep_c, Amount::nano(400_000));
-        let mut online_reps = OnlineReps::builder()
-            .rep_weights(weights)
-            .weight_interval(Duration::from_secs(30))
-            .finish();
+        let mut online_reps = OnlineReps::builder().rep_weights(weights).finish();
 
         let start = SteadyClock::new_null().now();
         online_reps.vote_observed(rep_a, start);
         online_reps.vote_observed(rep_b, start + Duration::from_secs(10));
-        online_reps.vote_observed(rep_c, start + Duration::from_secs(31));
+        online_reps.vote_observed(rep_c, start + Duration::from_secs(60 * 10 + 1));
 
-        online_reps.trim(start + Duration::from_secs(31));
+        online_reps.trim(start + Duration::from_secs(60 * 10 + 1));
 
         assert_eq!(online_reps.online_weight(), Amount::nano(600_000));
     }

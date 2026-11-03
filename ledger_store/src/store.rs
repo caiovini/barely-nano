@@ -120,26 +120,27 @@ impl BtreeStore {
                     self.account.disable_bloom();
                 }
                 #[cfg(not(test))]
-                {
-                    kernel_common::uart::print(
-                        b"[ledger] Loaded cached counts from B-Tree: accounts=",
+                if pruned > 0 {
+                    tracing::info!(
+                        "[ledger] Loaded cached counts from B-Tree: accounts={} blocks={} confirmed={} pruned={}",
+                        acc,
+                        blk,
+                        conf,
+                        pruned
                     );
-                    kernel_common::uart::print_usize(acc as usize);
-                    kernel_common::uart::print(b" blocks=");
-                    kernel_common::uart::print_usize(blk as usize);
-                    kernel_common::uart::print(b" confirmed=");
-                    kernel_common::uart::print_usize(conf as usize);
-                    if pruned > 0 {
-                        kernel_common::uart::print(b" pruned=");
-                        kernel_common::uart::print_usize(pruned as usize);
-                    }
-                    kernel_common::uart::print(b"\n");
+                } else {
+                    tracing::info!(
+                        "[ledger] Loaded cached counts from B-Tree: accounts={} blocks={} confirmed={}",
+                        acc,
+                        blk,
+                        conf
+                    );
                 }
                 (acc, blk, conf, pruned)
             } else {
                 #[cfg(not(test))]
-                kernel_common::uart::print(
-                    b"[ledger] Scanning B-Tree for initial account/block/confirmed counts (one-time scan)...\n",
+                tracing::info!(
+                    "[ledger] Scanning B-Tree for initial account/block/confirmed counts (one-time scan)..."
                 );
                 let (acc, blk) = self.account.scan_counts();
                 let conf = self.confirmation_height.sum_heights();
@@ -181,11 +182,18 @@ impl BtreeStore {
                 missing += 1;
             }
         }
-        kernel_common::uart::print(b"[storage] consistency check: accounts=");
-        kernel_common::uart::print_usize(heads.len());
-        kernel_common::uart::print(b" head_block_missing=");
-        kernel_common::uart::print_usize(missing);
-        kernel_common::uart::print(b"\n");
+        if missing > 0 {
+            tracing::warn!(
+                "[storage] consistency check: accounts={} head_block_missing={}",
+                heads.len(),
+                missing
+            );
+        } else {
+            tracing::debug!(
+                "[storage] consistency check: accounts={} head_block_missing=0",
+                heads.len()
+            );
+        }
     }
 
     pub fn tx_begin_read(&self) -> () { () }

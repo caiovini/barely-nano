@@ -242,15 +242,14 @@ impl Network {
         }
         if !self.is_outbound_slot_available() {
             debug!("Rejecting outbound attempt to {}: max connections/attempts reached ({})", peer, self.config.max_outbound_connections);
-            kernel_common::uart::print(b"[peer] Rejecting outbound attempt: slots full\n");
             return Err(NetworkError::MaxConnections);
         }
         if self.attempts.contains_key(&peer) {
-            kernel_common::uart::print(b"[peer] Rejecting outbound attempt: already attempting\n");
+            debug!("Rejecting outbound attempt to {}: already attempting", peer);
             return Err(NetworkError::DuplicateConnection);
         }
         if self.find_channel_by_ip(&peer.ip()).is_some() {
-            kernel_common::uart::print(b"[peer] Rejecting outbound attempt: already connected\n");
+            debug!("Rejecting outbound attempt to {}: already connected", peer);
             return Err(NetworkError::DuplicateConnection);
         }
         if self.count_by_subnet(peer.ip()) >= Self::MAX_PEERS_PER_SUBNET {

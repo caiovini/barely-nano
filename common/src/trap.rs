@@ -158,12 +158,12 @@ pub fn init() {
         // The node's scheduler and Sleep futures use rdtime cooperative yielding
         // and do not require preemption, and the watchdog is already continuously
         // kicked in the main loop.
-        uart::print(b"[trap] S-mode trap vector init\n");
+        tracing::debug!("[trap] S-mode trap vector init");
         csrw!("stvec", tv);
-        
+
         // Enable FS (bits 14:13) and VS (bits 10:9) for vector/floating-point/SIMD ops
         csrs!("sstatus", (3usize << 13) | (3usize << 9));
-        uart::print(b"[trap] S-mode trap vector init done\n");
+        tracing::debug!("[trap] S-mode trap vector init done");
     }
 }
 

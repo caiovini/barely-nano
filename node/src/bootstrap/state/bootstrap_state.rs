@@ -22,6 +22,11 @@ pub struct BootstrapState {
 }
 
 impl BootstrapState {
+    /// Diagnostics: number of in-flight queries for `account`.
+    pub fn diag_queries_for(&self, account: &rsnano_core::Account) -> usize {
+        self.running_queries.iter_account(account).count()
+    }
+
     /// Diagnostics: (in-flight queries, tracked channels, in-flight per channel total, channels at limit).
     pub fn diag_summary(&self) -> (usize, usize, usize, usize) {
         let (n, total, at_limit) = self.scoring.summary();

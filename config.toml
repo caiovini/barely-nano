@@ -8,6 +8,8 @@
 [bare_metal]
 # Nano network variant: "live" (NanoLiveNetwork), "beta" (NanoBetaNetwork), "dev" (NanoDevNetwork), or "test" (NanoTestNetwork)
 network = "live"
+# UART log verbosity level: "off", "error", "warn", "info", "debug", or "trace"
+log_level = "info"
 # Set to true to wipe all blocks from persistent NVMe storage and start from zero (Genesis)
 wipe_blocks = false
 # Ethernet MAC address used by the U-Boot / smoltcp interface
@@ -23,11 +25,15 @@ dns_server = "192.168.1.1"
 [node]
 peering_port = 7075
 enable_voting = false
+# Keep disabled during bootstrap: with ~100k unconfirmed blocks it rolls back (cascading) the
+# blocks bootstrap just downloaded on the single ledger-writer hart, starving cementing.
 enable_bounded_backlog = false
 allow_local_peers = true
 
-# 130,000,000 NANO in raw (130_000_000 * 10^30)
-online_weight_minimum = "130000000000000000000000000000000000000"
+# 60,000,000 NANO in raw (60_000_000 * 10^30) = RSNano mainnet default.
+# Quorum is 67 percent of max(online weight, this minimum). At 130M the quorum (87.1M) was above
+# the whole online weight we can see (~71M), so no election could ever confirm (conf stuck at 1).
+online_weight_minimum = "60000000000000000000000000000000000000"
 # Minimum vote weight that a representative must have for its vote to be counted (in raw)
 representative_vote_weight_minimum = "0"
 
@@ -39,18 +45,42 @@ preconfigured_peers = [
     "66.96.83.211:7075",   # live PR peer
     "31.171.245.217:7075", # live PR peer
     "139.59.31.249:7075",  # live PR peer
+    "77.72.193.181:7075",  # live PR peer (~5.43M NANO weight, from reference node)
+    "95.217.83.244:7075",  # live PR peer (~2.00M NANO weight, from reference node)
+    "78.47.124.255:7075",  # live PR peer (~1.95M NANO weight, from reference node)
+    "50.21.179.40:7075",  # live PR peer (~1.89M NANO weight, from reference node)
+    "18.101.47.105:7075",  # live PR peer (~1.56M NANO weight, from reference node)
+    "65.21.104.141:7075",  # live PR peer (~1.24M NANO weight, from reference node)
+    "77.33.36.41:7075",  # live PR peer (~1.20M NANO weight, from reference node)
+    "93.161.53.161:7075",  # live PR peer (~1.12M NANO weight, from reference node)
+    "63.250.52.93:7075",  # live PR peer (~0.73M NANO weight, from reference node)
+    "51.81.243.15:7075",  # live PR peer (~0.70M NANO weight, from reference node)
+    "46.224.78.48:7075",  # live PR peer (~0.63M NANO weight, from reference node)
+    "37.187.73.169:7075",  # live PR peer (~0.60M NANO weight, from reference node)
+    "51.15.19.228:7075",  # live PR peer (~0.56M NANO weight, from reference node)
+    "65.109.90.95:7075",  # live PR peer (~0.54M NANO weight, from reference node)
+    "95.154.217.12:7075",  # live PR peer (~0.50M NANO weight, from reference node)
+    "78.47.159.121:7075",  # live PR peer (~0.46M NANO weight, from reference node)
+    "71.104.37.126:7075",  # live PR peer (~0.42M NANO weight, from reference node)
+    "94.130.12.236:7075",  # live PR peer (~0.41M NANO weight, from reference node)
+    "88.202.151.14:7075",  # live PR peer (~0.30M NANO weight, from reference node)
+    "15.218.42.196:7075",  # live PR peer (~0.26M NANO weight, from reference node)
+    "5.78.104.213:7075",  # live PR peer (~0.23M NANO weight, from reference node)
+    "104.131.169.14:7075",  # live PR peer (~0.20M NANO weight, from reference node)
+    "89.58.8.22:7075",  # live PR peer (~0.17M NANO weight, from reference node)
+    "45.137.89.184:7075",  # live PR peer (~0.13M NANO weight, from reference node)
 ]
 
 [node.network]
 # Interval between peer reachout attempts (in milliseconds)
-peer_reachout = 1000
+peer_reachout = 250
 cached_peer_reachout = 1000
 duplicate_filter_size = 16384
 duplicate_filter_cutoff = 60
 
 [node.tcp]
 max_inbound_connections = 128
-max_outbound_connections = 128
+max_outbound_connections = 192
 max_attempts = 16
 max_attempts_per_ip = 1
 connect_timeout = 60
@@ -71,7 +101,7 @@ block_processor_threshold = 16384
 # The rest start at the confirmed frontier (Safe): resistant to bootstrap poisoning
 # but re-downloads unconfirmed blocks (slower). 100 = Optimistic only (trusted peers only).
 # RSNano default is 75. Peers are mostly public/untrusted, so keep Safe pulls enabled.
-optimistic_request_percentage = 90
+optimistic_request_percentage = 100
 
 [node.bootstrap.frontier_scan]
 max_pending = 128
@@ -93,8 +123,16 @@ max_peer_queue = 131072
 max_system_queue = 131072
 batch_size = 256
 
+# Per-representative vote rebroadcast history. Each entry costs ~112 B and hashbrown grows the
+# table to 4x the entry count under insert/evict churn: the RSNano default (32768) reached
+# ~14.7 MB per rep (x100 reps) and exhausted the 1.45 GB heap after ~1.5 h. The history only has
+# to cover `rebroadcast_threshold` (90 s), so 1024 is plenty.
+[node.vote_rebroadcaster]
+max_history = 1024
+
 [node.bounded_backlog]
-enable = true
+# This section overrides `enable_bounded_backlog` above, so it must be false as well.
+enable = false
 batch_size = 32
 scan_rate = 64
 

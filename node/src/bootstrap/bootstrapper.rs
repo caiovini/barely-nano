@@ -78,6 +78,9 @@ impl Default for BootstrapConfig {
             block_processor_theshold: 16384,
             min_protocol_version: 0x14, // TODO don't hard code
             max_requests: 1024,
+            #[cfg(not(test))]
+            optimistic_request_percentage: 100,
+            #[cfg(test)]
             optimistic_request_percentage: 75,
             candidate_accounts: Default::default(),
             frontier_scan: FrontierScanConfig {
@@ -411,6 +414,10 @@ impl Bootstrapper {
             );
         }
         active
+    }
+
+    pub fn is_bootstrapping(&self) -> bool {
+        self.ledger.rep_weights.use_bootstrap_weights()
     }
 }
 

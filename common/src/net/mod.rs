@@ -3,7 +3,6 @@ pub mod async_tcp;
 pub use async_tcp::AsyncTcpStream;
 
 use crate::net::device::UbootNetDevice;
-use crate::uart;
 use crate::uboot;
 use spin::Mutex;
 
@@ -319,8 +318,8 @@ pub fn initialize_net() {
 }
 
 pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
-    uart::print(b"[net] Scanning U-Boot devices for Network Interface...\n");
-    
+    tracing::debug!("[net] Scanning U-Boot devices for Network Interface...");
+
     let mut net_info = None;
     let mut last_info = None;
     let mut max_devices = 16;
@@ -338,7 +337,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
     }
 
     if let Some(mut info) = net_info {
-        uart::print(b"[net] Found U-Boot Network Device!\n");
+        tracing::info!("[net] Found U-Boot Network Device!");
         let _ = uboot::dev_close(&mut info);
         let res = uboot::dev_open(&mut info);
         if res != 0 {
@@ -350,7 +349,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let net_cfg = get_net_config();
         let mut mac_bytes = net_cfg.mac;
         if mac_bytes == [0, 0, 0, 0, 0, 0] {
-            crate::uart::print(b"[net] Using fallback randomized MAC\n");
+            tracing::warn!("[net] Using fallback randomized MAC");
             mac_bytes = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
             let mut seed = crate::clint::mtime();
             for i in 1..6 {
@@ -360,15 +359,18 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         }
 
         let mtime = crate::clint::mtime();
-        crate::uart::print(b"[net] MAC: ");
-        for i in 0..6 {
-            crate::uart::print_u8_hex(mac_bytes[i]);
-            if i < 5 { crate::uart::print(b":"); }
-        }
-        crate::uart::print(b"\n");
+        tracing::info!(
+            "[net] MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac_bytes[0],
+            mac_bytes[1],
+            mac_bytes[2],
+            mac_bytes[3],
+            mac_bytes[4],
+            mac_bytes[5]
+        );
         let hardware_addr = HardwareAddress::Ethernet(EthernetAddress(mac_bytes));
         let mut config = Config::new(hardware_addr);
-        
+
         // Better randomness for ISNs mixed with hardware eFuse key
         let hw_key = crate::storage::wallet_crypto::hardware_wallet_key();
         let mut seed = mtime ^ u64::from_le_bytes([
@@ -386,7 +388,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
 
         let start_ts = Instant::from_micros((mtime / (crate::clint::FREQ / 1_000_000)) as i64);
         let mut iface = Interface::new(config, &mut device, start_ts);
-        
+
         let static_ip = Ipv4Address::new(
             net_cfg.ipv4[0],
             net_cfg.ipv4[1],
@@ -403,15 +405,15 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
             net_cfg.gateway[3],
         );
         iface.routes_mut().add_default_ipv4_route(gw_ip).unwrap();
-        
-        crate::uart::print(b"[net] IP: ");
-        for i in 0..4 {
-            crate::uart::print_usize(net_cfg.ipv4[i] as usize);
-            if i < 3 { crate::uart::print(b"."); }
-        }
-        crate::uart::print(b"/");
-        crate::uart::print_usize(net_cfg.prefix_len as usize);
-        crate::uart::print(b"\n");
+
+        tracing::info!(
+            "[net] IP: {}.{}.{}.{}/{}",
+            net_cfg.ipv4[0],
+            net_cfg.ipv4[1],
+            net_cfg.ipv4[2],
+            net_cfg.ipv4[3],
+            net_cfg.prefix_len
+        );
 
         let mut sockets = SocketSet::new(vec![]);
         let icmp_rx_buffer = IcmpPacketBuffer::new(vec![smoltcp::socket::icmp::PacketMetadata::EMPTY], vec![0; 256]);

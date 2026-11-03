@@ -139,6 +139,9 @@ pub struct RebroadcastHistoryConfig {
 
 impl RebroadcastHistoryConfig {
     pub const DEFAULT_MAX_REPS: usize = 100;
+    #[cfg(not(test))]
+    pub const DEFAULT_MAX_BLOCKS_PER_REP: usize = 1024;
+    #[cfg(test)]
     pub const DEFAULT_MAX_BLOCKS_PER_REP: usize = 1024 * 32;
     pub const DEFAULT_REBROADCAST_MIN_GAP: Duration = Duration::from_secs(90);
 }

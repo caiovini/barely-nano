@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 #[derive(Deserialize, Serialize, Default, Clone, Debug)]
 pub struct BareMetalToml {
     pub network: Option<String>,
+    pub log_level: Option<String>,
     pub mac_address: Option<String>,
     pub ipv4_address: Option<String>,
     pub ipv4_prefix_len: Option<u8>,

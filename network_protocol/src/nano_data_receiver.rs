@@ -96,7 +96,7 @@ impl NanoDataReceiver {
         if enqueued {
             ReceiveResult::Continue
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 "Message queue full! Pausing receiver for {}",
                 self.channel.peer_addr()
             );
@@ -166,7 +166,7 @@ impl NanoDataReceiver {
                 .inc(StatType::TcpChannels, DetailType::ChannelAccepted);
             true
         } else {
-            tracing::info!(
+            tracing::debug!(
                 channel_id = ?self.channel.channel_id(),
                 peer = %self.channel.peer_addr(),
                 %node_id,
@@ -229,7 +229,7 @@ impl NanoDataReceiver {
             match status {
                 HandshakeStatus::Abort | HandshakeStatus::AbortOwnNodeId => {
                     kernel_common::uart::putchar(b'f');
-                    tracing::warn!(
+                    tracing::debug!(
                         "Handshake aborted with {} (status: {:?})",
                         self.channel.peer_addr(),
                         status
@@ -288,23 +288,6 @@ impl DataReceiver for NanoDataReceiver {
                     ) {
                         ReceiveResult::Continue
                     } else {
-                        kernel_common::uart::print(b"[DESER_ERR:");
-                        match &e {
-                            ParseMessageError::Other(s) => {
-                                kernel_common::uart::print(b"other:");
-                                kernel_common::uart::print(s.as_bytes());
-                            }
-                            ParseMessageError::InvalidHeader => kernel_common::uart::print(b"hdr"),
-                            ParseMessageError::InvalidMessageType => kernel_common::uart::print(b"type"),
-                            ParseMessageError::InvalidMessage(t) => {
-                                kernel_common::uart::print(b"msg_");
-                                kernel_common::uart::print_usize(*t as usize);
-                            }
-                            ParseMessageError::InvalidNetwork => kernel_common::uart::print(b"net"),
-                            ParseMessageError::OutdatedVersion => kernel_common::uart::print(b"ver"),
-                            _ => kernel_common::uart::print(b"unknown"),
-                        }
-                        kernel_common::uart::print(b"]");
                         tracing::debug!(
                             "Message deserialization error: {:?} (addr: {})",
                             e,

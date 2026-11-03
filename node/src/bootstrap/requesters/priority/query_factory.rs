@@ -44,7 +44,11 @@ impl QueryFactory {
             return None;
         }
         let (head, confirmed_frontier) = self.get_account_info(&next.account);
-        let pull_type = self.pull_type_decider.decide_pull_type();
+        let pull_type = if next.pull_type == PullType::Safe {
+            PullType::Safe
+        } else {
+            self.pull_type_decider.decide_pull_type()
+        };
 
         Some(self.create_priority_query(&next, channel, pull_type, head, confirmed_frontier))
     }

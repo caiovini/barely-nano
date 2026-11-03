@@ -207,6 +207,7 @@ fn requires_control(command: &RpcCommand) -> bool {
         | RpcCommand::SearchReceivable(_)
         | RpcCommand::SearchReceivableAll
         | RpcCommand::Send(_)
+        | RpcCommand::Sign(_)
         | RpcCommand::Stop
         | RpcCommand::UncheckedClear
         | RpcCommand::Unopened(_)
@@ -230,7 +231,6 @@ fn requires_control(command: &RpcCommand) -> bool {
         | RpcCommand::WorkPeerAdd(_)
         | RpcCommand::WorkPeers
         | RpcCommand::WorkPeersClear => true,
-        RpcCommand::Sign(args) => args.wallet.is_some() || args.account.is_some() || args.hash.is_some(),
         RpcCommand::Stats(s) => matches!(s.stats_type, StatsType::Objects),
         RpcCommand::Process(args) => args.force == Some(true.into()),
         _ => false,

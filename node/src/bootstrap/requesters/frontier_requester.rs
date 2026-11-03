@@ -75,12 +75,13 @@ impl BootstrapPromise<AscPullQuerySpec> for FrontierRequester {
                     self.state = FrontierState::WaitAckProcessor;
                 }
                 FrontierState::WaitAckProcessor => {
+                    // Only pause the frontier scan while there is plenty of runnable priority
+                    // work. When `priorities` is starved (blocked accounts waiting on
+                    // dependencies), the scan is the only source of new work, so pausing it on
+                    // `blocked_len` alone stalls bootstrap (observed: prio=5, blk=41k, 0 bps).
                     #[cfg(not(test))]
                     let should_pause_for_dependencies =
-                        boot_state.candidate_accounts.priority_len() >= 1024
-                            || (boot_state.candidate_accounts.blocked_len() >= 8192
-                                && (boot_state.candidate_accounts.priority_len() >= 64
-                                    || boot_state.candidate_accounts.blocking_unknown_len() > 0));
+                        boot_state.candidate_accounts.priority_len() >= 1024;
                     #[cfg(test)]
                     let should_pause_for_dependencies = false;
 

@@ -533,16 +533,16 @@ impl BTree {
             max_pages,
         };
 
-        crate::uart::print(b"[btree] Init: root=");
-        crate::uart::print_usize(tree.meta.root_page_id as usize);
-        crate::uart::print(b" next=");
-        crate::uart::print_usize(tree.meta.next_free_page as usize);
-        crate::uart::print(b"\n");
+        tracing::debug!(
+            "[btree] Init: root={} next={}",
+            tree.meta.root_page_id,
+            tree.meta.next_free_page
+        );
 
         if tree.meta.root_page_id == 0 {
             if tree.meta.next_free_page > 1 {
-                crate::uart::print(
-                    b"[storage] BTree metadata re-initializing for slotted-page layout...\n",
+                tracing::info!(
+                    "[storage] BTree metadata re-initializing for slotted-page layout..."
                 );
             }
             tree.meta.next_free_page = 1;

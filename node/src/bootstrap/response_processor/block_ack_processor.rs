@@ -46,6 +46,8 @@ impl BlockAckProcessor {
 
         let t_proc = kernel_common::clint::mtime();
         let result = query.verify_blocks(&response);
+        #[cfg(not(test))]
+        Self::diag_log(query, &response, &result);
         let ret = match result {
             VerifyResult::Ok => {
                 self.process_valid_blocks(query, response, channel_id);
@@ -73,6 +75,41 @@ impl BlockAckProcessor {
             (kernel_common::clint::mtime() - t_proc) * 1000 / kernel_common::clint::FREQ,
         );
         ret
+    }
+
+    /// Diagnostics: logs the first replies that carry no usable new blocks (empty / start-only /
+    /// invalid), so a stuck account can be traced to its peer replies. Samples 1 in 50.
+    #[cfg(not(test))]
+    fn diag_log(query: &RunningQuery, response: &BlocksAckPayload, result: &VerifyResult) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static LOGGED: AtomicUsize = AtomicUsize::new(0);
+        let kind = match result {
+            VerifyResult::Ok => return,
+            VerifyResult::NothingNew => "nothing_new",
+            VerifyResult::Invalid => "invalid",
+        };
+        if LOGGED.fetch_add(1, Ordering::Relaxed) % 50 != 0 {
+            return;
+        }
+        let qtype = if query.query_type == crate::bootstrap::state::QueryType::BlocksByHash {
+            "by_hash"
+        } else {
+            "by_account"
+        };
+        let first_hash = response.blocks().front().map(|b| b.hash());
+        tracing::debug!(
+            "[blkack] {} type={} account={} start={} req_count={} resp_len={} first={:?}",
+            kind,
+            qtype,
+            query.account.encode_account(),
+            query.hash,
+            query.count,
+            response.blocks().len(),
+            first_hash
+        );
     }
 
     fn process_valid_blocks(&self, query: &RunningQuery, response: BlocksAckPayload, channel_id: ChannelId) {

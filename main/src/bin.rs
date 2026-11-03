@@ -39,6 +39,45 @@ impl InterruptSafeAllocator {
         Some((sz.trailing_zeros() as usize) - 6)
     }
 
+    /// Bytes of freed memory currently parked in the slab free lists (counted as "used" by
+    /// `LockedHeap` but reusable only for the same size class until `drain_slabs` runs).
+    fn slab_cached_bytes() -> usize {
+        let mut total = 0usize;
+        for c in 0..SLAB_FREE.len() {
+            total += SLAB_FREE[c].lock().1 * (64usize << c);
+        }
+        total
+    }
+
+    /// Prints allocator state after a final allocation failure (slabs already drained), so the
+    /// post-mortem in orpi.log shows whether the heap is exhausted or just fragmented.
+    /// Uses only the UART (no allocation) and `try_lock`, so it cannot deadlock or recurse.
+    fn report_oom(&self, layout: core::alloc::Layout) {
+        let hart_id: usize;
+        // SAFETY: reads the `tp` register, which holds the hart id on this platform.
+        unsafe { core::arch::asm!("mv {0}, tp", out(reg) hart_id) };
+        let (used, free, size) = match self.0.try_lock() {
+            Some(h) => (h.used(), h.free(), h.size()),
+            None => (0, 0, 0),
+        };
+        let _g = kernel_common::uart::UART_LOCK.try_lock();
+        kernel_common::uart::print_no_lock(b"[OOM] hart=");
+        kernel_common::uart::print_usize_no_lock(hart_id);
+        kernel_common::uart::print_no_lock(b" req=");
+        kernel_common::uart::print_usize_no_lock(layout.size());
+        kernel_common::uart::print_no_lock(b" align=");
+        kernel_common::uart::print_usize_no_lock(layout.align());
+        kernel_common::uart::print_no_lock(b" heap_size_mb=");
+        kernel_common::uart::print_usize_no_lock(size / 1024 / 1024);
+        kernel_common::uart::print_no_lock(b" used_mb=");
+        kernel_common::uart::print_usize_no_lock(used / 1024 / 1024);
+        kernel_common::uart::print_no_lock(b" free_mb=");
+        kernel_common::uart::print_usize_no_lock(free / 1024 / 1024);
+        kernel_common::uart::print_no_lock(b" slab_cached_mb=");
+        kernel_common::uart::print_usize_no_lock(Self::slab_cached_bytes() / 1024 / 1024);
+        kernel_common::uart::print_no_lock(b"\n");
+    }
+
     unsafe fn drain_slabs(&self) {
         let mut heap = self.0.lock();
         // Drain all cached slabs (0..SLAB_FREE.len()) back to LockedHeap on allocation failure
@@ -59,8 +98,9 @@ impl InterruptSafeAllocator {
     }
 }
 
-unsafe impl core::alloc::GlobalAlloc for InterruptSafeAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+impl InterruptSafeAllocator {
+    unsafe fn alloc_raw(&self, layout: core::alloc::Layout) -> *mut u8 {
+        use core::alloc::GlobalAlloc as _;
         let _intr = kernel_common::uart::InterruptGuard::new();
         if let Some(c) = Self::slab_class(layout) {
             {
@@ -78,16 +118,25 @@ unsafe impl core::alloc::GlobalAlloc for InterruptSafeAllocator {
                 return p;
             }
             self.drain_slabs();
-            return self.0.alloc(slab_layout);
+            let p = self.0.alloc(slab_layout);
+            if p.is_null() {
+                self.report_oom(layout);
+            }
+            return p;
         }
         let p = self.0.alloc(layout);
         if !p.is_null() {
             return p;
         }
         self.drain_slabs();
-        self.0.alloc(layout)
+        let p = self.0.alloc(layout);
+        if p.is_null() {
+            self.report_oom(layout);
+        }
+        p
     }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+    unsafe fn dealloc_raw(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        use core::alloc::GlobalAlloc as _;
         let _intr = kernel_common::uart::InterruptGuard::new();
         if let Some(c) = Self::slab_class(layout) {
             let mut slot = SLAB_FREE[c].lock();
@@ -97,6 +146,16 @@ unsafe impl core::alloc::GlobalAlloc for InterruptSafeAllocator {
             return;
         }
         self.0.dealloc(ptr, layout)
+    }
+}
+
+// SAFETY: forwards every call unchanged to `alloc_raw`/`dealloc_raw`.
+unsafe impl core::alloc::GlobalAlloc for InterruptSafeAllocator {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        self.alloc_raw(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        self.dealloc_raw(ptr, layout)
     }
 }
 
@@ -216,19 +275,20 @@ fn load_config_toml_str() -> &'static str {
     if !slice.is_empty() {
         if let Ok(s) = core::str::from_utf8(slice) {
             if s.contains('[') && s.contains('=') {
-                uart::print(b"[boot] Loaded config.toml from SD/RAM at 0x");
-                uart::print_usize_hex(addr);
-                uart::print(b" (");
-                uart::print_usize(slice.len());
-                uart::print(b" bytes)\n");
+                tracing::info!(
+                    "[boot] Loaded config.toml from SD/RAM at {:#x} ({} bytes)",
+                    addr,
+                    slice.len()
+                );
                 return s;
             }
         }
     }
 
-    uart::print(b"[boot] No valid config.toml in RAM at 0x");
-    uart::print_usize_hex(addr);
-    uart::print(b", using embedded config.toml\n");
+    tracing::warn!(
+        "[boot] No valid config.toml in RAM at {:#x}, using embedded config.toml",
+        addr
+    );
     include_str!("../../config.toml")
 }
 
@@ -504,10 +564,6 @@ unsafe impl Send for NodeWrapper {}
 unsafe impl Sync for NodeWrapper {}
 
 fn boot_hart_main(hart_id: usize) {
-    uart::print(b"[boot] RS-Nano Bare Metal Node starting (Hart ");
-    uart::print_usize(hart_id);
-    uart::print(b")\n");
-
     extern "C" {
         static _bss_start: u8;
         static _bss_end: u8;
@@ -517,29 +573,9 @@ fn boot_hart_main(hart_id: usize) {
         static _heap_end: u8;
     }
 
-    uart::print(b"[boot] BSS: 0x");
-    uart::print_usize_hex(unsafe { &_bss_start as *const u8 as usize });
-    uart::print(b" - 0x");
-    uart::print_usize_hex(unsafe { &_bss_end as *const u8 as usize });
-    uart::print(b"\n");
-
-    uart::print(b"[boot] Stack: 0x");
-    uart::print_usize_hex(unsafe { &_stack_bottom as *const u8 as usize });
-    uart::print(b" - 0x");
-    uart::print_usize_hex(unsafe { &_stack_top as *const u8 as usize });
-    uart::print(b"\n");
-
     let heap_start = (unsafe { &_heap_start as *const u8 as usize } + 15) & !15;
     let heap_end = unsafe { &_heap_end as *const u8 as usize } & !15;
     let heap_len = heap_end - heap_start;
-
-    uart::print(b"[boot] Heap: 0x");
-    uart::print_usize_hex(heap_start);
-    uart::print(b" - 0x");
-    uart::print_usize_hex(heap_end);
-    uart::print(b" (");
-    uart::print_usize(heap_len / 1024 / 1024);
-    uart::print(b" MB)\n");
 
     if HEAP_MAGIC.load(Ordering::SeqCst) != MAGIC_VAL {
         unsafe {
@@ -547,6 +583,8 @@ fn boot_hart_main(hart_id: usize) {
         }
         HEAP_MAGIC.store(MAGIC_VAL, Ordering::SeqCst);
     }
+
+    kernel_common::logger::init();
 
     if !TRAP_INIT_COMPLETE.swap(true, Ordering::SeqCst) {
         trap::init();
@@ -569,47 +607,58 @@ fn boot_hart_main(hart_id: usize) {
         trap::init();
     }
 
-    uart::print(b"[boot] logger init...\n");
-    kernel_common::logger::init();
-    uart::print(b"[boot] logger init done\n");
-
-    let seed = {
-        uart::print(b"[boot] getting seed...\n");
-        let s = kernel_common::sbi::get_time();
-        uart::print(b"[boot] getting seed done\n");
-        s
-    };
-    uart::print(b"[boot] setting seed...\n");
+    let seed = kernel_common::sbi::get_time();
     rsnano_nullable_random::set_seed(seed);
-    uart::print(b"[boot] setting seed done\n");
-
-    uart::print(b"[boot] tracing info...\n");
-    tracing::info!("--- DYNAMIC NODE START ---");
-    uart::print(b"[boot] tracing info done\n");
 
     static LEADER_ELECTED: AtomicBool = AtomicBool::new(false);
     if !LEADER_ELECTED.swap(true, Ordering::SeqCst) {
-        kernel_common::oled::init();
-
         let config_str = load_config_toml_str();
         let daemon_toml = match rsnano_node::config::DaemonToml::from_toml_str(config_str) {
             Ok(toml) => toml,
             Err(e) => {
-                uart::print(b"[boot] WARNING: SD config.toml parse error (");
-                uart::print(e.as_bytes());
-                uart::print(b"), falling back to embedded config.toml\n");
+                tracing::warn!(
+                    "[boot] WARNING: SD config.toml parse error ({}), falling back to embedded config.toml",
+                    e
+                );
                 rsnano_node::config::DaemonToml::from_toml_str(include_str!("../../config.toml"))
                     .expect("Failed to parse embedded config.toml")
             }
         };
 
+        if let Some(level) = daemon_toml
+            .bare_metal
+            .as_ref()
+            .and_then(|bm| bm.log_level.as_deref())
+        {
+            kernel_common::logger::set_log_level(level);
+            tracing::info!("[boot] Log level set to '{}'", level);
+        }
+
+        tracing::info!(
+            "[boot] RS-Nano Bare Metal Node starting (Hart {})",
+            hart_id
+        );
+        tracing::debug!(
+            "[boot] BSS: {:#x} - {:#x} | Stack: {:#x} - {:#x}",
+            unsafe { &_bss_start as *const u8 as usize },
+            unsafe { &_bss_end as *const u8 as usize },
+            unsafe { &_stack_bottom as *const u8 as usize },
+            unsafe { &_stack_top as *const u8 as usize }
+        );
+        tracing::info!(
+            "[boot] Heap: {:#x} - {:#x} ({} MB)",
+            heap_start,
+            heap_end,
+            heap_len / 1024 / 1024
+        );
+
+        kernel_common::oled::init();
+
         #[cfg(feature = "block-test")]
         let network = rsnano_core::Networks::NanoDevNetwork;
         #[cfg(not(feature = "block-test"))]
         let network = daemon_toml.network_or(rsnano_core::Networks::NanoLiveNetwork);
-        uart::print(b"[boot] Using network: ");
-        uart::print(network.as_str().as_bytes());
-        uart::print(b"\n");
+        tracing::info!("[boot] Using network: {}", network.as_str());
 
         let mut daemon_config = rsnano_node::config::DaemonConfig::new2(network, 8);
         daemon_config.rpc_enable = true;
@@ -651,9 +700,9 @@ fn boot_hart_main(hart_id: usize) {
             kernel_common::net::set_net_config(net_cfg);
         }
 
-        uart::print(b"[boot] net init...\n");
+        tracing::debug!("[boot] net init...");
         let net_ctx = kernel_common::net::init_uboot_net();
-        uart::print(b"[boot] net init done\n");
+        tracing::debug!("[boot] net init done");
         if let Some(ctx) = net_ctx {
             *kernel_common::net::NET.lock() = Some(ctx);
         }
@@ -670,14 +719,14 @@ fn boot_hart_main(hart_id: usize) {
         let wipe_requested = true;
 
         if wipe_requested {
-            uart::print(b"[storage] Wiping all B-Tree shards to start from zero...\n");
+            tracing::warn!("[storage] Wiping all B-Tree shards to start from zero...");
             for i in 0..kernel_common::storage::SHARD_COUNT {
                 if let Some(db) = kernel_common::storage::SHARDS[i].lock().as_mut() {
                     db.wipe();
                 }
             }
             kernel_common::storage::flush_all_shards();
-            uart::print(b"[storage] All B-Tree shards wiped and flushed to NVMe.\n");
+            tracing::info!("[storage] All B-Tree shards wiped and flushed to NVMe.");
         }
 
         let exec = kernel_common::async_rt::Executor::new();
@@ -707,8 +756,8 @@ fn boot_hart_main(hart_id: usize) {
             .and_then(|e| e.enable_pruning)
             .unwrap_or(false);
         if flags.enable_pruning && config.enable_voting {
-            kernel_common::uart::print(
-                b"[boot] Notice: disabling enable_voting because enable_pruning is enabled\n",
+            tracing::warn!(
+                "[boot] Notice: disabling enable_voting because enable_pruning is enabled"
             );
             config.enable_voting = false;
         }
@@ -738,24 +787,23 @@ fn boot_hart_main(hart_id: usize) {
             &mut event_handlers.lock(),
         );
 
-        kernel_common::uart::print(b"[boot] node.start() starting...\n");
+        tracing::debug!("[boot] node.start() starting...");
         node.start();
         if let Some(ws) = &websocket_server {
             use rsnano_websocket_server::WebsocketListenerExt;
             ws.start();
-            kernel_common::uart::print(b"[boot] websocket server started on port ");
-            kernel_common::uart::print_usize(ws.listening_port() as usize);
-            kernel_common::uart::print(b"\n");
+            tracing::info!(
+                "[boot] websocket server started on port {}",
+                ws.listening_port()
+            );
         }
-        kernel_common::uart::print(b"[boot] node.start() completed!\n");
+        tracing::info!("[boot] node.start() completed!");
 
         // Connect immediately and persist any IPv4 preconfigured_peers from config.toml
         #[cfg(not(feature = "block-test"))]
         for peer in &preconfigured_peers {
             if let Ok(ip) = core::net::Ipv4Addr::from_str(&peer.address) {
-                kernel_common::uart::print(b"[boot] adding peer ");
-                kernel_common::uart::print(peer.address.as_bytes());
-                kernel_common::uart::print(b"...\n");
+                tracing::debug!("[boot] adding peer {}:{}...", peer.address, peer.port);
                 let addr_v6 = ip.to_ipv6_mapped();
                 let socket_addr = core::net::SocketAddrV6::new(addr_v6, peer.port, 0, 0);
 
@@ -765,7 +813,6 @@ fn boot_hart_main(hart_id: usize) {
                     .put(socket_addr, rsnano_nullable_clock::SystemTime::now());
 
                 let _ = node.peer_connector.connect_to(socket_addr);
-                kernel_common::uart::print(b"[boot] adding peer done\n");
             }
         }
         #[cfg(feature = "block-test")]
@@ -816,30 +863,24 @@ fn boot_hart_main(hart_id: usize) {
         let flag_addr = &HART_DISPATCH_READY as *const _ as usize;
         clean_cache_range(flag_addr, 8);
 
-        kernel_common::uart::print(b"[boot] Starting secondary harts...\n");
+        tracing::info!("[boot] Starting secondary harts...");
 
         for id in 0..8 {
             if id != hart_id {
                 if id == 0 {
-                    kernel_common::uart::print(
-                        b"[boot] Skipping Hart 0 (known to hang OpenSBI on this SoC)\n",
+                    tracing::debug!(
+                        "[boot] Skipping Hart 0 (known to hang OpenSBI on this SoC)"
                     );
                     continue;
                 }
 
-                kernel_common::uart::print(b"[boot] Starting Hart ");
-                kernel_common::uart::print_usize(id);
-                kernel_common::uart::print(b"...\n");
-
                 let (initial_err, initial_status) = kernel_common::sbi::hart_get_status(id);
-
-                kernel_common::uart::print(b"[boot] Hart ");
-                kernel_common::uart::print_usize(id);
-                kernel_common::uart::print(b" initial status: err=");
-                kernel_common::uart::print_usize(initial_err);
-                kernel_common::uart::print(b", status=");
-                kernel_common::uart::print_usize(initial_status);
-                kernel_common::uart::print(b"\n");
+                tracing::debug!(
+                    "[boot] Starting Hart {} (initial err={}, status={})...",
+                    id,
+                    initial_err,
+                    initial_status
+                );
 
                 let (err, _) = kernel_common::sbi::hart_start(id, start_addr, 0);
 
@@ -870,17 +911,14 @@ fn boot_hart_main(hart_id: usize) {
                 invalidate_cache_range(wake_addr, 4);
                 let wake_val = unsafe { core::ptr::read_volatile(&SECONDARY_HART_WAKE[id]) };
 
-                kernel_common::uart::print(b"[boot] Hart ");
-                kernel_common::uart::print_usize(id);
-                kernel_common::uart::print(b" start result: err=");
-                kernel_common::uart::print_usize(err);
-                kernel_common::uart::print(b", get_status_err=");
-                kernel_common::uart::print_usize(err_status);
-                kernel_common::uart::print(b", status=");
-                kernel_common::uart::print_usize(status);
-                kernel_common::uart::print(b", wake=");
-                kernel_common::uart::print_usize(wake_val as usize);
-                kernel_common::uart::print(b"\n");
+                tracing::debug!(
+                    "[boot] Hart {} start result: err={}, get_status_err={}, status={}, wake={}",
+                    id,
+                    err,
+                    err_status,
+                    status,
+                    wake_val
+                );
             }
         }
     } else {
@@ -902,9 +940,7 @@ fn boot_hart_main(hart_id: usize) {
         .expect("Executor not initialized")
         .clone();
 
-    kernel_common::uart::print(b"[boot] Entering task loop for Hart ");
-    kernel_common::uart::print_usize(hart_id);
-    kernel_common::uart::print(b"...\n");
+    tracing::debug!("[boot] Entering task loop for Hart {}...", hart_id);
 
     dispatch_hart_task(hart_id, node_arc, exec);
 }
@@ -948,9 +984,10 @@ fn dispatch_hart_task(
         6 => run_ledger_commit_and_bootstrap_loop(node_arc, exec, hart_id),
         7 => run_storage_flush_and_monitor_loop(node_arc, exec, hart_id),
         _ => {
-            kernel_common::uart::print(b"[boot] Hart ");
-            kernel_common::uart::print_usize(hart_id);
-            kernel_common::uart::print(b": Reserved/unassigned, entering parking loop\n");
+            tracing::warn!(
+                "[boot] Hart {}: Reserved/unassigned, entering parking loop",
+                hart_id
+            );
             loop {
                 core::hint::spin_loop();
             }
@@ -980,7 +1017,7 @@ fn run_consensus_and_elections_loop(
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    tracing::info!("[boot] Hart 4: Consensus & Active Elections loop enter\n");
+    tracing::debug!("[boot] Hart 4: Consensus & Active Elections loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_aec_voter_tick = kernel_common::clint::mtime();
@@ -1004,15 +1041,13 @@ fn run_consensus_and_elections_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 4 (Consensus) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b" | Active: ");
-                kernel_common::uart::print_usize_no_lock(node_arc.active.read().len());
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-                iterations = 0;
-            }
+            tracing::debug!(
+                "[heartbeat] Hart 4 (Consensus) | Iters: {} | Active: {}",
+                iterations,
+                node_arc.active.read().len()
+            );
+            last_heartbeat = mtime;
+            iterations = 0;
         }
 
         let mut worked = false;
@@ -1047,7 +1082,7 @@ fn run_vote_processor_loop(
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 5: Vote Processor loop enter\n");
+    tracing::debug!("[boot] Hart 5: Vote Processor loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
@@ -1061,13 +1096,12 @@ fn run_vote_processor_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 5 (VoteProc) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-                iterations = 0;
-            }
+            tracing::debug!(
+                "[heartbeat] Hart 5 (VoteProc) | Iters: {}",
+                iterations
+            );
+            last_heartbeat = mtime;
+            iterations = 0;
         }
 
         let mut worked = false;
@@ -1102,7 +1136,7 @@ fn run_crypto_worker_1_loop(
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 2: Crypto Worker 1 (SIMD Verify) loop enter\n");
+    tracing::debug!("[boot] Hart 2: Crypto Worker 1 (SIMD Verify) loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
@@ -1116,15 +1150,13 @@ fn run_crypto_worker_1_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 2 (Crypto-1) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b" | Verified: ");
-                kernel_common::uart::print_usize_no_lock(verified_count);
-                kernel_common::uart::print_no_lock(b"\n");
-                iterations = 0;
-                last_heartbeat = mtime;
-            }
+            tracing::debug!(
+                "[heartbeat] Hart 2 (Crypto-1) | Iters: {} | Verified: {}",
+                iterations,
+                verified_count
+            );
+            iterations = 0;
+            last_heartbeat = mtime;
         }
 
         let mut worked = false;
@@ -1177,7 +1209,7 @@ fn run_crypto_worker_2_loop(
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 3: Crypto Worker 2 (SIMD Verify) loop enter\n");
+    tracing::debug!("[boot] Hart 3: Crypto Worker 2 (SIMD Verify) loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
@@ -1191,15 +1223,13 @@ fn run_crypto_worker_2_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 3 (Crypto-2) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b" | Verified: ");
-                kernel_common::uart::print_usize_no_lock(verified_count);
-                kernel_common::uart::print_no_lock(b"\n");
-                iterations = 0;
-                last_heartbeat = mtime;
-            }
+            tracing::debug!(
+                "[heartbeat] Hart 3 (Crypto-2) | Iters: {} | Verified: {}",
+                iterations,
+                verified_count
+            );
+            iterations = 0;
+            last_heartbeat = mtime;
         }
 
         let mut worked = false;
@@ -1383,7 +1413,7 @@ fn run_storage_flush_and_monitor_loop(
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 7: Storage Flush & Monitor loop enter\n");
+    tracing::debug!("[boot] Hart 7: Storage Flush & Monitor loop enter");
     let mut last_tick = kernel_common::clint::mtime();
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
@@ -1460,13 +1490,12 @@ fn run_storage_flush_and_monitor_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 7 (Storage+Mon) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-                iterations = 0;
-            }
+            tracing::debug!(
+                "[heartbeat] Hart 7 (Storage+Mon) | Iters: {}",
+                iterations
+            );
+            last_heartbeat = mtime;
+            iterations = 0;
         }
 
         if mtime - last_tick > seconds(15) {
@@ -1486,126 +1515,148 @@ fn run_storage_flush_and_monitor_loop(
             let db_kb = total_pages * 4;
             let cache_mb = (cached_pages * 4) / 1024;
             cached_db_kb = db_kb;
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                let (used, _) = {
-                    let heap = ALLOCATOR.0.lock();
-                    (heap.used(), heap.size())
-                };
-                let stored_count = node_mon.ledger.block_count();
-                let confirmed_count = node_mon.ledger.confirmed_count();
 
-                let bps = stored_count.saturating_sub(last_stored_count) / 15;
-                let _cps = confirmed_count.saturating_sub(last_confirmed_count) / 15;
-                last_stored_count = stored_count;
-                last_confirmed_count = confirmed_count;
+            let used = ALLOCATOR.0.lock().used();
+            let slab_mb = InterruptSafeAllocator::slab_cached_bytes() / 1024 / 1024;
+            let stored_count = node_mon.ledger.block_count();
+            let confirmed_count = node_mon.ledger.confirmed_count();
 
-                let channels_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
-                let online_stake = node_mon.online_reps.try_lock().map(|r| r.online_weight()).unwrap_or_default();
+            let bps = stored_count.saturating_sub(last_stored_count) / 15;
+            let _cps = confirmed_count.saturating_sub(last_confirmed_count) / 15;
+            last_stored_count = stored_count;
+            last_confirmed_count = confirmed_count;
 
-                kernel_common::uart::print_no_lock(b"[monitor] Heap: ");
-                kernel_common::uart::print_usize_no_lock(used / 1024 / 1024);
-                kernel_common::uart::print_no_lock(b" MB | Cache: ");
-                kernel_common::uart::print_usize_no_lock(cache_mb);
-                kernel_common::uart::print_no_lock(b" MB | DB: ");
-                if db_kb >= 1024 {
-                    kernel_common::uart::print_usize_no_lock(db_kb / 1024);
-                    kernel_common::uart::print_no_lock(b" MB (");
-                } else {
-                    kernel_common::uart::print_usize_no_lock(db_kb);
-                    kernel_common::uart::print_no_lock(b" KB (");
-                }
-                kernel_common::uart::print_usize_no_lock(free_pages);
-                kernel_common::uart::print_no_lock(b" free) | Peers: ");
-                kernel_common::uart::print_usize_no_lock(channels_info.total);
-                kernel_common::uart::print_no_lock(b" (");
-                kernel_common::uart::print_usize_no_lock(channels_info.outbound);
-                kernel_common::uart::print_no_lock(b" out) | Stake: ");
-                kernel_common::uart::print_usize_no_lock(
-                    (online_stake.number() / (10u128.pow(30))) as usize,
+            let channels_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
+            let online_stake = node_mon.online_reps.try_lock().map(|r| r.online_weight()).unwrap_or_default();
+            let stake_nano = (online_stake.number() / (10u128.pow(30))) as usize;
+
+            if db_kb >= 1024 {
+                tracing::info!(
+                    "[monitor] Heap: {} MB (slab-cached {} MB) | Cache: {} MB | DB: {} MB ({} free) | Peers: {} ({} out) | Stake: {} | Rate: {} bps",
+                    used / 1024 / 1024,
+                    slab_mb,
+                    cache_mb,
+                    db_kb / 1024,
+                    free_pages,
+                    channels_info.total,
+                    channels_info.outbound,
+                    stake_nano,
+                    bps
                 );
-                kernel_common::uart::print_no_lock(b" | Rate: ");
-                kernel_common::uart::print_usize_no_lock(bps as usize);
-                kernel_common::uart::print_no_lock(b" bps\n");
-                print_block_prof_no_lock();
+            } else {
+                tracing::info!(
+                    "[monitor] Heap: {} MB (slab-cached {} MB) | Cache: {} MB | DB: {} KB ({} free) | Peers: {} ({} out) | Stake: {} | Rate: {} bps",
+                    used / 1024 / 1024,
+                    slab_mb,
+                    cache_mb,
+                    db_kb,
+                    free_pages,
+                    channels_info.total,
+                    channels_info.outbound,
+                    stake_nano,
+                    bps
+                );
+            }
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                log_block_prof_debug();
                 {
-                    let names: [&[u8]; 7] = [b"ascack", b"publish", b"confack", b"confreq", b"keepalive", b"ascreq", b"other"];
-                    kernel_common::uart::print_no_lock(b"   [msgprof]");
-                    for i in 0..7 {
-                        let n = rsnano_node::transport::MSG_PROF[i].load(Ordering::Relaxed);
-                        let ms = rsnano_node::transport::MSG_PROF[7 + i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ;
-                        kernel_common::uart::print_no_lock(b" ");
-                        kernel_common::uart::print_no_lock(names[i]);
-                        kernel_common::uart::print_no_lock(b"=");
-                        kernel_common::uart::print_usize_no_lock(n as usize);
-                        kernel_common::uart::print_no_lock(b"/");
-                        kernel_common::uart::print_usize_no_lock(ms as usize);
-                        kernel_common::uart::print_no_lock(b"ms");
-                    }
-                    kernel_common::uart::print_no_lock(b"\n");
+                    let mp = &rsnano_node::transport::MSG_PROF;
+                    let ms = |idx: usize| (mp[7 + idx].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+                    let cnt = |idx: usize| mp[idx].load(Ordering::Relaxed) as usize;
+                    tracing::debug!(
+                        "   [msgprof] ascack={}/{}ms publish={}/{}ms confack={}/{}ms confreq={}/{}ms keepalive={}/{}ms ascreq={}/{}ms other={}/{}ms",
+                        cnt(0), ms(0),
+                        cnt(1), ms(1),
+                        cnt(2), ms(2),
+                        cnt(3), ms(3),
+                        cnt(4), ms(4),
+                        cnt(5), ms(5),
+                        cnt(6), ms(6),
+                    );
                 }
                 {
                     let st = node_mon.bootstrapper.get_state();
                     if let Some(g) = st.try_lock() {
-                        kernel_common::uart::print_no_lock(b"   [bsets] priority=");
-                        kernel_common::uart::print_usize_no_lock(g.candidate_accounts.priority_len());
-                        kernel_common::uart::print_no_lock(b" blocked=");
-                        kernel_common::uart::print_usize_no_lock(g.candidate_accounts.blocked_len());
                         let (rq, chans, inflight, at_limit) = g.diag_summary();
-                        kernel_common::uart::print_no_lock(b" running_queries=");
-                        kernel_common::uart::print_usize_no_lock(rq);
-                        kernel_common::uart::print_no_lock(b" channels=");
-                        kernel_common::uart::print_usize_no_lock(chans);
-                        kernel_common::uart::print_no_lock(b" inflight=");
-                        kernel_common::uart::print_usize_no_lock(inflight);
-                        kernel_common::uart::print_no_lock(b" at_limit=");
-                        kernel_common::uart::print_usize_no_lock(at_limit);
-                        kernel_common::uart::print_no_lock(b"\n");
+                        tracing::debug!(
+                            "   [bsets] priority={} blocked={} running_queries={} channels={} inflight={} at_limit={}",
+                            g.candidate_accounts.priority_len(),
+                            g.candidate_accounts.blocked_len(),
+                            rq,
+                            chans,
+                            inflight,
+                            at_limit
+                        );
                     };
                 }
-
                 let stats_col = node_mon.stats();
                 {
-                    let mut bfirst = true;
+                    static CINFO_TICK: AtomicUsize = AtomicUsize::new(0);
+                    if CINFO_TICK.fetch_add(1, Ordering::Relaxed) % 4 == 0 {
+                        let json = node_mon.container_info().into_json();
+                        tracing::debug!("   [cinfo] {}", json);
+                    }
+                }
+                {
+                    use core::fmt::Write;
+                    let mut bbuf = String::new();
                     for (key, val) in stats_col.iter() {
                         if *val > 0 && key.stat.starts_with("boot") {
-                            if bfirst {
-                                kernel_common::uart::print_no_lock(b"   [bstats] ");
-                                bfirst = false;
-                            } else {
-                                kernel_common::uart::print_no_lock(b" | ");
+                            if !bbuf.is_empty() {
+                                bbuf.push_str(" | ");
                             }
-                            kernel_common::uart::print_no_lock(key.stat.as_bytes());
-                            kernel_common::uart::print_no_lock(b".");
-                            kernel_common::uart::print_no_lock(key.detail.as_bytes());
-                            kernel_common::uart::print_no_lock(b"=");
-                            kernel_common::uart::print_usize_no_lock(*val as usize);
+                            let _ = write!(bbuf, "{}.{}={}", key.stat, key.detail, val);
                         }
                     }
-                    if !bfirst {
-                        kernel_common::uart::print_no_lock(b"\n");
-                    };
-                }
-                let mut first = true;
-                for (key, val) in stats_col.iter() {
-                    if (key.stat == "block_processor_result"
-                        || key.stat == "block_processor_source")
-                        && *val > 0
-                    {
-                        if first {
-                            kernel_common::uart::print_no_lock(b"   [stats] ");
-                            first = false;
-                        } else {
-                            kernel_common::uart::print_no_lock(b" | ");
-                        }
-                        kernel_common::uart::print_no_lock(key.detail.as_bytes());
-                        kernel_common::uart::print_no_lock(b": ");
-                        kernel_common::uart::print_usize_no_lock(*val as usize);
+                    if !bbuf.is_empty() {
+                        tracing::debug!("   [bstats] {}", bbuf);
                     }
                 }
-                if !first {
-                    kernel_common::uart::print_no_lock(b"\n");
+                {
+                    static VSTATS_TICK: AtomicUsize = AtomicUsize::new(0);
+                    if VSTATS_TICK.fetch_add(1, Ordering::Relaxed) % 4 == 0 {
+                        use core::fmt::Write;
+                        let mut vbuf = String::new();
+                        for (key, val) in stats_col.iter() {
+                            let st = key.stat;
+                            if *val > 0
+                                && (st.contains("vote")
+                                    || st.contains("election")
+                                    || st.contains("confirm")
+                                    || st.contains("rep_crawler"))
+                            {
+                                if !vbuf.is_empty() {
+                                    vbuf.push_str(" | ");
+                                }
+                                let _ = write!(vbuf, "{}.{}={}", st, key.detail, val);
+                            }
+                        }
+                        if !vbuf.is_empty() {
+                            tracing::debug!("   [vstats] {}", vbuf);
+                        }
+                    }
+                }
+                {
+                    use core::fmt::Write;
+                    let mut sbuf = String::new();
+                    for (key, val) in stats_col.iter() {
+                        if (key.stat == "block_processor_result"
+                            || key.stat == "block_processor_source")
+                            && *val > 0
+                        {
+                            if !sbuf.is_empty() {
+                                sbuf.push_str(" | ");
+                            }
+                            let _ = write!(sbuf, "{}: {}", key.detail, val);
+                        }
+                    }
+                    if !sbuf.is_empty() {
+                        tracing::debug!("   [stats] {}", sbuf);
+                    }
                 }
             }
+
             node_mon.tick_monitor();
             DB_PAGES_FREE.store(free_pages, Ordering::Relaxed);
             last_tick = mtime;
@@ -1662,85 +1713,67 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
-/// Prints block-processor stage profiling (ms of CLINT time) while the caller holds the UART lock.
-fn print_block_prof_no_lock() {
-    let names: [&[u8]; 8] = [
-        b"[prof] sig_ms=", b" ledger_ms=", b" post_ms=", b" batches=",
-        b" blocks=", b" verified=", b" send_ms=", b" loop_ms=",
-    ];
-    for i in 0..8 {
-        kernel_common::uart::print_no_lock(names[i]);
-        let v = rsnano_node::block_processing::BLOCK_PROF[i].load(Ordering::Relaxed);
-        let v = if i < 3 || i >= 6 { (v * 1000 / CLINT_FREQ) as usize } else { v as usize };
-        kernel_common::uart::print_usize_no_lock(v);
-    }
-    kernel_common::uart::print_no_lock(b"\n");
-    let snames: [&[u8]; 10] = [
-        b"[sprof] fetch_n=", b" fetch_ms=", b" read_n=", b" read_ms=", b" write_n=",
-        b" write_ms=", b" search_n=", b" search_ms=", b" insert_n=", b" insert_ms=",
-    ];
-    for i in 0..10 {
-        kernel_common::uart::print_no_lock(snames[i]);
-        let v = kernel_common::storage::bpm::STORAGE_PROF[i].load(Ordering::Relaxed);
-        let v = if i % 2 == 1 { (v * 1000 / CLINT_FREQ) as usize } else { v as usize };
-        kernel_common::uart::print_usize_no_lock(v);
-    }
-    kernel_common::uart::print_no_lock(b"\n");
-    kernel_common::uart::print_no_lock(b"[bexists] lock_wait_ms=");
-    kernel_common::uart::print_usize_no_lock((kernel_common::storage::bpm::STORAGE_PROF[10].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-    kernel_common::uart::print_no_lock(b" search_ms=");
-    kernel_common::uart::print_usize_no_lock((kernel_common::storage::bpm::STORAGE_PROF[11].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-    kernel_common::uart::print_no_lock(b" calls=");
-    kernel_common::uart::print_usize_no_lock(kernel_common::storage::bpm::STORAGE_PROF[12].load(Ordering::Relaxed) as usize);
-    kernel_common::uart::print_no_lock(b"\n");
+/// Logs block-processor and storage stage profiling at DEBUG level.
+fn log_block_prof_debug() {
+    let bp = &rsnano_node::block_processing::BLOCK_PROF;
+    let bp_ms = |i: usize| (bp[i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    let bp_n = |i: usize| bp[i].load(Ordering::Relaxed) as usize;
+    tracing::debug!(
+        "[prof] sig_ms={} ledger_ms={} post_ms={} batches={} blocks={} verified={} send_ms={} loop_ms={}",
+        bp_ms(0), bp_ms(1), bp_ms(2), bp_n(3), bp_n(4), bp_n(5), bp_ms(6), bp_ms(7)
+    );
+
+    let sp = &kernel_common::storage::bpm::STORAGE_PROF;
+    let sp_ms = |i: usize| (sp[i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    let sp_n = |i: usize| sp[i].load(Ordering::Relaxed) as usize;
+    tracing::debug!(
+        "[sprof] fetch_n={} fetch_ms={} read_n={} read_ms={} write_n={} write_ms={} search_n={} search_ms={} insert_n={} insert_ms={}",
+        sp_n(0), sp_ms(1), sp_n(2), sp_ms(3), sp_n(4), sp_ms(5), sp_n(6), sp_ms(7), sp_n(8), sp_ms(9)
+    );
+    tracing::debug!(
+        "[bexists] lock_wait_ms={} search_ms={} calls={}",
+        sp_ms(10), sp_ms(11), sp_n(12)
+    );
+
     for h in 0..8 {
         let acq = kernel_common::storage::LOCK_ACQ[h].load(Ordering::Relaxed);
         if acq > 0 {
-            kernel_common::uart::print_no_lock(b"[shardlock] hart=");
-            kernel_common::uart::print_usize_no_lock(h);
-            kernel_common::uart::print_no_lock(b" acquires=");
-            kernel_common::uart::print_usize_no_lock(acq as usize);
-            kernel_common::uart::print_no_lock(b" hold_ms=");
-            kernel_common::uart::print_usize_no_lock((kernel_common::storage::LOCK_HOLD[h].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-            kernel_common::uart::print_no_lock(b" wait_ms=");
-            kernel_common::uart::print_usize_no_lock((kernel_common::storage::LOCK_WAIT[h].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-            kernel_common::uart::print_no_lock(b"\n");
+            let hold_ms = (kernel_common::storage::LOCK_HOLD[h].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+            let wait_ms = (kernel_common::storage::LOCK_WAIT[h].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+            tracing::debug!(
+                "[shardlock] hart={} acquires={} hold_ms={} wait_ms={}",
+                h, acq, hold_ms, wait_ms
+            );
         }
     }
     if let Some(t) = kernel_common::storage::LONG_HOLDS.try_lock() {
         for e in t.iter().flatten() {
-            kernel_common::uart::print_no_lock(b"[longhold] hart=");
-            kernel_common::uart::print_usize_no_lock(e.0);
-            kernel_common::uart::print_no_lock(b" ");
-            kernel_common::uart::print_no_lock(e.1.file().as_bytes());
-            kernel_common::uart::print_no_lock(b":");
-            kernel_common::uart::print_usize_no_lock(e.1.line() as usize);
-            kernel_common::uart::print_no_lock(b" total_ms=");
-            kernel_common::uart::print_usize_no_lock((e.2 * 1000 / CLINT_FREQ) as usize);
-            kernel_common::uart::print_no_lock(b" count=");
-            kernel_common::uart::print_usize_no_lock(e.3 as usize);
-            kernel_common::uart::print_no_lock(b"\n");
+            tracing::debug!(
+                "[longhold] hart={} {}:{} total_ms={} count={}",
+                e.0,
+                e.1.file(),
+                e.1.line(),
+                (e.2 * 1000 / CLINT_FREQ) as usize,
+                e.3
+            );
         }
     }
-    let lnames: [&[u8]; 10] = [
-        b"[lprof] create_validator_ms=", b" validate_ms=", b" insert_ms=", b" prev_block_ms=",
-        b" source_exists_ms=", b" get_pending_ms=", b" hash_exists_ms=", b" get_account_ms=",
-        b" receivable_exists_ms=", b" now_ms=",
-    ];
-    for i in 0..10 {
-        kernel_common::uart::print_no_lock(lnames[i]);
-        let v = rsnano_ledger::LEDGER_PROF[i].load(Ordering::Relaxed);
-        kernel_common::uart::print_usize_no_lock((v * 1000 / CLINT_FREQ) as usize);
-    }
-    kernel_common::uart::print_no_lock(b"\n");
-    let wnames: [&[u8]; 4] = [b"[wal] checkpoints=", b" wal_pages=", b" applied_pages=", b" ckpt_ms="];
-    for i in 0..4 {
-        kernel_common::uart::print_no_lock(wnames[i]);
-        let v = kernel_common::storage::wal::WAL_STATS[i].load(Ordering::Relaxed);
-        let v = if i == 3 { (v * 1000 / CLINT_FREQ) as usize } else { v as usize };
-        kernel_common::uart::print_usize_no_lock(v);
-    }
-    kernel_common::uart::print_no_lock(b"\n");
+
+    let lp = &rsnano_ledger::LEDGER_PROF;
+    let lp_ms = |i: usize| (lp[i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    tracing::debug!(
+        "[lprof] create_validator_ms={} validate_ms={} insert_ms={} prev_block_ms={} source_exists_ms={} get_pending_ms={} hash_exists_ms={} get_account_ms={} receivable_exists_ms={} now_ms={}",
+        lp_ms(0), lp_ms(1), lp_ms(2), lp_ms(3), lp_ms(4), lp_ms(5), lp_ms(6), lp_ms(7), lp_ms(8), lp_ms(9)
+    );
+
+    let ws = &kernel_common::storage::wal::WAL_STATS;
+    tracing::debug!(
+        "[wal] checkpoints={} wal_pages={} applied_pages={} ckpt_ms={}",
+        ws[0].load(Ordering::Relaxed),
+        ws[1].load(Ordering::Relaxed),
+        ws[2].load(Ordering::Relaxed),
+        (ws[3].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize
+    );
 }
 
 fn run_ledger_commit_and_bootstrap_loop(
@@ -1748,7 +1781,7 @@ fn run_ledger_commit_and_bootstrap_loop(
     _exec: kernel_common::async_rt::Executor,
     _hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 6: Single-Writer Ledger Commit & Bootstrap loop enter\n");
+    tracing::debug!("[boot] Hart 6: Single-Writer Ledger Commit & Bootstrap loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_node_tick = kernel_common::clint::mtime();
@@ -1765,14 +1798,12 @@ fn run_ledger_commit_and_bootstrap_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            let _lock = kernel_common::uart::UART_LOCK.lock();
-            kernel_common::uart::print_no_lock(b"[heartbeat] Hart 6 (Ledger+Boot) | Iters: ");
-            kernel_common::uart::print_usize_no_lock(iterations);
-            kernel_common::uart::print_no_lock(b" | Total Blocks: ");
-            kernel_common::uart::print_usize_no_lock(node_arc.ledger.block_count());
-            kernel_common::uart::print_no_lock(b" | BPQ: ");
-            kernel_common::uart::print_usize_no_lock(node_arc.block_processor.total_queue_len());
-            kernel_common::uart::print_no_lock(b"\n");
+            tracing::debug!(
+                "[heartbeat] Hart 6 (Ledger+Boot) | Iters: {} | Total Blocks: {} | BPQ: {}",
+                iterations,
+                node_arc.ledger.block_count(),
+                node_arc.block_processor.total_queue_len()
+            );
             iterations = 0;
             last_heartbeat = mtime;
         }
@@ -2266,7 +2297,7 @@ fn run_maintenance_and_network_loop(
     _exec: kernel_common::async_rt::Executor,
     _hart_id: usize,
 ) -> ! {
-    kernel_common::uart::print(b"[boot] Hart 1: Maintenance & Network loop enter\n");
+    tracing::debug!("[boot] Hart 1: Maintenance & Network loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
@@ -2308,11 +2339,11 @@ fn run_maintenance_and_network_loop(
 
         HART1_PROF[0].fetch_add(kernel_common::clint::mtime() - hp0, Ordering::Relaxed);
         if retry_net {
-            kernel_common::uart::print(b"[net] Retrying network initialization...\n");
+            tracing::warn!("[net] Retrying network initialization...");
             if let Some(new_ctx) = kernel_common::net::init_uboot_net() {
                 let _intr = kernel_common::uart::InterruptGuard::new();
                 *kernel_common::net::NET.lock() = Some(new_ctx);
-                kernel_common::uart::print(b"[net] Network initialized successfully!\n");
+                tracing::info!("[net] Network initialized successfully!");
             }
         }
 
@@ -2324,23 +2355,17 @@ fn run_maintenance_and_network_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             let processed = node_arc.message_processor.lock().total_processed();
-            if let Some(_lock) = kernel_common::uart::UART_LOCK.try_lock() {
-                kernel_common::uart::print_no_lock(b"[heartbeat] Hart 1 (Maint+Net) | Iters: ");
-                kernel_common::uart::print_usize_no_lock(iterations);
-                kernel_common::uart::print_no_lock(b" | Msgs: ");
-                kernel_common::uart::print_usize_no_lock(processed as usize);
-                kernel_common::uart::print_no_lock(b" | ms net=");
-                kernel_common::uart::print_usize_no_lock((HART1_PROF[0].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-                kernel_common::uart::print_no_lock(b" msgproc=");
-                kernel_common::uart::print_usize_no_lock((HART1_PROF[1].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-                kernel_common::uart::print_no_lock(b" sig=");
-                kernel_common::uart::print_usize_no_lock((HART1_PROF[2].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-                kernel_common::uart::print_no_lock(b" exec=");
-                kernel_common::uart::print_usize_no_lock((HART1_PROF[3].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize);
-                kernel_common::uart::print_no_lock(b"\n");
-                last_heartbeat = mtime;
-                iterations = 0;
-            }
+            tracing::debug!(
+                "[heartbeat] Hart 1 (Maint+Net) | Iters: {} | Msgs: {} | ms net={} msgproc={} sig={} exec={}",
+                iterations,
+                processed,
+                (HART1_PROF[0].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize,
+                (HART1_PROF[1].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize,
+                (HART1_PROF[2].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize,
+                (HART1_PROF[3].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize
+            );
+            last_heartbeat = mtime;
+            iterations = 0;
         }
 
         iterations += 1;

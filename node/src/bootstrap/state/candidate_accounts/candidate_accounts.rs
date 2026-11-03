@@ -158,6 +158,31 @@ impl CandidateAccounts {
         self.priority_set(account, Self::PRIORITY_INITIAL)
     }
 
+    /// Inserts an account with `PullType::Safe`, or promotes an already-prioritized account to
+    /// `PullType::Safe` so that stale elections pull from the confirmed frontier.
+    pub fn priority_set_safe(&mut self, account: &Account) -> bool {
+        if account.is_zero() || self.blocked(account) {
+            return false;
+        }
+        if self.priorities.contains(account) {
+            self.priorities.modify(account, |entry| {
+                entry.pull_type = PullType::Safe;
+                true
+            });
+            false
+        } else {
+            let inserted = Self::priority_set_impl(
+                account,
+                Self::PRIORITY_INITIAL,
+                PullType::Safe,
+                &self.blocking,
+                &mut self.priorities,
+            );
+            self.trim_overflow();
+            inserted
+        }
+    }
+
     pub fn priority_set(&mut self, account: &Account, priority: Priority) -> bool {
         let pull_type = self.pull_type_decider.decide_pull_type();
         let inserted =

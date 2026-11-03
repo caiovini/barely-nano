@@ -117,10 +117,13 @@ impl PriorityRequester {
                     }
 
                     // Query account head/confirmed frontier with NO BootstrapState lock held!
-                    // `optimistic_request_percentage` (config.toml) selects Optimistic (start at
-                    // the local head) vs Safe (start at the confirmed frontier, re-downloads the
-                    // unconfirmed segment and yields `Old` blocks on hot accounts). 100 = never Safe.
-                    let pull_type = self.query_factory.pull_type_decider.decide_pull_type();
+                    // Stale elections mark their candidate account as `PullType::Safe`; otherwise
+                    // `pull_type_decider` decides (`optimistic_request_percentage = 100` -> Optimistic).
+                    let pull_type = if next.pull_type == crate::bootstrap::state::PullType::Safe {
+                        crate::bootstrap::state::PullType::Safe
+                    } else {
+                        self.query_factory.pull_type_decider.decide_pull_type()
+                    };
                     let (head, confirmed_frontier) = match pull_type {
                         crate::bootstrap::state::PullType::Optimistic => (
                             self.query_factory.get_account_head(&next.account),

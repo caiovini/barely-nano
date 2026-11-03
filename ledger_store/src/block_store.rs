@@ -533,7 +533,7 @@ impl BtreeBlockStore {
         let bloom = get_block_bloom();
         if bloom.load_from_nvme() {
             BLOOM_ENABLED.store(true, Ordering::Release);
-            kernel_common::uart::print(b"[ledger] Loaded 64 MB block bloom filter from NVMe\n");
+            tracing::info!("[ledger] Loaded 64 MB block bloom filter from NVMe");
             true
         } else {
             false
@@ -545,9 +545,7 @@ impl BtreeBlockStore {
         let bloom = get_block_bloom();
         bloom.clear();
         #[cfg(not(test))]
-        kernel_common::uart::print(
-            b"[ledger] Building 64 MB block bloom filter from B-Tree (one-time scan)...\n",
-        );
+        tracing::info!("[ledger] Building 64 MB block bloom filter from B-Tree (one-time scan)...");
         let mut count = 0;
         let mut start_key = [0u8; KEY_SIZE];
         start_key[0] = Self::TABLE_ID;
@@ -566,15 +564,13 @@ impl BtreeBlockStore {
                     }
                     #[cfg(not(test))]
                     if count % 5_000_000 == 0 {
-                        kernel_common::uart::print(b"[ledger] Bloom scan progress: ");
-                        kernel_common::uart::print_usize(count);
-                        kernel_common::uart::print(b" blocks\n");
+                        tracing::info!("[ledger] Bloom scan progress: {} blocks", count);
                     }
                 }
             }
         }
         if bloom.save_to_nvme() {
-            kernel_common::uart::print(b"[ledger] Saved 64 MB block bloom filter to NVMe\n");
+            tracing::info!("[ledger] Saved 64 MB block bloom filter to NVMe");
         }
         BLOCK_COUNT.store(count as u64, Ordering::Relaxed);
         BLOOM_ENABLED.store(true, Ordering::Release);
