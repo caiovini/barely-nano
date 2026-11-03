@@ -194,7 +194,7 @@ impl Telemetry {
 }
 
 pub fn rsnano_version_string() -> alloc::string::String {
-    alloc::format!("RsNano V2.0.0-no_std")
+    alloc::format!("RsNano V3.0.0-no_std")
 }
 
 pub fn rsnano_build_info() -> alloc::string::String {
