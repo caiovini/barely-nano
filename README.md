@@ -78,10 +78,11 @@ To achieve high transaction throughput and maximize CPU efficiency, the node lev
   - **Port `7078` (WebSocket Server):** Full `no_std` WebSocket server and client (`rsnano_websocket_messages`, `rsnano_websocket_client`, `rsnano_websocket_server`) streaming live node events (`confirmation`, `vote`, `started_election`, `stopped_election`, `telemetry`, `bootstrap`, `new_unconfirmed_block`, etc.).
 
 ### 7. Multi-Hart SMP Architecture
-Each active hart on the SpacemiT K1 runs a dedicated role (`main/src/bin.rs`):
-- **Hart 0:** Reserved / skipped (OpenSBI HSM quirk on SpacemiT K1).
+All 8 X60 harts on the SpacemiT K1 run dedicated bare-metal roles (`main/src/bin.rs`):
+- **Hart 0 (`Crypto-3`):** Dedicated lock-free SIMD Ed25519 signature verification worker (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainer.
 - **Hart 1 (`Maint+Net`):** Boot initialization, `smoltcp` network polling, HTTP JSON-RPC server (`7076`), gateway ICMP keepalive, and watchdog kicking.
-- **Hart 2 & Hart 3 (`Crypto-1` / `Crypto-2`):** Dedicated lock-free SIMD Ed25519 signature verification workers (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainers.
+- **Hart 2 (`Crypto-1`):** Dedicated lock-free SIMD Ed25519 signature verification worker (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainer.
+- **Hart 3 (`Crypto-2`):** Dedicated lock-free SIMD Ed25519 signature verification worker (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainer.
 - **Hart 4 (`Consensus`):** Drives `aec_voter` and `aec_ticker` every 300 ms and runs async executor tasks.
 - **Hart 5 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and async executor tasks.
 - **Hart 6 (`Ledger+Boot`):** Single-writer ledger commit pipeline (`block_processor`, `unchecked`, `confirming_set`, `election_schedulers`, `backlog_scan`), atomic WAL checkpoints, and `bootstrap_server`.

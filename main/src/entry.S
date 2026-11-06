@@ -20,15 +20,29 @@
 
 .section .text.entry
     .global _start
+    .global _start_secondary
 _start:
-    # Save parameters across stack setup
+    # U-Boot `go 0x11000000` enters here on Physical Hart 0 (with a0 = argc = 1, gp = gd_t).
+    # Assign Logical Hart 1 (Maint+Net) to the boot hart.
     mv   s0, a0
     mv   s1, a1
+    li   tp, 1
+    j    .Lentry_common
 
-    # Save hart_id in tp immediately (a0 = hartid from OpenSBI HSM)
+_start_secondary:
+    # OpenSBI HSM `sbi_hsm_hart_start` enters here on Physical Harts 1..7 (a0 = physical hart_id).
+    # Map Physical Hart 1 -> Logical Hart 0 (Crypto-3), and Physical Harts 2..7 -> Logical Harts 2..7.
+    mv   s0, a0
+    mv   s1, a1
     li   t0, 7
     and  t1, a0, t0
+    li   t0, 1
+    bne  t1, t0, 2f
+    li   t1, 0
+2:
     mv   tp, t1
+
+.Lentry_common:
 
     # Write 1 to SECONDARY_HART_WAKE array at index tp using AMO
     # AMO bypasses L1 cache and is usually coherent across clusters on this SoC

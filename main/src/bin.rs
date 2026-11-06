@@ -556,6 +556,7 @@ pub extern "C" fn rust_main(
 
 extern "C" {
     static _start: u8;
+    static _start_secondary: u8;
 }
 
 struct NodeWrapper(pub Arc<Node>);
@@ -864,62 +865,60 @@ fn boot_hart_main(hart_id: usize) {
         clean_cache_range(flag_addr, 8);
 
         tracing::info!("[boot] Starting secondary harts...");
+        let secondary_start_addr = unsafe { &_start_secondary as *const u8 as usize };
 
-        for id in 0..8 {
-            if id != hart_id {
-                if id == 0 {
-                    tracing::debug!(
-                        "[boot] Skipping Hart 0 (known to hang OpenSBI on this SoC)"
-                    );
-                    continue;
+        // Physical Hart 0 is the U-Boot boot hart (running as Logical Hart 1: Maint+Net).
+        // Start Physical Harts 1..7 at `_start_secondary`, where Physical Hart 1 maps to
+        // Logical Hart 0 (Crypto-3) and Physical Harts 2..7 map to Logical Harts 2..7.
+        for phys_id in 1..8 {
+            let logical_id = if phys_id == 1 { 0 } else { phys_id };
+            let (initial_err, initial_status) = kernel_common::sbi::hart_get_status(phys_id);
+            tracing::debug!(
+                "[boot] Starting Physical Hart {} -> Logical Hart {} (initial err={}, status={})...",
+                phys_id,
+                logical_id,
+                initial_err,
+                initial_status
+            );
+
+            let (err, _) = kernel_common::sbi::hart_start(phys_id, secondary_start_addr, 0);
+
+            // Workaround for SpacemiT K1 OpenSBI:
+            // The firmware might fail to send the wakeup IPI internally,
+            // leaving the hart stuck in START_PENDING state.
+            // We send a manual IPI to force it to wake up.
+            kernel_common::sbi::send_ipi(1 << phys_id, 0);
+
+            // Wait up to ~1s for it to leave START_PENDING (status=2)
+            let mut status;
+            let mut err_status;
+            let start_mtime = kernel_common::clint::mtime();
+            loop {
+                let (es, st) = kernel_common::sbi::hart_get_status(phys_id);
+                err_status = es;
+                status = st;
+                if status != 2 {
+                    break;
                 }
-
-                let (initial_err, initial_status) = kernel_common::sbi::hart_get_status(id);
-                tracing::debug!(
-                    "[boot] Starting Hart {} (initial err={}, status={})...",
-                    id,
-                    initial_err,
-                    initial_status
-                );
-
-                let (err, _) = kernel_common::sbi::hart_start(id, start_addr, 0);
-
-                // Workaround for SpacemiT K1 OpenSBI:
-                // The firmware might fail to send the wakeup IPI internally,
-                // leaving the hart stuck in START_PENDING state.
-                // We send a manual IPI to force it to wake up.
-                kernel_common::sbi::send_ipi(1 << id, 0);
-
-                // Wait up to ~1s for it to leave START_PENDING (status=2)
-                let mut status;
-                let mut err_status;
-                let start_mtime = kernel_common::clint::mtime();
-                loop {
-                    let (es, st) = kernel_common::sbi::hart_get_status(id);
-                    err_status = es;
-                    status = st;
-                    if status != 2 {
-                        break;
-                    }
-                    if kernel_common::clint::mtime() - start_mtime > 100_000_000 {
-                        break;
-                    }
-                    core::hint::spin_loop();
+                if kernel_common::clint::mtime() - start_mtime > 100_000_000 {
+                    break;
                 }
-
-                let wake_addr = unsafe { &SECONDARY_HART_WAKE[id] as *const u32 as usize };
-                invalidate_cache_range(wake_addr, 4);
-                let wake_val = unsafe { core::ptr::read_volatile(&SECONDARY_HART_WAKE[id]) };
-
-                tracing::debug!(
-                    "[boot] Hart {} start result: err={}, get_status_err={}, status={}, wake={}",
-                    id,
-                    err,
-                    err_status,
-                    status,
-                    wake_val
-                );
+                core::hint::spin_loop();
             }
+
+            let wake_addr = unsafe { &SECONDARY_HART_WAKE[logical_id] as *const u32 as usize };
+            invalidate_cache_range(wake_addr, 4);
+            let wake_val = unsafe { core::ptr::read_volatile(&SECONDARY_HART_WAKE[logical_id]) };
+
+            tracing::debug!(
+                "[boot] Physical Hart {} (Logical Hart {}) start result: err={}, get_status_err={}, status={}, wake={}",
+                phys_id,
+                logical_id,
+                err,
+                err_status,
+                status,
+                wake_val
+            );
         }
     } else {
         // Other harts wait for the leader to finish node setup
@@ -976,6 +975,7 @@ fn dispatch_hart_task(
     exec: kernel_common::async_rt::Executor,
 ) -> ! {
     match hart_id {
+        0 => run_crypto_worker_3_loop(node_arc, exec, hart_id),
         1 => run_maintenance_and_network_loop(node_arc, exec, hart_id),
         2 => run_crypto_worker_1_loop(node_arc, exec, hart_id),
         3 => run_crypto_worker_2_loop(node_arc, exec, hart_id),
@@ -1225,6 +1225,79 @@ fn run_crypto_worker_2_loop(
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
                 "[heartbeat] Hart 3 (Crypto-2) | Iters: {} | Verified: {}",
+                iterations,
+                verified_count
+            );
+            iterations = 0;
+            last_heartbeat = mtime;
+        }
+
+        let mut worked = false;
+        // 1. High-priority synchronous signature batches waiting on Hart 6
+        while node_arc.signature_checker.has_sync_tasks() {
+            let n = node_arc.signature_checker.help_verify();
+            if n > 0 {
+                worked = true;
+                verified_count = verified_count.wrapping_add(n);
+            } else {
+                break;
+            }
+        }
+
+        // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
+        if !node_arc.inbound_message_queue.is_empty_relaxed() {
+            let hp1 = kernel_common::clint::mtime();
+            for _ in 0..4 {
+                if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
+                    worked = true;
+                } else {
+                    break;
+                }
+            }
+            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
+        }
+
+        // 3. Background signature pre-verification (interleaved with sync & message checks)
+        if !node_arc.signature_checker.is_empty_relaxed() {
+            for _ in 0..4 {
+                let n = node_arc.signature_checker.help_verify();
+                if n > 0 {
+                    worked = true;
+                    verified_count = verified_count.wrapping_add(n);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let _ = (&exec, hart_id);
+
+        adaptive_pause_backoff(worked, &mut idle_spins);
+        iterations += 1;
+    }
+}
+
+fn run_crypto_worker_3_loop(
+    node_arc: Arc<Node>,
+    exec: kernel_common::async_rt::Executor,
+    hart_id: usize,
+) -> ! {
+    tracing::debug!("[boot] Hart 0: Crypto Worker 3 (SIMD Verify) loop enter");
+    let mut last_heartbeat = kernel_common::clint::mtime();
+    let mut last_watchdog = kernel_common::clint::mtime();
+    let mut iterations = 0;
+    let mut verified_count = 0usize;
+    let mut idle_spins = 1u32;
+    loop {
+        let mtime = kernel_common::clint::mtime();
+        if mtime - last_watchdog > seconds(1) {
+            kernel_common::watchdog::kick();
+            last_watchdog = mtime;
+        }
+
+        if mtime - last_heartbeat > seconds(10) {
+            tracing::debug!(
+                "[heartbeat] Hart 0 (Crypto-3) | Iters: {} | Verified: {}",
                 iterations,
                 verified_count
             );
