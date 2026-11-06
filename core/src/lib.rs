@@ -281,6 +281,32 @@ pub fn deterministic_key(seed: &RawKey, index: u32) -> RawKey {
     RawKey::from_bytes(buffer)
 }
 
+/// Option B Dynamic Invoice QR derivation: computes the one-time stealth public key
+/// `P_i = S + sc_reduce(Blake2b-512("BARELY_NANO_STEALTH_V1" || scan_key || index_be)) * B`
+/// using only the Scan Key `v` (`scan_key`) and the Cold Spend Public Key `S` (`spend_pub_key`).
+pub fn stealth_public_key(
+    scan_key: &RawKey,
+    spend_pub_key: &PublicKey,
+    index: u32,
+) -> Option<PublicKey> {
+    tools::ed25519::derive_stealth_public_key(
+        scan_key.as_bytes(),
+        spend_pub_key.as_bytes(),
+        index,
+    )
+    .map(PublicKey::from_bytes)
+}
+
+/// Option B Cold Vault derivation: computes the canonical Ed25519 scalar `p_i = (s_clamped + c_i) mod L`
+/// corresponding to `stealth_public_key(scan_key, spend_pub_key, index)`.
+pub fn stealth_private_key(
+    spend_priv_key: &RawKey,
+    scan_key: &RawKey,
+    index: u32,
+) -> PrivateKey {
+    PrivateKey::from_stealth(spend_priv_key, scan_key, index)
+}
+
 /**
  * Network variants with different genesis blocks and network parameters
  */

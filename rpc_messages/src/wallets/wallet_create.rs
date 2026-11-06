@@ -12,11 +12,23 @@ impl RpcCommand {
 pub struct WalletCreateArgs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<RawKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spend_public_key: Option<Account>,
 }
 
 impl WalletCreateArgs {
     pub fn new(seed: Option<RawKey>) -> Self {
-        WalletCreateArgs { seed }
+        WalletCreateArgs {
+            seed,
+            spend_public_key: None,
+        }
+    }
+
+    pub fn new_stealth(scan_key: Option<RawKey>, spend_public_key: Account) -> Self {
+        WalletCreateArgs {
+            seed: scan_key,
+            spend_public_key: Some(spend_public_key),
+        }
     }
 }
 

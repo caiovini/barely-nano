@@ -1524,7 +1524,7 @@ pub fn sign(private_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
     sig
 }
 
-pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
+    pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
     let cached = SIGN_KEY_CACHE.try_with(|cache| {
         for entry in cache.iter() {
             if entry.valid && &entry.priv_key == private_key {
@@ -1561,6 +1561,101 @@ pub fn derive_public_key(private_key: &[u8; 32]) -> [u8; 32] {
     });
 
     pub_key
+}
+
+/// Computes the deterministic stealth scalar `c_i = sc_reduce(Blake2b-512("BARELY_NANO_STEALTH_V1" || scan_key || index_be))`
+/// for Option B Dynamic Invoice QR derivation.
+pub fn stealth_invoice_scalar(scan_key: &[u8; 32], index: u32) -> [u8; 32] {
+    let mut hasher = blake2b::Blake2bHasher::new(64);
+    hasher.update(b"BARELY_NANO_STEALTH_V1");
+    hasher.update(scan_key);
+    hasher.update(&index.to_be_bytes());
+    let wide = hasher.finalize();
+    sc_reduce(&wide)
+}
+
+/// Derives the Option B one-time stealth public key `P_i = S + c_i * B` from only the
+/// Scan Key `v` (`scan_key`), the Cold Spend Public Key `S` (`spend_pub_key`), and invoice `index`.
+/// Requires NO knowledge of the Master Spend Private Key.
+pub fn derive_stealth_public_key(
+    scan_key: &[u8; 32],
+    spend_pub_key: &[u8; 32],
+    index: u32,
+) -> Option<[u8; 32]> {
+    let s_point = Point::from_bytes(spend_pub_key)?;
+    let c_i = stealth_invoice_scalar(scan_key, index);
+    if !RADIX16_PRECOMP_INIT.load(core::sync::atomic::Ordering::Acquire) {
+        init_radix16_precomp();
+    }
+    let mut res = s_point;
+    for j in 0..64 {
+        let nibble = ((c_i[j / 2] >> ((j % 2) * 4)) & 0x0F) as usize;
+        if nibble != 0 {
+            let precomp = unsafe { &RADIX16_PRECOMP[j][nibble - 1] };
+            res = res.add_precomputed(precomp);
+        }
+    }
+    Some(res.to_bytes())
+}
+
+/// Derives the Option B one-time stealth scalar private key `p_i = (s_clamped + c_i) mod L`
+/// from the Cold Master Spend Private Key `spend_priv_key`, Scan Key `scan_key`, and invoice `index`.
+pub fn derive_stealth_scalar_key(
+    spend_priv_key: &[u8; 32],
+    scan_key: &[u8; 32],
+    index: u32,
+) -> [u8; 32] {
+    let h = blake2b::hash64(spend_priv_key);
+    let mut s_clamped = [0u8; 32];
+    s_clamped.copy_from_slice(&h[..32]);
+    s_clamped[0] &= 248;
+    s_clamped[31] &= 63;
+    s_clamped[31] |= 64;
+
+    let s_scalar = Scalar::from_bytes_wide_32(&s_clamped);
+    let c_scalar = Scalar::from_bytes(&stealth_invoice_scalar(scan_key, index));
+    s_scalar.add(&c_scalar).to_bytes()
+}
+
+/// Derives the Ed25519 public key `P = scalar * B` directly from a canonical scalar mod L
+/// without applying Blake2b-512 clamping.
+pub fn derive_public_key_scalar(scalar_bytes: &[u8; 32]) -> [u8; 32] {
+    let reduced = Scalar::from_bytes_wide_32(scalar_bytes).to_bytes();
+    Point::mul_base(&reduced).to_bytes()
+}
+
+/// Signs `message` directly with a raw canonical Ed25519 scalar `scalar_bytes` (`P = scalar * B`),
+/// producing a 100% standard Ed25519-Blake2b signature verifiable by `verify()`.
+pub fn sign_scalar(scalar_bytes: &[u8; 32], message: &[u8]) -> [u8; 64] {
+    let s_bytes = Scalar::from_bytes_wide_32(scalar_bytes).to_bytes();
+    let public_key = Point::mul_base(&s_bytes).to_bytes();
+
+    let mut prefix_hasher = blake2b::Blake2bHasher::new(32);
+    prefix_hasher.update(b"BARELY_NANO_SCALAR_NONCE_V1");
+    prefix_hasher.update(&s_bytes);
+    let h_prefix = prefix_hasher.finalize();
+
+    let mut hasher = blake2b::Blake2bHasher::new(64);
+    hasher.update(&h_prefix[..32]);
+    hasher.update(message);
+    let r_hash = hasher.finalize();
+    let r_bytes = sc_reduce(&r_hash);
+    let r_point = Point::mul_base(&r_bytes).to_bytes();
+
+    let mut hasher = blake2b::Blake2bHasher::new(64);
+    hasher.update(&r_point);
+    hasher.update(&public_key);
+    hasher.update(message);
+    let k_hash = hasher.finalize();
+    let k_bytes = sc_reduce(&k_hash);
+
+    let mut s_bytes_out = [0u8; 32];
+    sc_muladd(&mut s_bytes_out, &k_bytes, &s_bytes, &r_bytes);
+
+    let mut sig = [0u8; 64];
+    sig[..32].copy_from_slice(&r_point);
+    sig[32..].copy_from_slice(&s_bytes_out);
+    sig
 }
 
 pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
@@ -1961,6 +2056,42 @@ mod tests {
                 let p_ref = Point::double_scalar_mul_base_and_point_with_table(s, &neg_table, k);
                 assert_eq!(p_comb.to_bytes(), p_ref.to_bytes());
             }
+        }
+    }
+
+    #[test]
+    fn test_stealth_option_b_derivation_and_scalar_signing() {
+        let master_spend_priv =
+            hex_to_32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let scan_key =
+            hex_to_32("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+        let master_spend_pub = derive_public_key(&master_spend_priv);
+
+        for index in [0u32, 1, 7, 42, 9999] {
+            // POS watch-only derivation (knows only scan_key + master_spend_pub)
+            let pos_stealth_pub =
+                derive_stealth_public_key(&scan_key, &master_spend_pub, index)
+                    .expect("valid stealth public key");
+
+            // Cold vault derivation (knows master_spend_priv + scan_key)
+            let stealth_scalar =
+                derive_stealth_scalar_key(&master_spend_priv, &scan_key, index);
+            let vault_stealth_pub = derive_public_key_scalar(&stealth_scalar);
+
+            assert_eq!(
+                pos_stealth_pub, vault_stealth_pub,
+                "Stealth public key mismatch at index {}",
+                index
+            );
+
+            // Sign a block hash with the derived stealth scalar and verify with standard Ed25519 verify()
+            let msg = b"barely-nano stealth state block hash";
+            let sig = sign_scalar(&stealth_scalar, msg);
+            assert!(
+                verify(&pos_stealth_pub, msg, &sig),
+                "Standard Ed25519 verify failed for stealth scalar signature at index {}",
+                index
+            );
         }
     }
 }

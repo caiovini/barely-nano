@@ -8,17 +8,24 @@ impl RpcCommandHandler {
         args: AccountCreateArgs,
     ) -> anyhow::Result<AccountResponse> {
         let generate_work = args.work.unwrap_or(true.into()).inner();
+        let stateless = args.stateless.unwrap_or(false.into()).inner();
 
-        let account = match args.index {
-            Some(i) => {
-                self.node
-                    .wallets
-                    .deterministic_insert_at(&args.wallet, i.inner(), generate_work)?
-            }
-            None => self
-                .node
+        let account = if stateless {
+            self.node
                 .wallets
-                .deterministic_insert2(&args.wallet, generate_work)?,
+                .next_ephemeral_account(&args.wallet, args.index.map(|i| i.inner()))?
+        } else {
+            match args.index {
+                Some(i) => {
+                    self.node
+                        .wallets
+                        .deterministic_insert_at(&args.wallet, i.inner(), generate_work)?
+                }
+                None => self
+                    .node
+                    .wallets
+                    .deterministic_insert2(&args.wallet, generate_work)?,
+            }
         };
 
         Ok(AccountResponse::new(account.as_account()))

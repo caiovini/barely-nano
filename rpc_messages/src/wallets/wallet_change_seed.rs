@@ -15,6 +15,8 @@ pub struct WalletChangeSeedArgs {
     pub seed: RawKey,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<RpcU32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spend_public_key: Option<Account>,
 }
 
 impl WalletChangeSeedArgs {
@@ -23,6 +25,7 @@ impl WalletChangeSeedArgs {
             wallet,
             seed,
             count: None,
+            spend_public_key: None,
         }
     }
 
@@ -42,12 +45,18 @@ impl WalletChangeSeedArgsBuilder {
                 wallet,
                 seed,
                 count: None,
+                spend_public_key: None,
             },
         }
     }
 
     pub fn count(mut self, count: u32) -> Self {
         self.args.count = Some(count.into());
+        self
+    }
+
+    pub fn spend_public_key(mut self, spend_public_key: Account) -> Self {
+        self.args.spend_public_key = Some(spend_public_key);
         self
     }
 
@@ -73,6 +82,7 @@ impl From<WalletWithSeedArgs> for WalletChangeSeedArgs {
             wallet: wallet_with_seed.wallet,
             seed: wallet_with_seed.seed,
             count: None,
+            spend_public_key: None,
         }
     }
 }

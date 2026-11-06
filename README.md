@@ -4,6 +4,41 @@ This project is a bare-metal `no_std` RISC-V Nano cryptocurrency node designed t
 
 It establishes a self-contained operating environment on top of OpenSBI and U-Boot (`CONFIG_API=y`), complete with a heap allocator, multi-core exception handling, hardware-accelerated cryptography, a 16-shard B-Tree + 5 GB DRAM Bank 1 Buffer Pool + atomic Write-Ahead Log (WAL) storage engine on NVMe, a full TCP/IP networking stack, an HTTP JSON-RPC server, and a real-time WebSocket server.
 
+## Table of Contents
+
+- [Features Implemented](#features-implemented)
+  - [1. S-Mode Execution on OpenSBI & U-Boot](#1-s-mode-execution-on-opensbi--u-boot)
+  - [2. Memory Management](#2-memory-management)
+  - [3. Exception and Trap Handling](#3-exception-and-trap-handling)
+  - [4. Hardware Watchdogs & Timers](#4-hardware-watchdogs--timers)
+  - [5. Hardware Accelerated Cryptography & Optimizations](#5-hardware-accelerated-cryptography--optimizations)
+  - [6. U-Boot Networking, RPC & WebSocket Stack](#6-u-boot-networking-rpc--websocket-stack)
+  - [7. Multi-Hart SMP Architecture](#7-multi-hart-smp-architecture)
+  - [8. I2C OLED Status Display (`common/src/oled.rs`)](#8-i2c-oled-status-display-commonsrcoledrs)
+- [Storage Architecture: Bare-Metal NVMe B-Tree + WAL Engine](#storage-architecture-bare-metal-nvme-b-tree--wal-engine)
+- [Representative & Wallet Key Security Architecture (`wallet_crypto`)](#representative--wallet-key-security-architecture-wallet_crypto)
+  - [1. Physical & Cryptographic Isolation](#1-physical--cryptographic-isolation)
+  - [2. Two Operator Modes: Unattended Auto-Voting vs. Passphrase Lock on Reboot](#2-two-operator-modes-unattended-auto-voting-vs-passphrase-lock-on-reboot)
+  - [3. Configuring a Representative via RPC (Port `7076`)](#3-configuring-a-representative-via-rpc-port-7076)
+  - [4. Dynamic Invoice QR & Watch-Only Stealth Derivation](#4-dynamic-invoice-qr--watch-only-stealth-derivation)
+- [Hardware Requirements](#hardware-requirements)
+- [Step-by-Step Setup: Toolchain, U-Boot & SD Card Preparation](#step-by-step-setup-toolchain-u-boot--sd-card-preparation)
+  - [1. Install Host Prerequisites (RISC-V Tools, `mkimage` & Rust Target)](#1-install-host-prerequisites-risc-v-tools-mkimage--rust-target)
+  - [2. Partition the MicroSD Card & Format to FAT32](#2-partition-the-microsd-card--format-to-fat32)
+  - [3. Build Custom U-Boot (`u-boot-orangepi-k1`) & Flash to SD Card Sectors](#3-build-custom-u-boot-u-boot-orangepi-k1--flash-to-sd-card-sectors)
+  - [4. Force Orange Pi RV2 to Boot & Load Drivers from the SD Card](#4-force-orange-pi-rv2-to-boot--load-drivers-from-the-sd-card)
+  - [5. Build Firmware & Copy `barely-nano.bin`, `boot.scr`, and `config.toml` to the SD Card](#5-build-firmware--copy-barely-nanobin-bootscr-and-configtoml-to-the-sd-card)
+- [Build & Deployment System](#build--deployment-system)
+  - [Build & Test Targets](#build--test-targets)
+- [Deployment & Configuration (`config.toml`)](#deployment--configuration-configtoml)
+  - [Live SD Card Configuration (No Recompilation Needed)](#live-sd-card-configuration-no-recompilation-needed)
+  - [Default `config.toml`](#default-configtoml)
+  - [WebSocket Subscriptions (`tools/ws_subscribe.py`)](#websocket-subscriptions-toolsws_subscribepy)
+  - [Ledger Pruning](#ledger-pruning)
+  - [Representative Discovery on Bare-Metal](#representative-discovery-on-bare-metal)
+- [Network Stress Testing (`tools/nano-stress`)](#network-stress-testing-toolsnano-stress)
+- [Workspace Structure](#workspace-structure)
+
 ## Features Implemented
 
 ### 1. S-Mode Execution on OpenSBI & U-Boot
@@ -140,6 +175,56 @@ curl -s -d '{"action": "wallet_enter", "wallet": "<WALLET_ID>", "password": "MyS
 
 # To switch back to Mode A (unattended auto-voting on reboot), rekey with an empty password while unlocked:
 curl -s -d '{"action": "wallet_rekey", "wallet": "<WALLET_ID>", "password": ""}' http://192.168.1.200:7076
+```
+
+### 4. Dynamic Invoice QR & Watch-Only Stealth Derivation
+
+For Point-of-Sale (POS) terminals and merchant appliances, `barely-nano` implements **Watch-Only Stealth Address Derivation + $O(1)$ Stateless Ephemeral Invoice Generation** ([`nullables/sha/src/ed25519.rs`](file:///mnt/data/rust-workspace/barely-nano/nullables/sha/src/ed25519.rs), [`core/src/private_key.rs`](file:///mnt/data/rust-workspace/barely-nano/core/src/private_key.rs), [`node/src/wallets/wallet.rs`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallet.rs)):
+
+- **Zero Theft Surface on the POS Node:** The countertop node holds **only** a 256-bit Scan Key $v$ (`wallet.seed`) and the merchant's Cold Spend Public Key $S$ (`spend_public_key`). The Cold Master Spend Private Key $s$ is **never** loaded onto the node.
+- **Additive Ed25519 Blinding:** For each invoice index $i$, the node computes a deterministic blinding scalar:
+  $$c_i = \text{sc\_reduce}\bigl(\text{Blake2b-512}(\text{"BARELY\_NANO\_STEALTH\_V1"} \parallel v \parallel i_{\text{be}})\bigr)$$
+  and derives a one-time receiving account $P_i = S + c_i \cdot B$ using precomputed Radix-16 basepoint tables (`RADIX16_PRECOMP`). To the customer's wallet and the Nano network, $P_i$ is a standard `nano_1...` address.
+- **$O(1)$ Memory & NVMe Storage (`"stateless": "true"`):** Passing `"stateless": "true"` to `account_create` updates **only** the 4-byte `deterministic_index` counter in [`PersistedWalletMeta`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/wallet_store.rs#L42-L58) (`WALLET_SHARD`) without inserting per-invoice entries into `Wallet::keys` (`HashMap`) or allocating new NVMe pages—allowing millions of dynamic invoice QR codes in strictly $O(1)$ RAM and disk space.
+- **Cold Vault Scalar Reconstruction:** An air-gapped Cold Vault holding both the Master Spend Private Key $s$ and Scan Key $v$ reconstructs the canonical one-time Ed25519 scalar key $p_i = (s_{\text{clamped}} + c_i) \pmod L$ via [`PrivateKey::from_stealth`](file:///mnt/data/rust-workspace/barely-nano/core/src/private_key.rs#L61-L72) / [`Wallets::insert_stealth_key_at`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallets.rs#L497-L539) and signs standard Nano `StateBlock`s via [`sign_scalar`](file:///mnt/data/rust-workspace/barely-nano/nullables/sha/src/ed25519.rs#L1639-L1659).
+
+#### Step 1: Provision the Watch-Only POS Sentinel Wallet
+Configure a wallet on the OrangePi RV2 with the Scan Key $v$ (`seed`) and the Cold Vault's Spend Public Key $S$ (`spend_public_key`):
+
+```bash
+# Create a Watch-Only Stealth POS wallet (or configure an existing wallet via wallet_change_seed)
+curl -s -d '{
+  "action": "wallet_create",
+  "seed": "<64_HEX_SCAN_KEY_V>",
+  "spend_public_key": "nano_1coldspendpubkey..."
+}' http://192.168.1.200:7076
+# -> Returns: {"wallet": "<POS_WALLET_ID>", "accounts": ["nano_1stealthindex0..."]}
+```
+
+*(Alternatively, update an existing wallet using `wallet_change_seed` with `"seed"` and `"spend_public_key"`.)*
+
+#### Step 2: Generate Dynamic Invoice QR Addresses at Checkout ($O(1)$ Stateless Mode)
+For each customer checkout, request a fresh one-time `nano_...` address with `"stateless": "true"`:
+
+```bash
+# Derive the next one-time stealth invoice address (O(1) RAM & NVMe; increments deterministic_index only)
+curl -s -d '{
+  "action": "account_create",
+  "wallet": "<POS_WALLET_ID>",
+  "stateless": "true"
+}' http://192.168.1.200:7076
+# -> Returns: {"account": "nano_1onetimeinvoice..."}
+```
+
+You can also re-derive a specific historical invoice address at index $i$ without advancing the counter beyond $i+1$:
+
+```bash
+curl -s -d '{
+  "action": "account_create",
+  "wallet": "<POS_WALLET_ID>",
+  "index": "42",
+  "stateless": "true"
+}' http://192.168.1.200:7076
 ```
 
 ## Hardware Requirements

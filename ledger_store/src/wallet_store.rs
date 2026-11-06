@@ -12,6 +12,7 @@ pub enum PersistedKeyType {
     Adhoc = 1,
     Deterministic = 2,
     Watch = 3,
+    StealthScalar = 4,
 }
 
 impl PersistedKeyType {
@@ -20,6 +21,7 @@ impl PersistedKeyType {
             1 => Some(Self::Adhoc),
             2 => Some(Self::Deterministic),
             3 => Some(Self::Watch),
+            4 => Some(Self::StealthScalar),
             _ => None,
         }
     }
@@ -38,6 +40,10 @@ pub struct PersistedWalletMeta {
     pub salt: [u8; 32],
     pub encrypted_seed: [u8; 32],
     pub check_tag: [u8; 32],
+    /// Optional Cold Spend Public Key `S` for Option B Dynamic Invoice QR stealth derivation:
+    /// `P_i = S + sc_reduce(Blake2b-512("BARELY_NANO_STEALTH_V1" || seed_as_scan_key || i)) * B`.
+    /// When `None`, the wallet uses standard Nano `Blake2b(seed || i)` derivation.
+    pub spend_public_key: Option<PublicKey>,
 }
 
 /// Encrypted wallet key record stored in `WALLET_SHARD`.
@@ -75,8 +81,8 @@ impl BtreeWalletStore {
         key
     }
 
-    fn encode_meta(meta: &PersistedWalletMeta) -> [u8; 137] {
-        let mut buf = [0u8; 137];
+    fn encode_meta(meta: &PersistedWalletMeta) -> ([u8; 169], usize) {
+        let mut buf = [0u8; 169];
         buf[0..4].copy_from_slice(&WALLET_META_MAGIC.to_le_bytes());
         buf[4..36].copy_from_slice(meta.representative.as_bytes());
         buf[36..40].copy_from_slice(&meta.deterministic_index.to_le_bytes());
@@ -84,7 +90,13 @@ impl BtreeWalletStore {
         buf[41..73].copy_from_slice(&meta.salt);
         buf[73..105].copy_from_slice(&meta.encrypted_seed);
         buf[105..137].copy_from_slice(&meta.check_tag);
-        buf
+        if let Some(spend_pk) = &meta.spend_public_key {
+            if !spend_pk.is_zero() {
+                buf[137..169].copy_from_slice(spend_pk.as_bytes());
+                return (buf, 169);
+            }
+        }
+        (buf, 137)
     }
 
     fn decode_meta(val: &[u8]) -> Option<PersistedWalletMeta> {
@@ -101,6 +113,16 @@ impl BtreeWalletStore {
         let salt: [u8; 32] = val[41..73].try_into().ok()?;
         let encrypted_seed: [u8; 32] = val[73..105].try_into().ok()?;
         let check_tag: [u8; 32] = val[105..137].try_into().ok()?;
+        let spend_public_key = if val.len() >= 169 {
+            let pk = PublicKey::from_bytes(val[137..169].try_into().ok()?);
+            if pk.is_zero() {
+                None
+            } else {
+                Some(pk)
+            }
+        } else {
+            None
+        };
         Some(PersistedWalletMeta {
             representative,
             deterministic_index,
@@ -108,6 +130,7 @@ impl BtreeWalletStore {
             salt,
             encrypted_seed,
             check_tag,
+            spend_public_key,
         })
     }
 
@@ -137,10 +160,10 @@ impl BtreeWalletStore {
 
     pub fn put_wallet_meta(&self, wallet_id: &WalletId, meta: &PersistedWalletMeta) {
         let key = Self::meta_key(wallet_id);
-        let buf = Self::encode_meta(meta);
+        let (buf, len) = Self::encode_meta(meta);
         let mut lock = WALLET_SHARD.lock();
         if let Some(db) = lock.as_mut() {
-            db.insert(key, &buf);
+            db.insert(key, &buf[..len]);
             let _ = db.flush();
         }
     }

@@ -354,6 +354,7 @@ impl Wallets {
             }
             let removed_key = wallet.keys.lock().remove(pub_key).is_some();
             wallet.encrypted_keys.lock().remove(pub_key);
+            wallet.stealth_scalar_keys.lock().remove(pub_key);
             let removed_watch = wallet.watch_keys.lock().remove(pub_key);
             wallet.deterministic_keys.lock().remove(pub_key);
             wallet.work_cache.lock().remove(pub_key);
@@ -391,6 +392,7 @@ impl Wallets {
             for pk in accounts {
                 if let Some(prv) = source.keys.lock().remove(pk) {
                     source.encrypted_keys.lock().remove(pk);
+                    source.stealth_scalar_keys.lock().remove(pk);
                     source.deterministic_keys.lock().remove(pk);
                     source.representatives.lock().remove(pk);
                     self.ledger.store.wallet.del_wallet_key(source_id, pk);
@@ -548,12 +550,117 @@ impl Wallets {
         let rep: Account = (*wallet.representative.lock()).into();
         let seed = *wallet.seed.lock();
         let index = wallet.deterministic_index.load(Ordering::SeqCst);
-        Ok(format!(
-            "{{\"representative\":\"{}\",\"seed\":\"{}\",\"deterministic_index\":\"{}\"}}",
-            rep.encode_account(),
-            seed.encode_hex(),
-            index
-        ))
+        if let Some(spend_pk) = *wallet.spend_public_key.lock() {
+            let spend_acc: Account = spend_pk.into();
+            Ok(format!(
+                "{{\"representative\":\"{}\",\"seed\":\"{}\",\"deterministic_index\":\"{}\",\"spend_public_key\":\"{}\"}}",
+                rep.encode_account(),
+                seed.encode_hex(),
+                index,
+                spend_acc.encode_account()
+            ))
+        } else {
+            Ok(format!(
+                "{{\"representative\":\"{}\",\"seed\":\"{}\",\"deterministic_index\":\"{}\"}}",
+                rep.encode_account(),
+                seed.encode_hex(),
+                index
+            ))
+        }
+    }
+
+    /// Configures Option B Dynamic Invoice QR stealth derivation (`P_i = S + c_i * B`) on `wallet_id`.
+    /// Passing `Some(spend_public_key)` enables Option B using `wallet.seed` as the Scan Key `v`
+    /// and `spend_public_key` as the Cold Spend Public Key `S`.
+    pub fn set_spend_public_key(
+        &self,
+        wallet_id: &WalletId,
+        spend_public_key: Option<PublicKey>,
+    ) -> Result<(), WalletsError> {
+        let guard = self.mutex.lock();
+        let wallet = Self::get_wallet(&guard, wallet_id)?;
+        if !wallet.valid_password() {
+            return Err(WalletsError::WalletLocked);
+        }
+        if let Some(ref pk) = spend_public_key {
+            if pk.is_zero() {
+                return Err(WalletsError::BadPublicKey);
+            }
+        }
+        *wallet.spend_public_key.lock() = spend_public_key;
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
+        Ok(())
+    }
+
+    pub fn get_spend_public_key(
+        &self,
+        wallet_id: &WalletId,
+    ) -> Result<Option<PublicKey>, WalletsError> {
+        let guard = self.mutex.lock();
+        let wallet = Self::get_wallet(&guard, wallet_id)?;
+        Ok(*wallet.spend_public_key.lock())
+    }
+
+    /// Stateless Option B Dynamic Invoice QR address generator ($O(1)$ RAM & NVMe).
+    /// Increments `deterministic_index`, persists ONLY the 169-byte `PersistedWalletMeta` record
+    /// in `WALLET_SHARD`, and returns the fresh stealth address `P_i = S + c_i * B` without
+    /// inserting into `watch_keys` or `WALLET_SHARD` key tables.
+    pub fn next_ephemeral_account(
+        &self,
+        wallet_id: &WalletId,
+        index: Option<u32>,
+    ) -> Result<PublicKey, WalletsError> {
+        let guard = self.mutex.lock();
+        let wallet = Self::get_wallet(&guard, wallet_id)?;
+        if !wallet.valid_password() {
+            return Err(WalletsError::WalletLocked);
+        }
+        let pk = wallet
+            .next_ephemeral_account(index)
+            .ok_or(WalletsError::BadPublicKey)?;
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
+        Ok(pk)
+    }
+
+    /// Cold-Vault helper: derives and inserts the Option B stealth scalar key
+    /// `p_i = (s_clamped + c_i) mod L` for invoice `index` using `spend_private_key` and
+    /// `wallet.seed` (Scan Key `v`).
+    pub fn insert_stealth_key_at(
+        &self,
+        wallet_id: &WalletId,
+        spend_private_key: &RawKey,
+        index: u32,
+    ) -> Result<PublicKey, WalletsError> {
+        let guard = self.mutex.lock();
+        let wallet = Self::get_wallet(&guard, wallet_id)?;
+        if !wallet.valid_password() {
+            return Err(WalletsError::WalletLocked);
+        }
+        let scan_key = *wallet.seed.lock();
+        let stealth_prv = PrivateKey::from_stealth(spend_private_key, &scan_key, index);
+        let pub_key = wallet.insert_key(stealth_prv);
+        wallet.deterministic_keys.lock().insert(pub_key);
+        let current = wallet.deterministic_index.load(Ordering::SeqCst);
+        if index >= current {
+            wallet.deterministic_index.store(index + 1, Ordering::SeqCst);
+        }
+        if let Some(rec) = wallet.to_persisted_key(&pub_key) {
+            self.ledger
+                .store
+                .wallet
+                .put_wallet_key(wallet_id, &pub_key, &rec);
+        }
+        self.ledger
+            .store
+            .wallet
+            .put_wallet_meta(wallet_id, &wallet.to_persisted_meta());
+        Ok(pub_key)
     }
 
     pub fn new_null() -> Self {
@@ -675,6 +782,9 @@ impl WalletsExt for Wallets {
             return Err(WalletsError::WalletLocked);
         }
         let pub_key = wallet.insert_deterministic_at(index);
+        if pub_key.is_zero() {
+            return Err(WalletsError::BadPublicKey);
+        }
         if let Some(rec) = wallet.to_persisted_key(&pub_key) {
             self.ledger
                 .store
@@ -704,6 +814,9 @@ impl WalletsExt for Wallets {
             return Err(WalletsError::WalletLocked);
         }
         let pub_key = wallet.insert_deterministic();
+        if pub_key.is_zero() {
+            return Err(WalletsError::BadPublicKey);
+        }
         if let Some(rec) = wallet.to_persisted_key(&pub_key) {
             self.ledger
                 .store

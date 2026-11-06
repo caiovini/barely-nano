@@ -15,6 +15,11 @@ pub struct AccountCreateArgs {
     pub index: Option<RpcU32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work: Option<RpcBool>,
+    /// When `Some(true)`, derives the next ephemeral address `P_i = S + c_i * B` and advances
+    /// `deterministic_index` in `WALLET_SHARD` without inserting `P_i` into RAM `HashSet`s or
+    /// key tables ($O(1)$ memory & NVMe).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stateless: Option<RpcBool>,
 }
 
 impl AccountCreateArgs {
@@ -23,6 +28,7 @@ impl AccountCreateArgs {
             wallet,
             index: None,
             work: None,
+            stateless: None,
         }
     }
 
@@ -31,6 +37,7 @@ impl AccountCreateArgs {
             wallet,
             index: None,
             work: None,
+            stateless: None,
         }
     }
 }
@@ -39,6 +46,7 @@ pub struct AccountCreateArgsBuilder {
     wallet: WalletId,
     index: Option<RpcU32>,
     work: Option<RpcBool>,
+    stateless: Option<RpcBool>,
 }
 
 impl AccountCreateArgsBuilder {
@@ -52,11 +60,17 @@ impl AccountCreateArgsBuilder {
         self
     }
 
+    pub fn stateless(mut self, stateless: bool) -> Self {
+        self.stateless = Some(stateless.into());
+        self
+    }
+
     pub fn build(self) -> AccountCreateArgs {
         AccountCreateArgs {
             wallet: self.wallet,
             index: self.index,
             work: self.work,
+            stateless: self.stateless,
         }
     }
 }
@@ -67,6 +81,7 @@ impl From<WalletId> for AccountCreateArgs {
             wallet,
             index: None,
             work: None,
+            stateless: None,
         }
     }
 }

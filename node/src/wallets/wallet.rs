@@ -7,8 +7,8 @@ use tracing::warn;
 
 use kernel_common::storage::wallet_crypto;
 use rsnano_core::{
-    deterministic_key, Amount, Block, BlockHash, Link, PrivateKey, PublicKey, RawKey, Root,
-    StateBlockArgs, WorkNonce,
+    deterministic_key, stealth_public_key, Amount, Block, BlockHash, Link, PrivateKey, PublicKey,
+    RawKey, Root, StateBlockArgs, WorkNonce,
 };
 use rsnano_ledger::{
     AnySet, Ledger, PersistedKeyType, PersistedWalletKey, PersistedWalletMeta,
@@ -34,10 +34,14 @@ pub struct Wallet {
     /// Hardware-bound + KDF-encrypted 32-byte private keys indexed by public key.
     pub encrypted_keys: Mutex<HashMap<PublicKey, [u8; 32]>>,
     pub deterministic_keys: Mutex<HashSet<PublicKey>>,
+    pub stealth_scalar_keys: Mutex<HashSet<PublicKey>>,
     pub watch_keys: Mutex<HashSet<PublicKey>>,
     pub work_cache: Mutex<HashMap<PublicKey, WorkNonce>>,
-    /// Decrypted wallet seed held in RAM only while the wallet is unlocked.
+    /// Decrypted wallet seed (or Option B Scan Private Key `v`) held in RAM only while unlocked.
     pub seed: Mutex<RawKey>,
+    /// Optional Cold Spend Public Key `S` for Option B Dynamic Invoice QR stealth derivation:
+    /// `P_i = S + sc_reduce(Blake2b-512("BARELY_NANO_STEALTH_V1" || seed_as_scan_key || i)) * B`.
+    pub spend_public_key: Mutex<Option<PublicKey>>,
     pub encrypted_seed: Mutex<[u8; 32]>,
     pub salt: [u8; 32],
     pub wrapping_key: Mutex<[u8; 32]>,
@@ -73,9 +77,11 @@ impl Wallet {
             keys: Mutex::new(HashMap::new()),
             encrypted_keys: Mutex::new(HashMap::new()),
             deterministic_keys: Mutex::new(HashSet::new()),
+            stealth_scalar_keys: Mutex::new(HashSet::new()),
             watch_keys: Mutex::new(HashSet::new()),
             work_cache: Mutex::new(HashMap::new()),
             seed: Mutex::new(seed),
+            spend_public_key: Mutex::new(None),
             encrypted_seed: Mutex::new(encrypted_seed),
             salt,
             wrapping_key: Mutex::new(wrapping_key),
@@ -94,6 +100,7 @@ impl Wallet {
     ) -> Self {
         let mut encrypted_keys = HashMap::new();
         let mut deterministic_keys = HashSet::new();
+        let mut stealth_scalar_keys = HashSet::new();
         let mut watch_keys = HashSet::new();
         let mut work_cache = HashMap::new();
 
@@ -112,6 +119,10 @@ impl Wallet {
                 PersistedKeyType::Watch => {
                     watch_keys.insert(pub_key);
                 }
+                PersistedKeyType::StealthScalar => {
+                    encrypted_keys.insert(pub_key, rec.encrypted_priv_key);
+                    stealth_scalar_keys.insert(pub_key);
+                }
             }
         }
 
@@ -123,9 +134,11 @@ impl Wallet {
             keys: Mutex::new(HashMap::new()),
             encrypted_keys: Mutex::new(encrypted_keys),
             deterministic_keys: Mutex::new(deterministic_keys),
+            stealth_scalar_keys: Mutex::new(stealth_scalar_keys),
             watch_keys: Mutex::new(watch_keys),
             work_cache: Mutex::new(work_cache),
             seed: Mutex::new(RawKey::zero()),
+            spend_public_key: Mutex::new(meta.spend_public_key),
             encrypted_seed: Mutex::new(meta.encrypted_seed),
             salt: meta.salt,
             wrapping_key: Mutex::new([0u8; 32]),
@@ -184,6 +197,7 @@ impl Wallet {
         let mut decrypted_keys = HashMap::new();
         {
             let enc_guard = self.encrypted_keys.lock();
+            let scalar_guard = self.stealth_scalar_keys.lock();
             for (pub_key, enc_priv) in enc_guard.iter() {
                 let raw_priv = wallet_crypto::crypt_priv_key(
                     &candidate_wk,
@@ -191,7 +205,11 @@ impl Wallet {
                     pub_key.as_bytes(),
                     enc_priv,
                 );
-                let priv_key = PrivateKey::from_bytes(&raw_priv);
+                let priv_key = if scalar_guard.contains(pub_key) {
+                    PrivateKey::from_scalar_bytes(&raw_priv)
+                } else {
+                    PrivateKey::from_bytes(&raw_priv)
+                };
                 if priv_key.public_key() != *pub_key {
                     self.lock_in_ram();
                     return false;
@@ -269,6 +287,7 @@ impl Wallet {
             salt: self.salt,
             encrypted_seed: *self.encrypted_seed.lock(),
             check_tag: *self.check_tag.lock(),
+            spend_public_key: *self.spend_public_key.lock(),
         }
     }
 
@@ -279,7 +298,14 @@ impl Wallet {
             .get(pub_key)
             .copied()
             .unwrap_or_else(|| WorkNonce::from(0));
-        if self.deterministic_keys.lock().contains(pub_key) {
+        if self.stealth_scalar_keys.lock().contains(pub_key) {
+            let enc = *self.encrypted_keys.lock().get(pub_key)?;
+            Some(PersistedWalletKey {
+                key_type: PersistedKeyType::StealthScalar,
+                encrypted_priv_key: enc,
+                work,
+            })
+        } else if self.deterministic_keys.lock().contains(pub_key) {
             let enc = *self.encrypted_keys.lock().get(pub_key)?;
             Some(PersistedWalletKey {
                 key_type: PersistedKeyType::Deterministic,
@@ -307,14 +333,20 @@ impl Wallet {
         let mut result = index;
         let any = self.ledger.any();
         let seed = *self.seed.lock();
+        let spend_pk = *self.spend_public_key.lock();
         let mut i = index + 1;
         let mut n = index + 64;
         while i < n {
-            let raw = deterministic_key(&seed, i);
-            let pair = PrivateKey::from(raw);
-            if any.account_head(&pair.account()).is_some()
-                || any.receivable_exists(pair.account())
-            {
+            let account = if let Some(ref s_pub) = spend_pk {
+                match stealth_public_key(&seed, s_pub, i) {
+                    Some(pk) => pk.as_account(),
+                    None => break,
+                }
+            } else {
+                let raw = deterministic_key(&seed, i);
+                PrivateKey::from(raw).account()
+            };
+            if any.account_head(&account).is_some() || any.receivable_exists(account) {
                 result = i;
                 n = i + 64 + (i / 64);
             }
@@ -332,6 +364,9 @@ impl Wallet {
             pub_key.as_bytes(),
             priv_key.raw_key().as_bytes(),
         );
+        if priv_key.is_scalar() {
+            self.stealth_scalar_keys.lock().insert(pub_key);
+        }
         self.encrypted_keys.lock().insert(pub_key, enc);
         self.keys.lock().insert(pub_key, priv_key);
         pub_key
@@ -339,10 +374,32 @@ impl Wallet {
 
     pub fn insert_deterministic_at(&self, index: u32) -> PublicKey {
         let seed = *self.seed.lock();
-        let raw = deterministic_key(&seed, index);
-        let priv_key = PrivateKey::from(raw);
-        let pub_key = self.insert_key(priv_key);
-        self.deterministic_keys.lock().insert(pub_key);
+        let spend_pk = *self.spend_public_key.lock();
+        let pub_key = if let Some(s_pub) = spend_pk {
+            // Option B Dynamic Invoice QR:
+            // If the Cold Master Spend Key `s` corresponding to `S == s_pub` is unlocked in this
+            // wallet, also insert the stealth scalar `p_i = (s_clamped + c_i) mod L` so this cold
+            // vault can immediately sign `open` and `send` blocks for `P_i`.
+            // Otherwise (POS Sentinel mode), derive `P_i = S + c_i * B` using only `(v, S)`!
+            let master_spend = self.keys.lock().get(&s_pub).cloned();
+            if let Some(spend_priv) = master_spend {
+                let stealth_prv = PrivateKey::from_stealth(&spend_priv.raw_key(), &seed, index);
+                let pk = self.insert_key(stealth_prv);
+                self.deterministic_keys.lock().insert(pk);
+                pk
+            } else if let Some(pk) = stealth_public_key(&seed, &s_pub, index) {
+                self.watch_keys.lock().insert(pk);
+                pk
+            } else {
+                PublicKey::zero()
+            }
+        } else {
+            let raw = deterministic_key(&seed, index);
+            let priv_key = PrivateKey::from(raw);
+            let pk = self.insert_key(priv_key);
+            self.deterministic_keys.lock().insert(pk);
+            pk
+        };
         let current = self.deterministic_index.load(Ordering::SeqCst);
         if index >= current {
             self.deterministic_index.store(index + 1, Ordering::SeqCst);
@@ -353,11 +410,50 @@ impl Wallet {
     pub fn insert_deterministic(&self) -> PublicKey {
         let index = self.deterministic_index.fetch_add(1, Ordering::SeqCst);
         let seed = *self.seed.lock();
-        let raw = deterministic_key(&seed, index);
-        let priv_key = PrivateKey::from(raw);
-        let pub_key = self.insert_key(priv_key);
-        self.deterministic_keys.lock().insert(pub_key);
-        pub_key
+        let spend_pk = *self.spend_public_key.lock();
+        if let Some(s_pub) = spend_pk {
+            let master_spend = self.keys.lock().get(&s_pub).cloned();
+            if let Some(spend_priv) = master_spend {
+                let stealth_prv = PrivateKey::from_stealth(&spend_priv.raw_key(), &seed, index);
+                let pk = self.insert_key(stealth_prv);
+                self.deterministic_keys.lock().insert(pk);
+                pk
+            } else if let Some(pk) = stealth_public_key(&seed, &s_pub, index) {
+                self.watch_keys.lock().insert(pk);
+                pk
+            } else {
+                PublicKey::zero()
+            }
+        } else {
+            let raw = deterministic_key(&seed, index);
+            let priv_key = PrivateKey::from(raw);
+            let pub_key = self.insert_key(priv_key);
+            self.deterministic_keys.lock().insert(pub_key);
+            pub_key
+        }
+    }
+
+    /// Stateless Option B Dynamic Invoice QR derivation: increments `deterministic_index` and
+    /// computes `P_i = S + c_i * B` (or `Blake2b(seed || i) * B` if standard) without inserting
+    /// into RAM `HashMap`/`HashSet`s or allocating a new key entry in `WALLET_SHARD`.
+    pub fn next_ephemeral_account(&self, index_override: Option<u32>) -> Option<PublicKey> {
+        let index = match index_override {
+            Some(i) => {
+                let current = self.deterministic_index.load(Ordering::SeqCst);
+                if i >= current {
+                    self.deterministic_index.store(i + 1, Ordering::SeqCst);
+                }
+                i
+            }
+            None => self.deterministic_index.fetch_add(1, Ordering::SeqCst),
+        };
+        let seed = *self.seed.lock();
+        if let Some(s_pub) = *self.spend_public_key.lock() {
+            stealth_public_key(&seed, &s_pub, index)
+        } else {
+            let raw = deterministic_key(&seed, index);
+            Some(PrivateKey::from(raw).public_key())
+        }
     }
 
     pub fn create_block(

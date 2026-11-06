@@ -32,7 +32,10 @@ impl PrivateKeyFactory {
         use rand::Rng;
         let mut bytes = [0u8; 32];
         self.rng.fill(&mut bytes);
-        PrivateKey { bytes }
+        PrivateKey {
+            bytes,
+            is_scalar: false,
+        }
     }
 }
 
@@ -47,6 +50,7 @@ impl Default for PrivateKeyFactory {
 #[derive(Clone)]
 pub struct PrivateKey {
     bytes: [u8; 32],
+    is_scalar: bool,
 }
 
 impl Default for PrivateKey {
@@ -73,7 +77,32 @@ impl PrivateKey {
     pub fn from_bytes(bytes: &[u8; 32]) -> Self {
         Self {
             bytes: *bytes,
+            is_scalar: false,
         }
+    }
+
+    /// Constructs a `PrivateKey` backed directly by a canonical Ed25519 scalar `p_i mod L`
+    /// (used for Option B stealth account spending where `P_i = S + c_i * B`).
+    pub fn from_scalar_bytes(bytes: &[u8; 32]) -> Self {
+        Self {
+            bytes: *bytes,
+            is_scalar: true,
+        }
+    }
+
+    /// Derives the Option B stealth spending `PrivateKey` (`p_i = (s_clamped + c_i) mod L`)
+    /// from the Cold Master Spend Private Key, Scan Key `v`, and invoice `index`.
+    pub fn from_stealth(spend_priv_key: &RawKey, scan_key: &RawKey, index: u32) -> Self {
+        let scalar = tools::ed25519::derive_stealth_scalar_key(
+            spend_priv_key.as_bytes(),
+            scan_key.as_bytes(),
+            index,
+        );
+        Self::from_scalar_bytes(&scalar)
+    }
+
+    pub fn is_scalar(&self) -> bool {
+        self.is_scalar
     }
 
     pub fn from_hex_str(s: impl AsRef<str>) -> anyhow::Result<Self> {
@@ -86,7 +115,11 @@ impl PrivateKey {
     }
 
     pub fn sign(&self, data: &[u8]) -> Signature {
-        let sig_bytes = tools::ed25519::sign(&self.bytes, data);
+        let sig_bytes = if self.is_scalar {
+            tools::ed25519::sign_scalar(&self.bytes, data)
+        } else {
+            tools::ed25519::sign(&self.bytes, data)
+        };
         Signature::from_bytes(sig_bytes)
     }
 
@@ -95,7 +128,11 @@ impl PrivateKey {
     }
 
     pub fn public_key(&self) -> PublicKey {
-        PublicKey::try_from(&self.raw_key()).unwrap()
+        if self.is_scalar {
+            PublicKey::from_bytes(tools::ed25519::derive_public_key_scalar(&self.bytes))
+        } else {
+            PublicKey::try_from(&self.raw_key()).unwrap()
+        }
     }
 
     pub fn raw_key(&self) -> RawKey {

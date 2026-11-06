@@ -96,7 +96,7 @@ mod tests {
         let node = Arc::new(Node::new_null());
 
         let created: WalletCreateResponse = test_rpc_command_with_node(
-            RpcCommand::WalletCreate(WalletCreateArgs { seed: None }),
+            RpcCommand::WalletCreate(WalletCreateArgs::new(None)),
             node.clone(),
         );
         let wallet_id = created.wallet;
@@ -107,6 +107,7 @@ mod tests {
                 wallet: wallet_id,
                 index: None,
                 work: Some(false.into()),
+                stateless: None,
             }),
             node.clone(),
         );
@@ -252,7 +253,7 @@ mod tests {
 
         // Move account to second wallet
         let created2: WalletCreateResponse = test_rpc_command_with_node(
-            RpcCommand::WalletCreate(WalletCreateArgs { seed: None }),
+            RpcCommand::WalletCreate(WalletCreateArgs::new(None)),
             node.clone(),
         );
         let wallet2 = created2.wallet;
@@ -291,6 +292,7 @@ mod tests {
                 wallet: wallet2,
                 seed: RawKey::from(42),
                 count: Some(2.into()),
+                spend_public_key: None,
             }),
             node.clone(),
         );
@@ -331,5 +333,104 @@ mod tests {
             wallet: WalletId::from(1),
             threshold: None,
         }));
+    }
+
+    #[test]
+    fn option_b_stealth_dynamic_invoice_qr_and_cold_vault_signing() {
+        let node = Arc::new(Node::new_null());
+
+        // Cold Spend Keypair (s, S = s * B) and Scan Key v
+        let cold_spend_priv = PrivateKey::from_bytes(&[0x55u8; 32]);
+        let cold_spend_pub = cold_spend_priv.public_key();
+        let scan_key = RawKey::from_bytes([0xAAu8; 32]);
+
+        // 1. Create a POS Sentinel Wallet holding ONLY (scan_key v, spend_public_key S)
+        let pos_created: WalletCreateResponse = test_rpc_command_with_node(
+            RpcCommand::WalletCreate(WalletCreateArgs::new_stealth(
+                Some(scan_key),
+                cold_spend_pub.as_account(),
+            )),
+            node.clone(),
+        );
+        let pos_wallet_id = pos_created.wallet;
+        let invoice_0 = pos_created.last_restored_account.unwrap();
+        assert_eq!(
+            invoice_0,
+            rsnano_core::stealth_public_key(&scan_key, &cold_spend_pub, 0)
+                .unwrap()
+                .as_account()
+        );
+        // Verify POS wallet does NOT hold any private key for invoice_0
+        assert!(node.wallets.fetch(&pos_wallet_id, &invoice_0).is_err());
+
+        // 2. Request a new Dynamic Invoice QR via `account_create` in O(1) stateless mode
+        let invoice_1: rsnano_rpc_messages::AccountResponse = test_rpc_command_with_node(
+            RpcCommand::AccountCreate(
+                AccountCreateArgs::builder(pos_wallet_id)
+                    .without_precomputed_work()
+                    .stateless(true)
+                    .build(),
+            ),
+            node.clone(),
+        );
+        assert_eq!(
+            invoice_1.account,
+            rsnano_core::stealth_public_key(&scan_key, &cold_spend_pub, 1)
+                .unwrap()
+                .as_account()
+        );
+
+        // Ensure stateless derivation did NOT grow the wallet's stored account list
+        let pos_list: AccountsRpcMessage = test_rpc_command_with_node(
+            RpcCommand::AccountList(WalletRpcMessage::new(pos_wallet_id)),
+            node.clone(),
+        );
+        assert_eq!(pos_list.accounts.len(), 1); // Only index 0 from initial wallet_create
+
+        // 3. Cold Vault: create a second wallet, add the Master Spend Private Key `s`,
+        //    and configure `(scan_key v, spend_public_key S)` so `account_create` derives
+        //    the spendable stealth scalar keys `p_i = (s_clamped + c_i) mod L`.
+        let vault_created: WalletCreateResponse = test_rpc_command_with_node(
+            RpcCommand::WalletCreate(WalletCreateArgs::new(None)),
+            node.clone(),
+        );
+        let vault_id = vault_created.wallet;
+        let _: rsnano_rpc_messages::AccountResponse = test_rpc_command_with_node(
+            RpcCommand::WalletAdd(WalletAddArgs {
+                wallet: vault_id,
+                key: cold_spend_priv.raw_key(),
+                work: Some(false.into()),
+            }),
+            node.clone(),
+        );
+        let vault_seeded: WalletChangeSeedResponse = test_rpc_command_with_node(
+            RpcCommand::WalletChangeSeed(
+                WalletChangeSeedArgs::builder(vault_id, scan_key)
+                    .spend_public_key(cold_spend_pub.as_account())
+                    .count(2)
+                    .build(),
+            ),
+            node.clone(),
+        );
+        assert_eq!(vault_seeded.restored_count, 2.into());
+        assert_eq!(vault_seeded.last_restored_account, invoice_1.account);
+
+        // Verify the Cold Vault holds the valid stealth scalar private key for invoice_1
+        // and its StateBlock signature passes standard Nano signature verification!
+        let stealth_prv_1 = node.wallets.fetch(&vault_id, &invoice_1.account).unwrap();
+        assert_eq!(stealth_prv_1.account(), invoice_1.account);
+        let block = rsnano_core::Block::from(rsnano_core::StateBlockArgs {
+            key: &stealth_prv_1,
+            previous: rsnano_core::BlockHash::zero(),
+            representative: cold_spend_pub,
+            balance: rsnano_core::Amount::raw(5_000_000),
+            link: rsnano_core::Link::from(123),
+            work: WorkNonce::from(1),
+        });
+        assert!(invoice_1
+            .account
+            .as_key()
+            .verify(block.hash().as_bytes(), block.signature())
+            .is_ok());
     }
 }
