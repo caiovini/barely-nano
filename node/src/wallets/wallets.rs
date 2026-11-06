@@ -569,8 +569,8 @@ impl Wallets {
         }
     }
 
-    /// Configures Option B Dynamic Invoice QR stealth derivation (`P_i = S + c_i * B`) on `wallet_id`.
-    /// Passing `Some(spend_public_key)` enables Option B using `wallet.seed` as the Scan Key `v`
+    /// Configures Dynamic Invoice QR stealth derivation (`P_i = S + c_i * B`) on `wallet_id`.
+    /// Passing `Some(spend_public_key)` enables using `wallet.seed` as the Scan Key `v`
     /// and `spend_public_key` as the Cold Spend Public Key `S`.
     pub fn set_spend_public_key(
         &self,
@@ -604,7 +604,7 @@ impl Wallets {
         Ok(*wallet.spend_public_key.lock())
     }
 
-    /// Stateless Option B Dynamic Invoice QR address generator ($O(1)$ RAM & NVMe).
+    /// Stateless Dynamic Invoice QR address generator ($O(1)$ RAM & NVMe).
     /// Increments `deterministic_index`, persists ONLY the 169-byte `PersistedWalletMeta` record
     /// in `WALLET_SHARD`, and returns the fresh stealth address `P_i = S + c_i * B` without
     /// inserting into `watch_keys` or `WALLET_SHARD` key tables.
@@ -628,7 +628,7 @@ impl Wallets {
         Ok(pk)
     }
 
-    /// Cold-Vault helper: derives and inserts the Option B stealth scalar key
+    /// Cold-Vault helper: derives and inserts the stealth scalar key
     /// `p_i = (s_clamped + c_i) mod L` for invoice `index` using `spend_private_key` and
     /// `wallet.seed` (Scan Key `v`).
     pub fn insert_stealth_key_at(

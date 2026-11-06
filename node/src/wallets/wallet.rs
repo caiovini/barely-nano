@@ -37,9 +37,9 @@ pub struct Wallet {
     pub stealth_scalar_keys: Mutex<HashSet<PublicKey>>,
     pub watch_keys: Mutex<HashSet<PublicKey>>,
     pub work_cache: Mutex<HashMap<PublicKey, WorkNonce>>,
-    /// Decrypted wallet seed (or Option B Scan Private Key `v`) held in RAM only while unlocked.
+    /// Decrypted wallet seed (or Scan Private Key `v`) held in RAM only while unlocked.
     pub seed: Mutex<RawKey>,
-    /// Optional Cold Spend Public Key `S` for Option B Dynamic Invoice QR stealth derivation:
+    /// Optional Cold Spend Public Key `S` for Dynamic Invoice QR stealth derivation:
     /// `P_i = S + sc_reduce(Blake2b-512("BARELY_NANO_STEALTH_V1" || seed_as_scan_key || i)) * B`.
     pub spend_public_key: Mutex<Option<PublicKey>>,
     pub encrypted_seed: Mutex<[u8; 32]>,
@@ -376,7 +376,7 @@ impl Wallet {
         let seed = *self.seed.lock();
         let spend_pk = *self.spend_public_key.lock();
         let pub_key = if let Some(s_pub) = spend_pk {
-            // Option B Dynamic Invoice QR:
+            // Dynamic Invoice QR:
             // If the Cold Master Spend Key `s` corresponding to `S == s_pub` is unlocked in this
             // wallet, also insert the stealth scalar `p_i = (s_clamped + c_i) mod L` so this cold
             // vault can immediately sign `open` and `send` blocks for `P_i`.
@@ -433,7 +433,7 @@ impl Wallet {
         }
     }
 
-    /// Stateless Option B Dynamic Invoice QR derivation: increments `deterministic_index` and
+    /// Stateless Dynamic Invoice QR derivation: increments `deterministic_index` and
     /// computes `P_i = S + c_i * B` (or `Blake2b(seed || i) * B` if standard) without inserting
     /// into RAM `HashMap`/`HashSet`s or allocating a new key entry in `WALLET_SHARD`.
     pub fn next_ephemeral_account(&self, index_override: Option<u32>) -> Option<PublicKey> {

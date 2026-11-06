@@ -82,7 +82,7 @@ impl PrivateKey {
     }
 
     /// Constructs a `PrivateKey` backed directly by a canonical Ed25519 scalar `p_i mod L`
-    /// (used for Option B stealth account spending where `P_i = S + c_i * B`).
+    /// (used for Option stealth account spending where `P_i = S + c_i * B`).
     pub fn from_scalar_bytes(bytes: &[u8; 32]) -> Self {
         Self {
             bytes: *bytes,
@@ -90,7 +90,7 @@ impl PrivateKey {
         }
     }
 
-    /// Derives the Option B stealth spending `PrivateKey` (`p_i = (s_clamped + c_i) mod L`)
+    /// Derives the Option stealth spending `PrivateKey` (`p_i = (s_clamped + c_i) mod L`)
     /// from the Cold Master Spend Private Key, Scan Key `v`, and invoice `index`.
     pub fn from_stealth(spend_priv_key: &RawKey, scan_key: &RawKey, index: u32) -> Self {
         let scalar = tools::ed25519::derive_stealth_scalar_key(

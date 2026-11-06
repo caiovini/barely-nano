@@ -1564,7 +1564,7 @@ pub fn sign(private_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
 }
 
 /// Computes the deterministic stealth scalar `c_i = sc_reduce(Blake2b-512("BARELY_NANO_STEALTH_V1" || scan_key || index_be))`
-/// for Option B Dynamic Invoice QR derivation.
+/// for Dynamic Invoice QR derivation.
 pub fn stealth_invoice_scalar(scan_key: &[u8; 32], index: u32) -> [u8; 32] {
     let mut hasher = blake2b::Blake2bHasher::new(64);
     hasher.update(b"BARELY_NANO_STEALTH_V1");
@@ -1574,7 +1574,7 @@ pub fn stealth_invoice_scalar(scan_key: &[u8; 32], index: u32) -> [u8; 32] {
     sc_reduce(&wide)
 }
 
-/// Derives the Option B one-time stealth public key `P_i = S + c_i * B` from only the
+/// Derives the one-time stealth public key `P_i = S + c_i * B` from only the
 /// Scan Key `v` (`scan_key`), the Cold Spend Public Key `S` (`spend_pub_key`), and invoice `index`.
 /// Requires NO knowledge of the Master Spend Private Key.
 pub fn derive_stealth_public_key(
@@ -1598,7 +1598,7 @@ pub fn derive_stealth_public_key(
     Some(res.to_bytes())
 }
 
-/// Derives the Option B one-time stealth scalar private key `p_i = (s_clamped + c_i) mod L`
+/// Derives the one-time stealth scalar private key `p_i = (s_clamped + c_i) mod L`
 /// from the Cold Master Spend Private Key `spend_priv_key`, Scan Key `scan_key`, and invoice `index`.
 pub fn derive_stealth_scalar_key(
     spend_priv_key: &[u8; 32],

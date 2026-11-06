@@ -40,7 +40,7 @@ pub struct PersistedWalletMeta {
     pub salt: [u8; 32],
     pub encrypted_seed: [u8; 32],
     pub check_tag: [u8; 32],
-    /// Optional Cold Spend Public Key `S` for Option B Dynamic Invoice QR stealth derivation:
+    /// Optional Cold Spend Public Key `S` for Option Dynamic Invoice QR stealth derivation:
     /// `P_i = S + sc_reduce(Blake2b-512("BARELY_NANO_STEALTH_V1" || seed_as_scan_key || i)) * B`.
     /// When `None`, the wallet uses standard Nano `Blake2b(seed || i)` derivation.
     pub spend_public_key: Option<PublicKey>,
