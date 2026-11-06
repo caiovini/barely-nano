@@ -64,6 +64,7 @@ pub struct NodeConfig {
     pub preconfigured_representatives: Vec<PublicKey>,
     pub max_pruning_age_s: i64,
     pub max_pruning_depth: u64,
+    pub pruning_exempt_accounts: Vec<Account>,
     pub callback_address: String,
     pub callback_port: u16,
     pub callback_target: String,
@@ -240,6 +241,7 @@ impl NodeConfig {
                 5 * 60
             },
             max_pruning_depth: 0,
+            pruning_exempt_accounts: Vec::new(),
             callback_address: String::new(),
             callback_port: 0,
             callback_target: String::new(),

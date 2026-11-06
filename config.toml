@@ -147,6 +147,8 @@ enable_pruning = false
 # Time limit for blocks age after pruning (in seconds: 48 hours = 172800)
 max_pruning_age = 172800
 max_pruning_depth = 0
+# Accounts whose full block history is never pruned (local wallet and stealth invoice accounts are exempt automatically)
+pruning_exempt_accounts = []
 
 [node.websocket]
 enable = true

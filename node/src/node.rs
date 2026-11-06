@@ -1024,6 +1024,7 @@ impl Node {
         let ledger_pruning = Arc::new(LedgerPruning::new(
             config.clone(),
             ledger.clone(),
+            wallets.clone(),
             stats.clone(),
         ));
 

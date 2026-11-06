@@ -11,6 +11,7 @@ use spin::Mutex;
 use tracing::{info, warn};
 
 use rsnano_core::{
+    deterministic_key, stealth_public_key,
     utils::{ContainerInfo, ContainerInfoProvider},
     Account, Amount, BlockDetails, BlockHash, Epoch, PendingKey, PrivateKey,
     PublicKey, RawKey, Root, SavedBlock, WalletId, WorkNonce,
@@ -62,7 +63,7 @@ impl core::error::Error for WalletsError {}
 pub struct Wallets {
     pub mutex: Mutex<HashMap<WalletId, Arc<Wallet>>>,
     node_config: NodeConfig,
-    ledger: Arc<Ledger>,
+    pub ledger: Arc<Ledger>,
     work_factory: Arc<WorkFactory>,
     work_thresholds: WorkThresholds,
     network_params: NetworkParams,
@@ -663,6 +664,58 @@ impl Wallets {
         Ok(pub_key)
     }
 
+    /// Populates `exempt` with all accounts belonging to any wallet on this node, including:
+    /// 1. All stored deterministic, ad-hoc, stealth-scalar, and watch-only accounts (even if locked).
+    /// 2. Any configured Cold Spend Public Key `S` (`spend_public_key`).
+    /// 3. All active stateless invoice accounts (`0..deterministic_index`) that have confirmed
+    ///    blocks in `store.confirmation_height`.
+    pub fn collect_pruning_exempt_accounts(&self, exempt: &mut HashSet<Account>) {
+        let mut stateless_ranges: Vec<(RawKey, Option<PublicKey>, u32)> = Vec::new();
+        {
+            let guard = self.mutex.lock();
+            for wallet in guard.values() {
+                for pk in wallet.encrypted_keys.lock().keys() {
+                    exempt.insert(pk.as_account());
+                }
+                for pk in wallet.watch_keys.lock().iter() {
+                    exempt.insert(pk.as_account());
+                }
+                let spend_pk = *wallet.spend_public_key.lock();
+                if let Some(s_pub) = spend_pk {
+                    exempt.insert(s_pub.as_account());
+                }
+                if wallet.valid_password() {
+                    let det_idx = wallet.deterministic_index.load(Ordering::SeqCst);
+                    if det_idx > 0 {
+                        let seed = *wallet.seed.lock();
+                        stateless_ranges.push((seed, spend_pk, det_idx));
+                    }
+                }
+            }
+        }
+
+        for (seed, spend_pk, det_idx) in stateless_ranges {
+            for i in 0..det_idx {
+                let maybe_acc = if let Some(ref s_pub) = spend_pk {
+                    stealth_public_key(&seed, s_pub, i).map(|pk| pk.as_account())
+                } else {
+                    let raw = deterministic_key(&seed, i);
+                    Some(PrivateKey::from(raw).account())
+                };
+                if let Some(acc) = maybe_acc {
+                    if !exempt.contains(&acc)
+                        && self.ledger.store.confirmation_height.get(&acc).is_some()
+                    {
+                        exempt.insert(acc);
+                    }
+                }
+                if i % 256 == 0 {
+                    kernel_common::watchdog::kick();
+                }
+            }
+        }
+    }
+
     pub fn new_null() -> Self {
         let node_config = NodeConfig::default();
         let ledger = Arc::new(Ledger::new_null());
@@ -1154,12 +1207,16 @@ impl WalletsExt for Wallets {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_STORAGE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use kernel_common::storage::{bpm::BufferPool, btree::BTree, StorageContext, SHARDS, SHARD_COUNT};
 
     #[test]
     fn compute_reps_and_foreach_representative() {
+        let _storage_guard = TEST_STORAGE_LOCK.lock();
         let wallets = Wallets::new_null();
         let wallet_id = WalletId::from(1);
         wallets.create(wallet_id);
@@ -1210,6 +1267,7 @@ mod tests {
 
     #[test]
     fn btree_wallet_persistence_across_reboot() {
+        let _storage_guard = TEST_STORAGE_LOCK.lock();
         use kernel_common::storage::{init_wallet_storage, WALLET_SHARD};
 
         let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));

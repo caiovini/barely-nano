@@ -549,6 +549,7 @@ max_triggered = 65536
 enable_pruning = false
 max_pruning_age = 172800
 max_pruning_depth = 0
+pruning_exempt_accounts = []
 
 [node.websocket]
 enable = true
@@ -590,7 +591,17 @@ Set `enable_pruning = true` under `[node.experimental]` in [`config.toml`](file:
 enable_pruning = true
 max_pruning_age = 172800 # Retain 48 hours of history (in seconds)
 max_pruning_depth = 0    # Maximum blocks per account (0 = unlimited depth, age-only)
+pruning_exempt_accounts = [
+    "nano_1merchantcoldvault...",
+    "nano_1merchantsupplierpayout..."
+]
 ```
+
+#### Retaining Full Account History for Merchant & Stealth Invoice Accounts on a Pruned Node
+When pruning runs ([`LedgerPruning::ledger_pruning`](file:///mnt/data/rust-workspace/barely-nano/node/src/pruning.rs#L65-L110)), [`LedgerPruning::build_exempt_accounts`](file:///mnt/data/rust-workspace/barely-nano/node/src/pruning.rs#L54-L63) and [`Wallets::collect_pruning_exempt_accounts`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallets.rs#L673-L716) automatically protect the merchant's own transaction history from ever being pruned while still pruning the rest of the global network:
+1. **Explicitly Configured Accounts (`pruning_exempt_accounts`):** Any `nano_...` address listed in `pruning_exempt_accounts` under `[node.experimental]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) is permanently exempt from pruning—ideal for offline Cold Vault, treasury, or accounting addresses whose keys are never loaded onto the node.
+2. **Local Wallet & Watch-Only Accounts:** Every deterministic, ad-hoc, stealth-scalar, and watch-only account stored in any local wallet (plus any configured Cold Spend Public Key `spend_public_key`) is automatically exempt from pruning, even if the wallet is currently locked in RAM.
+3. **Stateless Stealth Invoice Accounts (`0..deterministic_index`):** During each pruning pass, the node re-derives the wallet's stateless ephemeral/stealth invoice addresses (`0..deterministic_index`) on the fly, checks [`store.confirmation_height`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallets.rs#L708), and exempts every paid invoice account so its complete `account_history` (`open`, partial payments, and sweep `send` blocks) is preserved indefinitely on NVMe without keeping unpaid invoice addresses in RAM.
 
 ### Representative Discovery on Bare-Metal
 
