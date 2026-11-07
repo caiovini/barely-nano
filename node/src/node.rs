@@ -329,6 +329,9 @@ impl Node {
         }
         let inbound_message_queue = Arc::new(inbound_message_queue);
 
+        config.network.max_inbound_connections = config.tcp.max_inbound_connections;
+        config.network.max_outbound_connections = config.tcp.max_outbound_connections;
+        config.network.max_attempts = config.tcp.max_attempts;
         let network = Network::new_from_config(config.network.clone());
         if !is_nulled {
             let _ = run_loopback_channel_adapter(

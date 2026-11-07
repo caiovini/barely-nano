@@ -310,6 +310,9 @@ impl NodeConfig {
 
         if let Some(toml) = &toml.tcp {
             self.tcp.merge_toml(toml);
+            self.network.max_inbound_connections = self.tcp.max_inbound_connections;
+            self.network.max_outbound_connections = self.tcp.max_outbound_connections;
+            self.network.max_attempts = self.tcp.max_attempts;
         }
 
         if let Some(exp) = &toml.experimental {

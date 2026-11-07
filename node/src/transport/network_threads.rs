@@ -237,7 +237,7 @@ impl ReachoutLoop {
                 let net = self.network.read();
                 // The connection limit is `max_outbound_connections` (config.toml); a hardcoded
                 // 96 here used to stop reachout early and left the node under-peered.
-                if !net.is_outbound_slot_available() {
+                if !net.is_outbound_slot_available() || !net.is_attempt_slot_available() {
                     continue;
                 }
             }

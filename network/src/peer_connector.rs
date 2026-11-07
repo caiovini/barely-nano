@@ -97,9 +97,11 @@ impl PeerConnector {
 async fn connect_impl(peer: SocketAddrV6, network_adapter: &TcpNetworkAdapter) {
     match connect_stream(peer).await {
         Ok(stream) => {
+            network_adapter.remove_attempt(&peer);
             let _ = network_adapter.add(stream, ChannelDirection::Outbound);
         }
         Err(e) => {
+            network_adapter.remove_attempt(&peer);
             network_adapter.connect_error(peer, e);
         }
     }

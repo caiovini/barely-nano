@@ -218,7 +218,11 @@ impl Network {
     }
 
     pub fn is_outbound_slot_available(&self) -> bool {
-        (self.count_by_direction(ChannelDirection::Outbound) + self.attempts.len()) < self.config.max_outbound_connections
+        self.count_by_direction(ChannelDirection::Outbound) < self.config.max_outbound_connections
+    }
+
+    pub fn is_attempt_slot_available(&self) -> bool {
+        self.attempts.len() < self.config.max_attempts
     }
 
     fn count_by_direction(&self, direction: ChannelDirection) -> usize {
@@ -240,7 +244,7 @@ impl Network {
         if self.excluded_peers.is_excluded(peer.ip()) {
             return Err(NetworkError::PeerExcluded);
         }
-        if !self.is_outbound_slot_available() {
+        if !self.is_outbound_slot_available() || !self.is_attempt_slot_available() {
             debug!("Rejecting outbound attempt to {}: max connections/attempts reached ({})", peer, self.config.max_outbound_connections);
             return Err(NetworkError::MaxConnections);
         }

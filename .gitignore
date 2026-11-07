@@ -31,5 +31,8 @@ tools/nano-stress/target/
 # bin
 boot.scr
 
+# database
+database/
+
 
 

@@ -216,6 +216,7 @@ pub struct NetworkConfig {
     pub listening_port: u16,
     pub max_inbound_connections: usize,
     pub max_outbound_connections: usize,
+    pub max_attempts: usize,
     pub peer_reachout: core::time::Duration,
     pub cached_peer_reachout: core::time::Duration,
 }
@@ -226,6 +227,7 @@ impl NetworkConfig {
             listening_port: 0,
             max_inbound_connections: 128,
             max_outbound_connections: 128,
+            max_attempts: 32,
             peer_reachout: core::time::Duration::from_secs(1),
             cached_peer_reachout: core::time::Duration::from_secs(1),
         }
