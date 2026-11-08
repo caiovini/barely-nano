@@ -5,8 +5,9 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
+use hashbrown::HashMap;
 use rsnano_core::Account;
-use rsnano_nullable_clock::SteadyClock;
+use rsnano_nullable_clock::{SteadyClock, Timestamp};
 use rsnano_stats::{StatsCollection, StatsSource};
 use spin::RwLock;
 // // // // // // // use std::{    any::Any, time::Duration    }; // TODO: fix this
@@ -20,6 +21,7 @@ pub(crate) struct BootstrapStaleElections {
     stale_threshold: Duration,
     #[allow(dead_code)]
     stale_accounts: Vec<Account>,
+    last_bootstrapped: HashMap<Account, Timestamp>,
 }
 
 impl BootstrapStaleElections {
@@ -32,6 +34,7 @@ impl BootstrapStaleElections {
             stats: Arc::new(StaleElectionsStats::default()),
             stale_threshold: Self::DEFAULT_STALE_THRESHOLD,
             stale_accounts: Vec::new(),
+            last_bootstrapped: HashMap::new(),
         }
     }
 
@@ -48,7 +51,12 @@ impl BootstrapStaleElections {
         let mut state = self.bootstrapper.state();
 
         for account in &self.stale_accounts {
-            state.candidate_accounts.priority_set_safe(account);
+            #[cfg(not(test))]
+            state
+                .candidate_accounts
+                .priority_set(account, crate::bootstrap::state::Priority::new(0.25));
+            #[cfg(test)]
+            state.candidate_accounts.priority_set_initial(account);
         }
         self.stats
             .bootstrap_stale
@@ -62,7 +70,26 @@ impl AecTickerPlugin for BootstrapStaleElections {
             return;
         }
 
+        #[cfg(not(test))]
+        if self.bootstrapper.state().candidate_accounts.priority_len() >= 64 {
+            return;
+        }
+
         let now = self.clock.now();
+        let threshold = self.stale_threshold;
+        #[cfg(not(test))]
+        let cooldown = Duration::from_secs(300).max(threshold);
+        #[cfg(test)]
+        let cooldown = threshold;
+        #[cfg(not(test))]
+        let max_batch = 8;
+        #[cfg(test)]
+        let max_batch = 128;
+
+        if self.last_bootstrapped.len() > 8192 {
+            self.last_bootstrapped
+                .retain(|_, ts| ts.elapsed(now) < cooldown);
+        }
 
         // Stale elections must NOT be force-confirmed: cementing a block without a quorum of
         // votes lets any peer-supplied fork become permanent. Only re-bootstrap the account so
@@ -70,16 +97,25 @@ impl AecTickerPlugin for BootstrapStaleElections {
         self.stale_accounts.clear();
         {
             let guard = aec.read();
+            let last_bootstrapped = &self.last_bootstrapped;
             self.stale_accounts.extend(
                 guard
                     .iter_round_robin()
-                    .filter(|e| e.start().elapsed(now) >= self.stale_threshold)
+                    .filter(|e| {
+                        e.start().elapsed(now) >= threshold
+                            && last_bootstrapped
+                                .get(&e.account())
+                                .map_or(true, |ts| ts.elapsed(now) >= cooldown)
+                    })
                     .map(|e| e.account())
-                    .take(128),
+                    .take(max_batch),
             );
         }
 
         if !self.stale_accounts.is_empty() {
+            for &account in &self.stale_accounts {
+                self.last_bootstrapped.insert(account, now);
+            }
             self.bootstrap_stale_accounts();
         }
     }

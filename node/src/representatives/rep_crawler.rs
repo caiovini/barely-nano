@@ -7,7 +7,7 @@ use core::time::Duration;
 use spin::{Mutex, RwLock};
 
 use crate::utils::BoundedVecDeque;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use rsnano_core::{
     Account, BlockHash, Root, Vote,
@@ -363,7 +363,7 @@ impl RepCrawler {
                     );
                 }
                 InsertResult::ChannelChanged(previous_peer) => {
-                    warn!(
+                    debug!(
                         "Updated representative: {} at : {} (was at: {})",
                         Account::from(vote.voter).encode_account(),
                         channel.peer_addr(),

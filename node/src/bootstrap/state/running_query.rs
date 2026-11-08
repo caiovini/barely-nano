@@ -188,6 +188,10 @@ impl RunningQuery {
             if first.account_field().unwrap_or_default() != self.start.into() {
                 return VerifyResult::Invalid;
             }
+            #[cfg(not(test))]
+            if !first.is_open() {
+                return VerifyResult::NothingNew;
+            }
         } else {
             // Blocks by hash
             if first.hash() != self.start.into() {

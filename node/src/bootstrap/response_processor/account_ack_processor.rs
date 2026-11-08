@@ -80,10 +80,15 @@ impl AccountAckProcessor {
         {
             let (ancestor, cycle_acc) = state.candidate_accounts.resolve_ancestor_or_cycle(account);
             if let Some(cycle_acc) = cycle_acc {
-                state.candidate_accounts.unblock(cycle_acc, None);
+                if state.candidate_accounts.unblock(cycle_acc, None) {
+                    self.stats.inc(
+                        StatType::BootstrapAccountSets,
+                        DetailType::PriorityUnblocked,
+                    );
+                }
             }
             let target = ancestor.or(cycle_acc).unwrap_or(*account);
-            if state.candidate_accounts.priority_set_initial(&target) {
+            if state.candidate_accounts.priority_set_safe(&target) {
                 self.stats
                     .inc(StatType::BootstrapAccountSets, DetailType::PriorityInsert);
             } else {

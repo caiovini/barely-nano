@@ -115,7 +115,7 @@ impl PriorityContainer {
 
     pub fn set_last_request(&mut self, account: &Account, timestamp: Option<Timestamp>) {
         if let Some(entry) = self.by_account.get_mut(account) {
-            if timestamp.is_none() {
+            if timestamp.is_some() {
                 entry.pull_type = PullType::Optimistic;
             }
             let old_ts = entry.last_request;

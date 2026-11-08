@@ -116,6 +116,42 @@ impl PriorityRequester {
                         return PollResult::Wait;
                     }
 
+                    #[cfg(not(test))]
+                    if !next.target_hash.is_zero() {
+                        if self.query_factory.block_exists(&next.target_hash) {
+                            let is_fulfilled_dep = {
+                                let mut state = state_mutex.lock();
+                                if state.candidate_accounts.has_dependency(&next.target_hash) {
+                                    state.candidate_accounts.clear_gap_target(&next.account);
+                                    state.candidate_accounts.unblock_hash(&next.target_hash);
+                                    if state
+                                        .candidate_accounts
+                                        .count_by_dependency_account(&next.account)
+                                        > 0
+                                    {
+                                        state.candidate_accounts.reset_last_request(&next.account);
+                                        state.candidate_accounts.priority_set_safe(&next.account);
+                                    } else {
+                                        state.candidate_accounts.priority_erase(&next.account);
+                                    }
+                                    state.scoring.request_finished(channel.channel_id());
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if is_fulfilled_dep {
+                                self.state = PriorityState::Initial;
+                                continue;
+                            }
+                        }
+                        let query = self
+                            .query_factory
+                            .create_target_hash_query(&next, channel.clone());
+                        self.state = PriorityState::Initial;
+                        return PollResult::Finished(query);
+                    }
+
                     // Query account head/confirmed frontier with NO BootstrapState lock held!
                     // Stale elections mark their candidate account as `PullType::Safe`; otherwise
                     // `pull_type_decider` decides (`optimistic_request_percentage = 100` -> Optimistic).

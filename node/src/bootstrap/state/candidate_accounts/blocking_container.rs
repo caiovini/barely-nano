@@ -36,6 +36,7 @@ pub(super) struct BlockingContainer {
     sequenced: BTreeMap<u64, Account>,
     by_dependency: BTreeMap<BlockHash, BTreeSet<Account>>,
     by_dependency_account: BTreeMap<Account, BTreeSet<(u64, Account, BlockHash)>>,
+    dep_cursors: BTreeMap<Account, u64>,
     dependency_stats: BTreeMap<BlockHash, (u8, Timestamp)>,
     resolved_dependencies: BTreeMap<BlockHash, Account>,
 }
@@ -278,6 +279,28 @@ impl BlockingContainer {
             .unwrap_or_default()
     }
 
+    pub fn has_dependency(&self, dependency: &BlockHash) -> bool {
+        self.by_dependency.contains_key(dependency)
+    }
+
+    pub fn next_dependency_for_account(&mut self, dep_account: &Account) -> Option<BlockHash> {
+        if dep_account.is_zero() {
+            return None;
+        }
+        let set = self.by_dependency_account.get(dep_account)?;
+        if set.is_empty() {
+            return None;
+        }
+        let cursor = self.dep_cursors.get(dep_account).copied().unwrap_or(0);
+        let chosen = set
+            .range((cursor, Account::zero(), BlockHash::zero())..)
+            .next()
+            .or_else(|| set.iter().next())?;
+        let next_cursor = chosen.0.saturating_add(1);
+        self.dep_cursors.insert(*dep_account, next_cursor);
+        Some(chosen.2)
+    }
+
     pub fn sample_dependencies(&self, start: BlockHash, count: usize) -> (Vec<BlockHash>, BlockHash) {
         if self.by_dependency.is_empty() || count == 0 {
             return (Vec::new(), BlockHash::zero());
@@ -376,6 +399,7 @@ impl BlockingContainer {
                     .unwrap();
                 if old.len() == 1 {
                     self.by_dependency_account.remove(&old_dependency_account);
+                    self.dep_cursors.remove(&old_dependency_account);
                 } else {
                     old.remove(&(seq, entry.account, entry.dependency));
                 }
@@ -407,6 +431,7 @@ impl BlockingContainer {
             accounts.remove(&(seq, entry.account, entry.dependency));
         } else {
             self.by_dependency_account.remove(&entry.dependency_account);
+            self.dep_cursors.remove(&entry.dependency_account);
         }
     }
 
@@ -416,6 +441,7 @@ impl BlockingContainer {
         self.sequenced.clear();
         self.by_dependency.clear();
         self.by_dependency_account.clear();
+        self.dep_cursors.clear();
         self.dependency_stats.clear();
         self.resolved_dependencies.clear();
     }

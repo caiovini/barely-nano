@@ -14,7 +14,7 @@ impl RpcCommandHandler {
             pruned: None,
         };
 
-        if self.node.flags.enable_pruning {
+        if self.node.flags.enable_pruning || self.node.ledger.pruned_count() > 0 {
             let full = (self.node.ledger.block_count() - self.node.ledger.pruned_count()) as u64;
             let pruned = self.node.ledger.pruned_count() as u64;
 

@@ -2,7 +2,7 @@ CARGO ?= cargo
 OBJCOPY ?= $(or $(shell which llvm-objcopy 2>/dev/null),$(shell find $(HOME)/.rustup -name llvm-objcopy 2>/dev/null | head -n1),riscv64-linux-gnu-objcopy)
 MKIMAGE ?= mkimage
 
-.PHONY: build build-smode build-k1 build-k3 build-block-test build-spammer boot-scr run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests run-websocket-messages-tests run-websocket-client-tests run-websocket-server-tests run-picocom run-stress build-stress stress clean
+.PHONY: build build-smode build-k1 build-k3 build-block-test build-spammer boot-scr run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests run-websocket-messages-tests run-websocket-client-tests run-websocket-server-tests run-picocom run-stress build-stress build-lmdb-to-nvme build-nvme-snapshot stress clean
 
 boot.scr: boot.cmd
 	$(MKIMAGE) -C none -A riscv -T script -d boot.cmd boot.scr
@@ -96,6 +96,14 @@ run-picocom:
 # ── Network Stress Testing (sends blocks to port 7075) ────────────────────────
 build-stress:
 	RUSTFLAGS="" $(CARGO) build --release --manifest-path tools/nano-stress/Cargo.toml --target x86_64-unknown-linux-gnu
+
+# ── Direct LMDB (data.ldb) -> NVMe Migration Tool ────────────────────────────
+build-lmdb-to-nvme:
+	RUSTFLAGS="" $(CARGO) build --release --manifest-path tools/lmdb-to-nvme/Cargo.toml --target x86_64-unknown-linux-gnu
+
+# ── Direct NVMe <-> Raw Ledger Snapshot Tool ─────────────────────────────────
+build-nvme-snapshot:
+	RUSTFLAGS="" $(CARGO) build --release --manifest-path tools/nvme-snapshot/Cargo.toml --target x86_64-unknown-linux-gnu
 
 run-stress: build-stress
 	tools/nano-stress/target/x86_64-unknown-linux-gnu/release/nano-stress $(if $(ARGS),$(ARGS),--target 192.168.1.200:7075 --rpc http://192.168.1.200:7076 --network dev)

@@ -109,13 +109,98 @@ impl<'a> BlockValidatorFactory<'a> {
         }
 
         let t4b = t();
-        let old_account_info = if account.is_zero() && !cfg!(test) {
+        let has_in_batch_account = in_batch_account.is_some();
+        let mut old_account_info = if account.is_zero() && !cfg!(test) {
             None
         } else if let Some(info) = in_batch_account {
             Some(info)
         } else {
             self.any.get_account(&account)
         };
+        #[cfg(not(test))]
+        if !block_exists && !account.is_zero() {
+            if let Some(prev_saved) = &previous_block {
+                if prev_saved.account() == account {
+                    let account_desynced = match &old_account_info {
+                        None => true,
+                        Some(info) => info.head != prev_saved.hash(),
+                    };
+                    if account_desynced {
+                        let has_live_successor = self
+                            .any
+                            .block_successor(&prev_saved.hash())
+                            .filter(|s| {
+                                !s.is_zero()
+                                    && *s != self.block.hash()
+                                    && self.any.block_exists(s)
+                            })
+                            .is_some();
+                        if !has_live_successor {
+                            let open_block = old_account_info
+                                .as_ref()
+                                .map(|i| i.open_block)
+                                .filter(|h| !h.is_zero() && self.any.block_exists(h))
+                                .unwrap_or_else(|| {
+                                    let mut curr = prev_saved.clone();
+                                    for _ in 0..256 {
+                                        if curr.previous().is_zero() || curr.height() <= 1 {
+                                            return curr.hash();
+                                        }
+                                        let Some(prev) = self.any.get_block(&curr.previous())
+                                        else {
+                                            break;
+                                        };
+                                        curr = prev;
+                                    }
+                                    curr.hash()
+                                });
+                            let rep = prev_saved
+                                .representative_field()
+                                .or_else(|| {
+                                    old_account_info
+                                        .as_ref()
+                                        .map(|i| i.representative)
+                                        .filter(|r| !r.is_zero())
+                                })
+                                .unwrap_or_default();
+                            old_account_info = Some(AccountInfo {
+                                head: prev_saved.hash(),
+                                representative: rep,
+                                open_block,
+                                balance: prev_saved.balance(),
+                                modified: batch_now.into(),
+                                block_count: prev_saved.height(),
+                                epoch: prev_saved.epoch(),
+                            });
+                        }
+                    }
+                }
+            } else if self.block.previous().is_zero() && !has_in_batch_account {
+                if let Some(info) = &old_account_info {
+                    if !self.any.block_exists(&info.head)
+                        && !self.any.block_exists(&info.open_block)
+                    {
+                        old_account_info = None;
+                    } else if self.any.block_exists(&info.head) {
+                        let mut curr_hash = info.head;
+                        let mut broken_chain = false;
+                        for _ in 0..256 {
+                            let Some(curr) = self.any.get_block(&curr_hash) else {
+                                broken_chain = true;
+                                break;
+                            };
+                            if curr.previous().is_zero() {
+                                break;
+                            }
+                            curr_hash = curr.previous();
+                        }
+                        if broken_chain {
+                            old_account_info = None;
+                        }
+                    }
+                }
+            }
+        }
         let t5 = t();
         P[7].fetch_add(t5 - t4b, Relaxed); // get_account
 
@@ -134,7 +219,8 @@ impl<'a> BlockValidatorFactory<'a> {
 
         let source_block = self.block.source_or_link();
         let t2a = t();
-        let pending_receive_info = if !maybe_receive || source_block.is_zero() {
+        let has_in_batch_pending = in_batch_pending.is_some();
+        let mut pending_receive_info = if !maybe_receive || source_block.is_zero() {
             None
         } else if let Some(cached_pending) = in_batch_pending {
             cached_pending
@@ -152,6 +238,60 @@ impl<'a> BlockValidatorFactory<'a> {
         } else {
             self.any.block_exists_or_pruned(&source_block)
         };
+        #[cfg(not(test))]
+        if maybe_receive
+            && !source_block.is_zero()
+            && pending_receive_info.is_none()
+            && source_block_exists
+            && !has_in_batch_pending
+        {
+            if let Some(src_saved) = self.any.get_block(&source_block) {
+                if src_saved.is_send() && src_saved.destination() == Some(account) {
+                    let expected_amount = match self.block {
+                        Block::State(s) => {
+                            let prev_bal = previous_block
+                                .as_ref()
+                                .map(|b| b.balance())
+                                .unwrap_or_default();
+                            if s.balance() > prev_bal {
+                                Some(s.balance() - prev_bal)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(sent_amount) = self
+                        .any
+                        .block_amount_for(&src_saved)
+                        .or(expected_amount)
+                    {
+                        if !sent_amount.is_zero() {
+                            let mut already_received = false;
+                            let mut curr = previous_block.clone();
+                            for _ in 0..256 {
+                                let Some(b) = curr else { break };
+                                if b.source() == Some(source_block) {
+                                    already_received = true;
+                                    break;
+                                }
+                                if b.previous().is_zero() {
+                                    break;
+                                }
+                                curr = self.any.get_block(&b.previous());
+                            }
+                            if !already_received {
+                                pending_receive_info = Some(PendingInfo::new(
+                                    src_saved.account(),
+                                    sent_amount,
+                                    src_saved.epoch(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let t2c = t();
         P[4].fetch_add(t2c - t2b, Relaxed); // source exists
 

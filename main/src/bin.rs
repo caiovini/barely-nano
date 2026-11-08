@@ -734,6 +734,11 @@ fn boot_hart_main(hart_id: usize) {
         kernel_common::async_rt::set_global_executor(exec.clone());
 
         let mut config = daemon_config.node;
+        if network == rsnano_core::Networks::NanoLiveNetwork
+            && config.representative_vote_weight_minimum < rsnano_core::Amount::nano(10)
+        {
+            config.representative_vote_weight_minimum = rsnano_core::Amount::nano(10);
+        }
         config.bootstrap.max_requests = config.bootstrap.max_requests.min(4096);
         config.bootstrap.channel_limit = config.bootstrap.channel_limit.min(64);
         config.bootstrap.rate_limit = config.bootstrap.rate_limit.max(1500).min(10000);
@@ -1884,9 +1889,9 @@ fn run_ledger_commit_and_bootstrap_loop(
         let mut worked = false;
 
         // 1. Single-writer block insertion & dependencies
-        // Throttle new block commits when unconfirmed backlog exceeds 250,000 so
-        // ConfirmingSet and ElectionSchedulers can drain the backlog without destructive rollbacks.
-        if node_arc.ledger.backlog_count() < 250_000 {
+        // Throttle new block commits when ConfirmingSet has a deep queue (>= 16,384) so
+        // cementing can drain without starving on the single-writer B-Tree lock.
+        if node_arc.confirming_set.len() < 16_384 {
             if node_arc.unchecked.buffer_count() > 0 {
                 node_arc.unchecked.run_once();
                 worked = true;
@@ -1903,16 +1908,19 @@ fn run_ledger_commit_and_bootstrap_loop(
                     worked = true;
                     batch_worked = true;
                 }
-                if node_arc.ledger.backlog_count() >= 100_000 && node_arc.confirming_set.len() >= 128 {
+                if node_arc.confirming_set.len() >= 128 {
                     node_arc.confirming_set.run_once();
                 }
-                if !batch_worked || node_arc.ledger.backlog_count() >= 250_000 {
+                if !batch_worked || node_arc.confirming_set.len() >= 16_384 {
                     break;
                 }
             }
         }
-        if node_arc.block_processor.total_queue_len() == 0 || node_arc.ledger.backlog_count() >= 100_000 {
+        if node_arc.confirming_set.len() > 0
+            && (node_arc.block_processor.total_queue_len() == 0 || node_arc.confirming_set.len() >= 128)
+        {
             node_arc.confirming_set.run_once();
+            worked = true;
         }
         node_arc.election_schedulers.priority.run_one();
 

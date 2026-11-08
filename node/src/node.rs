@@ -260,7 +260,7 @@ impl Node {
         );
 
         let mut config = args.config;
-        let flags = args.flags;
+        let mut flags = args.flags;
         config.enable_voting = flags.enable_voting;
 
         let work_factory = Arc::new(WorkFactory::disabled());
@@ -313,6 +313,25 @@ impl Node {
         info!("Block count: {}", ledger.block_count());
         info!("Confirmed count: {}", ledger.confirmed_count());
         info!("Account count: {}", ledger.account_count());
+        if ledger.pruned_count() > 0 {
+            info!("Pruned count: {}", ledger.pruned_count());
+            ledger.enable_pruning();
+            if !flags.enable_pruning && !flags.inactive_node {
+                warn!(
+                    "Existing pruned blocks ({}) detected in ledger; automatically enabling enable_pruning",
+                    ledger.pruned_count()
+                );
+                flags.enable_pruning = true;
+            }
+            if config.enable_voting && !flags.inactive_node {
+                warn!(
+                    "Existing pruned blocks ({}) detected in ledger; automatically disabling enable_voting",
+                    ledger.pruned_count()
+                );
+                config.enable_voting = false;
+                flags.enable_voting = false;
+            }
+        }
 
         // We increase the cookie limit to allow all connections to complete the handshake.
         let syn_cookies = Arc::new(SynCookies::new(64, steady_clock.clone()));

@@ -6,7 +6,7 @@ use crate::bootstrap::{
 };
 use alloc::sync::Arc;
 use rsnano_core::{Account, BlockHash, HashOrAccount};
-use rsnano_ledger::{AnySet, ConfirmedSet, Ledger, LedgerSet};
+use rsnano_ledger::Ledger;
 use rsnano_messages::{AscPullReqType, BlocksReqPayload, HashType};
 use rsnano_network::Channel;
 use rsnano_nullable_clock::Timestamp;
@@ -55,21 +55,35 @@ impl QueryFactory {
 
     #[allow(dead_code)]
     pub(crate) fn get_account_head(&self, account: &Account) -> BlockHash {
-        let any = self.ledger.any();
-        any.get_account(account)
-            .map(|i| i.head)
-            .unwrap_or_default()
+        self.get_account_info(account).0
     }
 
     pub(crate) fn get_account_info(&self, account: &Account) -> (BlockHash, BlockHash) {
-        let any = self.ledger.any();
-        let account_info = any.get_account(account);
-        let head = account_info.map(|i| i.head).unwrap_or_default();
+        self.ledger.get_healed_account_frontiers(account)
+    }
 
-        if let Some(conf_info) = any.confirmed().get_conf_info(account) {
-            (head, conf_info.frontier)
-        } else {
-            (head, BlockHash::zero())
+    #[cfg(not(test))]
+    pub(crate) fn block_exists(&self, hash: &BlockHash) -> bool {
+        self.ledger.store.block.exists(hash)
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn create_target_hash_query(
+        &self,
+        next: &PriorityResult,
+        channel: Arc<Channel>,
+    ) -> AscPullQuerySpec {
+        let req_type = AscPullReqType::Blocks(BlocksReqPayload {
+            start_type: HashType::Block,
+            start: next.target_hash.into(),
+            count: self.pull_count_decider.pull_count(next.priority),
+        });
+        AscPullQuerySpec {
+            channel,
+            req_type,
+            hash: next.target_hash,
+            account: next.account,
+            cooldown_account: false,
         }
     }
 

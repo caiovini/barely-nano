@@ -262,7 +262,19 @@ impl Bootstrapper {
 
         {
             let mut state = self.state.lock();
-            state.candidate_accounts.sync_dependencies();
+            let inserted = state.candidate_accounts.sync_dependencies();
+            if inserted > 0 {
+                self.stats.add(
+                    StatType::BootstrapAccountSets,
+                    DetailType::PriorityInsert,
+                    inserted as u64,
+                );
+                self.stats.add(
+                    StatType::BootstrapAccountSets,
+                    DetailType::DependencySynced,
+                    inserted as u64,
+                );
+            }
         }
 
         let prio_len = self.state.lock().candidate_accounts.priority_len();

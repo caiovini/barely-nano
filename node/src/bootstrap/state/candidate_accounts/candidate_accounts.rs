@@ -65,6 +65,7 @@ pub struct CandidateAccounts {
     blocking: BlockingContainer,
     pull_type_decider: PullTypeDecider,
     sync_dep_cursor: Account,
+    gap_targets: alloc::collections::BTreeMap<Account, (BlockHash, u16)>,
 }
 
 impl CandidateAccounts {
@@ -85,8 +86,12 @@ impl CandidateAccounts {
             config,
             priorities: Default::default(),
             blocking: Default::default(),
+            #[cfg(not(test))]
+            pull_type_decider: PullTypeDecider::new(100),
+            #[cfg(test)]
             pull_type_decider: Default::default(),
             sync_dep_cursor: Account::from(1),
+            gap_targets: Default::default(),
         }
     }
 
@@ -149,7 +154,10 @@ impl CandidateAccounts {
 
         match change_result {
             ChangePriorityResult::Updated => PriorityDownResult::Deprioritized,
-            ChangePriorityResult::Deleted => PriorityDownResult::Erased,
+            ChangePriorityResult::Deleted => {
+                self.gap_targets.remove(account);
+                PriorityDownResult::Erased
+            }
             ChangePriorityResult::NotFound => PriorityDownResult::AccountNotFound,
         }
     }
@@ -159,21 +167,25 @@ impl CandidateAccounts {
     }
 
     /// Inserts an account with `PullType::Safe`, or promotes an already-prioritized account to
-    /// `PullType::Safe` so that stale elections pull from the confirmed frontier.
+    /// `PullType::Safe` so that stale elections / dependency providers are polled first.
     pub fn priority_set_safe(&mut self, account: &Account) -> bool {
         if account.is_zero() || self.blocked(account) {
             return false;
         }
+        let dep_prio = Priority::new(4.0);
         if self.priorities.contains(account) {
             self.priorities.modify(account, |entry| {
                 entry.pull_type = PullType::Safe;
+                if entry.fails == 0 && entry.priority < dep_prio {
+                    entry.priority = dep_prio;
+                }
                 true
             });
             false
         } else {
             let inserted = Self::priority_set_impl(
                 account,
-                Self::PRIORITY_INITIAL,
+                dep_prio,
                 PullType::Safe,
                 &self.blocking,
                 &mut self.priorities,
@@ -214,13 +226,13 @@ impl CandidateAccounts {
         if account.is_zero() {
             return false;
         }
-
+        self.gap_targets.remove(account);
         self.priorities.remove(account).is_some()
     }
 
     pub fn block(&mut self, account: Account, dependency: BlockHash, now: Timestamp) -> bool {
         debug_assert!(!account.is_zero());
-
+        self.gap_targets.remove(&account);
         let removed = self.priorities.remove(&account);
         #[cfg(not(test))]
         if self
@@ -251,7 +263,7 @@ impl CandidateAccounts {
                         self.unblock(cycle_acc, None);
                     }
                     let target = ancestor.or(cycle_acc).unwrap_or(dep_acc);
-                    self.priority_set_initial(&target);
+                    self.priority_set_safe(&target);
                 }
             }
 
@@ -299,6 +311,55 @@ impl CandidateAccounts {
             }
         }
         unblocked
+    }
+
+    pub fn has_dependency(&self, hash: &BlockHash) -> bool {
+        self.blocking.has_dependency(hash)
+    }
+
+    pub fn next_dependency_for_account(&mut self, dep_account: &Account) -> Option<BlockHash> {
+        self.blocking.next_dependency_for_account(dep_account)
+    }
+
+    pub fn set_gap_target(&mut self, account: Account, target: BlockHash) -> bool {
+        if account.is_zero() || target.is_zero() {
+            self.gap_targets.remove(&account);
+            return false;
+        }
+        let steps = self
+            .gap_targets
+            .get(&account)
+            .map(|(_, s)| s.saturating_add(1))
+            .unwrap_or(1);
+        if steps > 32 {
+            self.gap_targets.remove(&account);
+            return false;
+        }
+        if self.gap_targets.len() >= 16384 && !self.gap_targets.contains_key(&account) {
+            self.gap_targets.clear();
+        }
+        self.gap_targets.insert(account, (target, steps));
+        true
+    }
+
+    pub fn set_forward_gap_target(&mut self, account: Account, target: BlockHash) -> bool {
+        if account.is_zero() || target.is_zero() {
+            self.gap_targets.remove(&account);
+            return false;
+        }
+        if self.gap_targets.len() >= 16384 && !self.gap_targets.contains_key(&account) {
+            self.gap_targets.clear();
+        }
+        self.gap_targets.insert(account, (target, 0));
+        true
+    }
+
+    pub fn clear_gap_target(&mut self, account: &Account) {
+        self.gap_targets.remove(account);
+    }
+
+    pub fn gap_target(&self, account: &Account) -> Option<BlockHash> {
+        self.gap_targets.get(account).map(|(h, _)| *h)
     }
 
     /// Returns the currently blocked accounts and the block hashes they wait for.
@@ -422,6 +483,7 @@ impl CandidateAccounts {
             priority: entry.priority,
             fails: entry.fails,
             pull_type: entry.pull_type,
+            target_hash: BlockHash::zero(),
         }
     }
 
@@ -464,10 +526,16 @@ impl CandidateAccounts {
                 break;
             }
             scanned += 1;
-            let pull_type = self.pull_type_decider.decide_pull_type();
+            #[cfg(not(test))]
+            let (pull_type, dep_prio) = (PullType::Safe, Priority::new(4.0));
+            #[cfg(test)]
+            let (pull_type, dep_prio) = (
+                self.pull_type_decider.decide_pull_type(),
+                Self::PRIORITY_INITIAL,
+            );
             if Self::priority_set_impl(
                 dep_account,
-                Self::PRIORITY_INITIAL,
+                dep_prio,
                 pull_type,
                 &self.blocking,
                 &mut self.priorities,
@@ -475,7 +543,7 @@ impl CandidateAccounts {
                 inserted += 1;
             } else {
                 #[cfg(not(test))]
-                if resolved_walks < 64 && self.blocking.contains(dep_account) {
+                if self.blocking.contains(dep_account) {
                     resolved_walks += 1;
                     let (resolved, cycle_acc) =
                         self.blocking.resolve_ancestor_or_cycle(dep_account);
@@ -484,13 +552,17 @@ impl CandidateAccounts {
                     } else if let Some(target_acc) = resolved {
                         if Self::priority_set_impl(
                             &target_acc,
-                            Self::PRIORITY_INITIAL,
+                            dep_prio,
                             pull_type,
                             &self.blocking,
                             &mut self.priorities,
                         ) {
                             inserted += 1;
                         }
+                    }
+                    if resolved_walks >= 64 {
+                        next_cursor = dep_account.inc().unwrap_or_else(|| Account::from(1));
+                        break;
                     }
                 }
             }
@@ -578,6 +650,7 @@ impl CandidateAccounts {
     pub fn clear(&mut self) {
         self.priorities.clear();
         self.blocking.clear();
+        self.gap_targets.clear();
     }
 
     pub fn container_info(&self) -> ContainerInfo {
@@ -614,6 +687,7 @@ pub struct PriorityResult {
     pub priority: Priority,
     pub fails: usize,
     pub pull_type: PullType,
+    pub target_hash: BlockHash,
 }
 
 #[cfg(test)]

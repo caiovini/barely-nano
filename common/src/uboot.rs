@@ -254,6 +254,7 @@ pub fn eth_check_tx_stall() {
                     unsafe {
                         core::arch::asm!("fence rw, io", options(nostack));
                         core::ptr::write_volatile(DMA_TRANSMIT_POLL_DEMAND as *mut u32, 0xFF);
+                        core::arch::asm!("fence io, rw", options(nostack));
                     }
                 }
             }

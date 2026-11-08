@@ -195,6 +195,9 @@ impl Ledger {
         for attempt in 0..2 {
             kernel_common::watchdog::kick();
             self.store.generate_cache();
+            if self.pruned_count() > 0 {
+                self.enable_pruning();
+            }
             self.store
                 .rep_weight
                 .for_each(|rep, weight| self.rep_weights_updater.representation_put(rep, weight));
@@ -292,6 +295,9 @@ impl Ledger {
             if let Some(_block) = self.any().get_block(&current) {
                 tracing::debug!("[ledger]   Block successor: {}", count);
                 current = self.any().block_successor(&current).unwrap_or_default();
+            } else if self.any().block_exists_or_pruned(&current) {
+                tracing::debug!("[ledger]   Block successor {} is pruned.", count);
+                break;
             } else {
                 tracing::warn!("[ledger]   Block successor NOT FOUND.");
                 break;
@@ -562,6 +568,8 @@ impl Ledger {
             rsnano_core::PendingKey,
             Option<rsnano_core::PendingInfo>,
         > = alloc::collections::BTreeMap::new();
+        let mut old_tips: alloc::collections::BTreeMap<Account, BlockHash> =
+            alloc::collections::BTreeMap::new();
         let batch_now = rsnano_core::utils::UnixMillisTimestamp::now();
 
         for (idx, &(block, signature_verified)) in items.iter().enumerate() {
@@ -671,10 +679,12 @@ impl Ledger {
                                 *latest = instructions.set_account_info.clone();
                             })
                             .or_insert_with(|| {
-                                (
-                                    instructions.old_account_info.clone(),
-                                    instructions.set_account_info.clone(),
-                                )
+                                let stored_old = self
+                                    .store
+                                    .account
+                                    .get(&instructions.account)
+                                    .unwrap_or_else(|| instructions.old_account_info.clone());
+                                (stored_old, instructions.set_account_info.clone())
                             });
                         deferred_blocks.insert(hash, saved_block.clone());
                         processed.push((Ok(()), Some(saved_block)));
@@ -687,6 +697,13 @@ impl Ledger {
                 Err(err) => {
                     if err != BlockError::Old {
                         failed_hashes.insert(hash);
+                    } else if !cfg!(test) {
+                        if let Some(acc) = candidate_account {
+                            old_tips.insert(acc, hash);
+                            if !prev_hash.is_zero() && deferred_blocks.contains_key(&prev_hash) {
+                                deferred_successors.insert(prev_hash, hash);
+                            }
+                        }
                     }
                     tracing::debug!(
                         "Ledger: validation failed for block {}! Error: {:?}",
@@ -721,34 +738,43 @@ impl Ledger {
                 }
             }
             for (account, (first_old_info, final_new_info)) in &deferred_accounts {
-                if !final_new_info.head.is_zero() {
-                    if !first_old_info.head.is_zero() && first_old_info.epoch != final_new_info.epoch
+                let mut target_info = final_new_info.clone();
+                #[cfg(not(test))]
+                if !first_old_info.head.is_zero()
+                    && first_old_info.block_count > final_new_info.block_count
+                    && self.store.block.exists(&first_old_info.head)
+                {
+                    target_info = first_old_info.clone();
+                }
+
+                if !target_info.head.is_zero() {
+                    if !first_old_info.head.is_zero() && first_old_info.epoch != target_info.epoch
                     {
                         self.store.account.del(account);
                     }
-                    self.store.account.put(account, final_new_info);
+                    self.store.account.put(account, &target_info);
                 } else {
                     self.store.account.del(account);
                     self.store.cache.account_count.fetch_sub(1, Ordering::SeqCst);
                 }
 
                 if !first_old_info.head.is_zero() {
-                    if first_old_info.representative != final_new_info.representative
-                        || first_old_info.balance != final_new_info.balance
+                    if first_old_info.representative != target_info.representative
+                        || first_old_info.balance != target_info.balance
                     {
                         self.rep_weights_updater.representation_add_dual(
                             &mut (),
                             first_old_info.representative,
                             Amount::zero().wrapping_sub(first_old_info.balance),
-                            final_new_info.representative,
-                            final_new_info.balance,
+                            target_info.representative,
+                            target_info.balance,
                         );
                     }
-                } else if !final_new_info.balance.is_zero() {
+                } else if !target_info.balance.is_zero() {
                     self.rep_weights_updater.representation_add(
                         &mut (),
-                        final_new_info.representative,
-                        final_new_info.balance,
+                        target_info.representative,
+                        target_info.balance,
                     );
                 }
             }
@@ -758,7 +784,235 @@ impl Ledger {
             );
         }
 
+        #[cfg(not(test))]
+        if !old_tips.is_empty() {
+            for (account, old_hash) in old_tips {
+                let current_info = self.store.account.get(&account);
+                let needs_heal = match &current_info {
+                    None => true,
+                    Some(info) => {
+                        info.head != old_hash
+                            && (!self.store.block.exists(&info.head)
+                                || self
+                                    .store
+                                    .block
+                                    .get(&old_hash)
+                                    .map(|b| b.height() > info.block_count)
+                                    .unwrap_or(false))
+                    }
+                };
+                if needs_heal {
+                    self.heal_account_from_block(&account, old_hash, current_info, batch_now);
+                }
+            }
+        }
+
         BatchProcessResult { processed }
+    }
+
+    #[cfg(not(test))]
+    fn heal_account_from_block(
+        &self,
+        account: &Account,
+        start_hash: BlockHash,
+        current_info: Option<AccountInfo>,
+        now: rsnano_core::utils::UnixMillisTimestamp,
+    ) -> Option<AccountInfo> {
+        let mut tip_hash = start_hash;
+        for _ in 0..4096 {
+            if let Some(succ) = self.store.successors.get(&tip_hash) {
+                if !succ.is_zero() && self.store.block.exists(&succ) {
+                    tip_hash = succ;
+                    continue;
+                }
+            }
+            break;
+        }
+        let tip = self.store.block.get(&tip_hash)?;
+        if tip.account() != *account {
+            return None;
+        }
+        let open_block = current_info
+            .as_ref()
+            .map(|i| i.open_block)
+            .filter(|h| !h.is_zero() && self.store.block.exists(h))
+            .unwrap_or_else(|| {
+                let mut curr = tip.clone();
+                for _ in 0..256 {
+                    if curr.previous().is_zero() || curr.height() <= 1 {
+                        return curr.hash();
+                    }
+                    let Some(prev) = self.store.block.get(&curr.previous()) else {
+                        break;
+                    };
+                    curr = prev;
+                }
+                curr.hash()
+            });
+        let rep = tip
+            .representative_field()
+            .or_else(|| {
+                current_info
+                    .as_ref()
+                    .map(|i| i.representative)
+                    .filter(|r| !r.is_zero())
+            })
+            .unwrap_or_default();
+        let healed = AccountInfo {
+            head: tip.hash(),
+            representative: rep,
+            open_block,
+            balance: tip.balance(),
+            modified: now.into(),
+            block_count: tip.height(),
+            epoch: tip.epoch(),
+        };
+        let was_none = current_info.is_none();
+        self.store.account.put(account, &healed);
+        if was_none {
+            self.store.cache.account_count.fetch_add(1, Ordering::SeqCst);
+        }
+        Some(healed)
+    }
+
+    /// Returns `(head, confirmed_frontier)` for `account`, self-healing cross-shard
+    /// `TABLE_ACCOUNTS` / `TABLE_CONFIRMATION_HEIGHT` vs `TABLE_BLOCKS` desynchronization
+    /// if the recorded frontier block is missing from `TABLE_BLOCKS` or behind stored successors.
+    pub fn get_healed_account_frontiers(&self, account: &Account) -> (BlockHash, BlockHash) {
+        let account_info = self.store.account.get(account);
+        let mut head = account_info.as_ref().map(|i| i.head).unwrap_or_default();
+        let conf_info = self.store.confirmation_height.get(account);
+        let mut confirmed_frontier = conf_info.as_ref().map(|c| c.frontier).unwrap_or_default();
+
+        #[cfg(not(test))]
+        {
+            let mut conf_missing = false;
+            if !confirmed_frontier.is_zero() && !self.store.block.exists(&confirmed_frontier) {
+                confirmed_frontier = BlockHash::zero();
+                conf_missing = true;
+            }
+
+            if !head.is_zero() {
+                let head_exists = self.store.block.exists(&head);
+                let mut start = if head_exists {
+                    head
+                } else if !confirmed_frontier.is_zero() {
+                    confirmed_frontier
+                } else {
+                    account_info
+                        .as_ref()
+                        .map(|i| i.open_block)
+                        .filter(|h| !h.is_zero() && self.store.block.exists(h))
+                        .unwrap_or_default()
+                };
+
+                if !start.is_zero() {
+                    for _ in 0..4096 {
+                        if let Some(succ) = self.store.successors.get(&start) {
+                            if !succ.is_zero() {
+                                if self.store.block.exists(&succ) {
+                                    start = succ;
+                                    continue;
+                                } else {
+                                    self.store.successors.del(&start);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                if start != head {
+                    if start.is_zero() {
+                        self.store.account.del(account);
+                        self.store.cache.account_count.fetch_sub(1, Ordering::SeqCst);
+                        if conf_info.is_some() {
+                            self.store.confirmation_height.del(account);
+                        }
+                    } else if let Some(healed) = self.heal_account_from_block(
+                        account,
+                        start,
+                        account_info,
+                        rsnano_core::utils::UnixMillisTimestamp::now(),
+                    ) {
+                        if conf_missing
+                            || conf_info
+                                .as_ref()
+                                .map(|c| c.height > healed.block_count)
+                                .unwrap_or(false)
+                        {
+                            self.store.confirmation_height.put(
+                                account,
+                                &rsnano_core::ConfirmationHeightInfo::new(
+                                    healed.block_count,
+                                    healed.head,
+                                ),
+                            );
+                            confirmed_frontier = healed.head;
+                        }
+                    }
+                    head = start;
+                } else if conf_missing {
+                    if let Some(tip) = self.store.block.get(&head) {
+                        self.store.confirmation_height.put(
+                            account,
+                            &rsnano_core::ConfirmationHeightInfo::new(tip.height(), tip.hash()),
+                        );
+                        confirmed_frontier = tip.hash();
+                    } else {
+                        self.store.confirmation_height.del(account);
+                    }
+                }
+            } else if conf_missing {
+                self.store.confirmation_height.del(account);
+            }
+        }
+
+        (head, confirmed_frontier)
+    }
+
+    pub fn advance_existing_chain(&self, start: BlockHash, max_steps: usize) -> BlockHash {
+        if start.is_zero() || !self.store.block.exists(&start) {
+            return BlockHash::zero();
+        }
+        let mut curr = start;
+        for _ in 0..max_steps {
+            if let Some(succ) = self.store.successors.get(&curr) {
+                if !succ.is_zero() && succ != curr && self.store.block.exists(&succ) {
+                    curr = succ;
+                    continue;
+                }
+            }
+            break;
+        }
+        curr
+    }
+
+    pub fn find_forward_gap_start(&self, account: &Account, _exclude_head: bool) -> BlockHash {
+        let (head, confirmed_frontier) = self.get_healed_account_frontiers(account);
+        if !confirmed_frontier.is_zero() && confirmed_frontier != head {
+            let walked = self.advance_existing_chain(confirmed_frontier, 16384);
+            if !walked.is_zero() && walked != head {
+                return walked;
+            }
+        }
+        if !head.is_zero() {
+            return self.advance_existing_chain(head, 4096);
+        }
+        if !confirmed_frontier.is_zero() {
+            return self.advance_existing_chain(confirmed_frontier, 4096);
+        }
+        let open_block = self
+            .store
+            .account
+            .get(account)
+            .map(|i| i.open_block)
+            .filter(|h| !h.is_zero() && self.store.block.exists(h))
+            .unwrap_or_default();
+        if !open_block.is_zero() {
+            return self.advance_existing_chain(open_block, 16384);
+        }
+        BlockHash::zero()
     }
 
     pub fn roll_back_competitors<'a, T, F>(&self, blocks: T, mut rolled_back_callback: F)

@@ -34,8 +34,8 @@ allow_local_peers = true
 # Quorum is 67 percent of max(online weight, this minimum). At 130M the quorum (87.1M) was above
 # the whole online weight we can see (~71M), so no election could ever confirm (conf stuck at 1).
 online_weight_minimum = "60000000000000000000000000000000000000"
-# Minimum vote weight that a representative must have for its vote to be counted (in raw)
-representative_vote_weight_minimum = "0"
+# Minimum vote weight that a representative must have for its vote to be counted (in raw; 10 NANO default)
+representative_vote_weight_minimum = "10000000000000000000000000000000"
 
 # Preconfigured peers ("address:port" or hostname)
 preconfigured_peers = [

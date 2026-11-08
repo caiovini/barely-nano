@@ -255,6 +255,25 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
         return;
     }
 
+    // SpacemiT X60 LSU erratum: when a non-cacheable AXI MMIO write or cross-cluster
+    // snoop/reservation is draining while the core executes a `pause` (`fence w, 0`,
+    // encoding `0x0100_000f`) hint instruction, the LSU can raise an imprecise
+    // `CAUSE_LOAD_ACCESS` (`scause = 0x5`) with `stval = 0x0` and `sepc` pointing at
+    // `pause`. Because `pause` is a 4-byte architectural no-op hint with no register
+    // or memory side effects, advance `sepc + 4` and resume execution.
+    if !is_interrupt && (cause == 5 || cause == 7) {
+        let sepc = csrr!("sepc");
+        let stval = csrr!("stval");
+        if stval == 0 && (0x1100_0000..0x1140_0000).contains(&sepc) && (sepc & 1) == 0 {
+            let lo = unsafe { core::ptr::read_volatile(sepc as *const u16) } as u32;
+            let hi = unsafe { core::ptr::read_volatile((sepc + 2) as *const u16) } as u32;
+            if (lo | (hi << 16)) == 0x0100_000f {
+                csrw!("sepc", sepc + 4);
+                return;
+            }
+        }
+    }
+
     // Timer interrupt cause: 5 in S-mode
     let timer_cause = 5usize;
 

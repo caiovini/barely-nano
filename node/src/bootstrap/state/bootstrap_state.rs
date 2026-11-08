@@ -76,7 +76,7 @@ impl BootstrapState {
     }
 
     pub fn next_priority(&mut self, now: Timestamp) -> PriorityResult {
-        let next = self.candidate_accounts.next_priority(now, |account| {
+        let mut next = self.candidate_accounts.next_priority(now, |account| {
             self.running_queries
                 .count_by_account(account, QuerySource::Priority)
                 == 0
@@ -84,6 +84,18 @@ impl BootstrapState {
 
         if next.account.is_zero() {
             return Default::default();
+        }
+
+        #[cfg(not(test))]
+        {
+            if let Some(gap_hash) = self.candidate_accounts.gap_target(&next.account) {
+                next.target_hash = gap_hash;
+            } else if let Some(dep_hash) = self
+                .candidate_accounts
+                .next_dependency_for_account(&next.account)
+            {
+                next.target_hash = dep_hash;
+            }
         }
 
         next
@@ -104,7 +116,7 @@ impl BootstrapState {
         self.counters.outdated_accounts_found += outdated.accounts.len();
 
         #[cfg(not(test))]
-        let prio = CandidateAccounts::PRIORITY_INITIAL;
+        let prio = super::Priority::new(0.5);
         #[cfg(test)]
         let prio = CandidateAccounts::PRIORITY_CUTOFF;
 

@@ -140,7 +140,9 @@ impl BlockProcessorQueue {
             if guard.can_push(context.source, context.channel_id, &hash) {
                 guard.push(context.clone())
             } else {
-                guard.record_overfill(context.source);
+                if !guard.has_capacity(context.source, context.channel_id) {
+                    guard.record_overfill(context.source);
+                }
                 false
             }
         };
@@ -166,7 +168,7 @@ impl BlockProcessorQueue {
                     if guard.push(arc_ctx.clone()) {
                         added_ctxs.push(arc_ctx);
                     }
-                } else {
+                } else if !guard.has_capacity(ctx.source, ctx.channel_id) {
                     guard.record_overfill(ctx.source);
                 }
             }
@@ -196,7 +198,7 @@ impl BlockProcessorQueue {
                     } else {
                         rejected_digests.push(digest);
                     }
-                } else {
+                } else if !guard.has_capacity(ctx.source, ctx.channel_id) {
                     guard.record_overfill(ctx.source);
                     rejected_digests.push(digest);
                 }
@@ -342,6 +344,10 @@ impl BlockProcessorQueueImpl {
         !self.stopped && self.process_queue.can_push(source, channel_id, hash)
     }
 
+    pub fn has_capacity(&self, source: BlockSource, channel_id: ChannelId) -> bool {
+        !self.stopped && self.process_queue.has_capacity(source, channel_id)
+    }
+
     pub fn record_overfill(&mut self, source: BlockSource) {
         self.overfill_count += 1;
         self.overfill_by_source[source as usize] += 1;
@@ -353,11 +359,12 @@ impl BlockProcessorQueueImpl {
         }
 
         let source = context.source;
+        let channel_id = context.channel_id;
         let added = self.process_queue.push(context);
 
         if added {
             self.processed += 1;
-        } else {
+        } else if !self.process_queue.has_capacity(source, channel_id) {
             self.overfill_count += 1;
             self.overfill_by_source[source as usize] += 1;
         }

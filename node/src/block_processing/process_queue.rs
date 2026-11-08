@@ -83,6 +83,10 @@ impl ProcessQueue {
         self.queue.free_capacity(&(source, channel_id)) > 0 && !self.queued_hashes.contains(hash)
     }
 
+    pub fn has_capacity(&self, source: BlockSource, channel_id: ChannelId) -> bool {
+        self.queue.free_capacity(&(source, channel_id)) > 0
+    }
+
     pub fn push(&mut self, context: Arc<BlockContext>) -> bool {
         let hash = context.block.hash();
         if self.queued_hashes.contains(&hash) {

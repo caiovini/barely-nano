@@ -36,6 +36,15 @@ impl BtreeConfirmationHeightStore {
         }
     }
 
+    pub fn del(&self, account: &Account) {
+        let key = self.make_key(account);
+        let shard_idx = get_shard_index(&key);
+        let mut lock = SHARDS[shard_idx].lock();
+        if let Some(db) = lock.as_mut() {
+            db.delete(key);
+        }
+    }
+
     pub fn get(&self, account: &Account) -> Option<ConfirmationHeightInfo> {
         let key = self.make_key(account);
         let shard_idx = get_shard_index(&key);

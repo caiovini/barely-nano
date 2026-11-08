@@ -16,6 +16,7 @@ It establishes a self-contained operating environment on top of OpenSBI and U-Bo
   - [7. Multi-Hart SMP Architecture](#7-multi-hart-smp-architecture)
   - [8. I2C OLED Status Display (`common/src/oled.rs`)](#8-i2c-oled-status-display-commonsrcoledrs)
 - [Storage Architecture: Bare-Metal NVMe B-Tree + WAL Engine](#storage-architecture-bare-metal-nvme-b-tree--wal-engine)
+  - [Why the Bare-Metal NVMe Ledger is ~90 GB vs. ~123 GB in LMDB (& Architectural Advantages)](#why-the-bare-metal-nvme-ledger-is-90-gb-vs-123-gb-in-lmdb--architectural-advantages)
 - [Representative & Wallet Key Security Architecture (`wallet_crypto`)](#representative--wallet-key-security-architecture-wallet_crypto)
   - [1. Physical & Cryptographic Isolation](#1-physical--cryptographic-isolation)
   - [2. Two Operator Modes: Unattended Auto-Voting vs. Passphrase Lock on Reboot](#2-two-operator-modes-unattended-auto-voting-vs-passphrase-lock-on-reboot)
@@ -36,6 +37,13 @@ It establishes a self-contained operating environment on top of OpenSBI and U-Bo
   - [WebSocket Subscriptions (`tools/ws_subscribe.py`)](#websocket-subscriptions-toolsws_subscribepy)
   - [Ledger Pruning](#ledger-pruning)
   - [Representative Discovery on Bare-Metal](#representative-discovery-on-bare-metal)
+- [Fast Ledger Bootstrap: Direct LMDB to NVMe Migration (`tools/lmdb-to-nvme`)](#fast-ledger-bootstrap-direct-lmdb-to-nvme-migration-toolslmdb-to-nvme)
+  - [1. How the Two-Pass Streaming Converter Works](#1-how-the-two-pass-streaming-converter-works)
+  - [2. Step-by-Step Usage (`tools/lmdb_to_nvme.sh`)](#2-step-by-step-usage-toolslmdb_to_nvmesh)
+- [Direct NVMe Ledger Snapshot & Restore (`tools/nvme-snapshot`)](#direct-nvme-ledger-snapshot--restore-toolsnvme-snapshot)
+  - [1. How Sparse-Shard Snapshot Streaming & WAL Replay Works](#1-how-sparse-shard-snapshot-streaming--wal-replay-works)
+  - [2. `BNSNAPV1` Raw Snapshot File Layout](#2-bnsnapv1-raw-snapshot-file-layout)
+  - [3. Step-by-Step Usage (`tools/nvme_snapshot.sh`)](#3-step-by-step-usage-toolsnvme_snapshotsh)
 - [Network Stress Testing (`tools/nano-stress`)](#network-stress-testing-toolsnano-stress)
 - [Workspace Structure](#workspace-structure)
 
@@ -127,6 +135,27 @@ Without an OS filesystem or traditional database (LMDB/RocksDB), `barely-nano` i
 3. **Atomic Dual-Area Write-Ahead Log (`common/src/storage/wal.rs`):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. Between block batches on Hart 6 (the single ledger writer), `wal::checkpoint()` snapshots dirty pages across all 16 shards, writes `[descriptor pages][data pages][commit page]` sequentially with a 64-bit checksum and boot epoch, and then writes the pages to their home shard locations sorted by LBA. On boot, `wal::recover()` idempotently replays the latest committed batch.
 4. **16-Shard B-Tree Engine (`common/src/storage/btree.rs`):** Prefix-partitioned across 16 shards by the high nibble of `key[1]`, supporting `Zicbop`-prefetched binary search, proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and stack-cached range iterators.
 5. **Isolated Wallet B-Tree & Atomic Redo Journal (`WALLET_SHARD` at `WALLET_STORAGE_LBA = 786,432`):** Wallet and representative keys live in a dedicated B-Tree partition at the `384 MB` NVMe mark (`LBA 786,432 .. 819,712`, `16 MB` B-Tree + `256 KB` checksummed redo journal), strictly below `STORAGE_BASE_LBA` (`512 MB`) and enforced by compile-time assertions and runtime LBA bounds guards so wallet mutations can never overwrite or contend with a synced ledger.
+
+### Why the Bare-Metal NVMe Ledger is ~90 GB vs. ~123 GB in LMDB (& Architectural Advantages)
+
+On the exact same unpruned Nano mainnet ledger (**220.89M blocks**, **37.44M accounts**, **218.53M confirmed**), the standard LMDB `data.ldb` file occupies **~122.2 GiB (`131.2 GB` / `32,029,037` × 4 KB pages)**, whereas `barely-nano`'s 16-shard NVMe B-Tree occupies **~90.4 GiB (`92,615 MB` / `23,709,465` × 4 KB pages)**—a **~26% (~31.8 GiB) storage reduction** before even enabling pruning:
+
+| Metric | Standard Linux Node (LMDB `data.ldb`) | `barely-nano` Bare-Metal NVMe B-Tree | Advantage |
+| :--- | :--- | :--- | :--- |
+| **Unpruned Ledger Size (220.9M blocks)** | **~122.2 GiB (`131.2 GB`)** (`32,029,037` pages) | **~90.4 GiB (`92.6 GB`)** (`23,709,465` pages) | **~31.8 GiB (~26%) smaller** on disk |
+| **Pruned Ledger Size (`--prune`)** | ~45–55 GiB (requires offline `mdb_copy -c` to reclaim file size) | **~30–32 GiB** (reclaims freed 4 KB pages in-place via shard free-list) | **~75% smaller** than unpruned LMDB; zero offline compaction needed |
+| **Leaf Page Fill Factor** | **~67–69%** average (`50%` immediately after random 256-bit hash page splits) | **~88%** (`3,584 / 4,096 B` packed slotted pages with `0` dead bytes) | Eliminates **~23 GiB** of internal B+Tree split slack space |
+| **Copy-on-Write (COW) & Freelist Overhead** | **~8.7 GiB** (`~2.26M` pages in branch nodes, un-reclaimed COW pages & `FREE_DBI` lists) | **0 B COW bloat** (in-place page updates + fixed `256 MB` dual-area WAL) | Eliminates multi-version page duplication and freelist fragmentation |
+| **Incremental Growth During Live Sync** | ~400–600 bytes/block (COW leaf + ancestor branch path writes) | **~67 bytes/block net** (`+61 MB` across `+904k` blocks & `+167k` accounts) | New keys fill pre-allocated 12% slotted-page headroom before splitting |
+| **SSD Write Amplification & Filesystem Overhead** | High (every commit writes COW leaf-to-root path + ext4/XFS journal + `msync`) | **Minimal** (dirty pages stay in 5 GB DRAM Bank 1; flushed in LBA-sorted 128 KB DMA batches every 10–30s) | Drastically lower NVMe wear and higher sustained IOPS |
+| **RAM & Cache Predictability (8 GB Board)** | Unbounded `mmap` RSS + OS page-cache thrashing + Linux OOM risk | **Fixed `5,120 MB` DRAM Bank 1 Sector Cache + flat `~1,053 MB` Heap** | Zero OS page faults, zero swap, deterministic memory ceiling |
+| **Negative Block Lookup Cost** | Full B+Tree root-to-leaf traversal (`3–4` page reads per check) | **$O(1)$ in-RAM `64 MB` `BlockBloom` filter** (persisted on NVMe) | Instant duplicate/existence filtering before touching B-Tree shards |
+| **CPU Scheduling & Execution Model** | Linux CFS thread migration, syscalls, interrupts, and multi-thread DB lock contention | **Hard-pinned 8-Hart S-Mode SMP** (3× SIMD Crypto harts, 1× single-writer Ledger hart, etc.) | **19.7k–21.8k bps** pipeline throughput; zero context-switch or syscall overhead |
+
+#### Why the Storage Size Difference Occurs
+1. **No Copy-on-Write (COW) or Freelist DB Bloat (~8.7 GiB saved):** LMDB never modifies pages in place; every transaction allocates new 4 KB pages for the modified leaf and every parent branch page up to the root, recording old page numbers in `FREE_DBI`. In a 220.9M-block `data.ldb` (`32,029,037` pages), only `29,760,946` pages contain active leaf data, leaving **over 2.26 million pages (~8.65 GiB)** consumed by historical COW snapshots, freelist tracking, and deeper branch trees. `barely-nano` updates slotted pages in place in its 5 GB DRAM buffer pool and commits atomically via a fixed `256 MB` dual-area WAL.
+2. **Higher Slotted-Page Packing Density (~23.1 GiB saved):** Because Nano block hashes and account public keys are uniformly distributed 256-bit values, random insertions into LMDB split 4 KB leaf pages in half (`50%` occupancy after split, averaging `~68%` across the file—wasting ~1.3 KB per page). `barely-nano`'s slotted-page B-Tree packs entries to **~88% occupancy** (`3,584 / 4,096` bytes) during [`lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs) migration while leaving ~512 bytes of free headroom per page. During live network syncing after boot, incoming blocks fill that existing page headroom first—resulting in only **`+61 MB` of NVMe growth across `+904,574` blocks and `+167,046` accounts (~67 bytes/block)**.
+3. **In-Place Page Reclamation Without Offline Compaction:** When blocks or pending entries are deleted (or pruned), LMDB's `data.ldb` file never shrinks on disk unless taken offline and rewritten with `mdb_copy -c`. In `barely-nano`, each of the 16 B-Tree shards maintains an embedded $O(1)$ free-page list (`free_list_head`) that immediately recycles emptied 4 KB pages on the fly.
 
 ## Representative & Wallet Key Security Architecture (`wallet_crypto`)
 
@@ -480,6 +509,8 @@ fi
 | `make run-websocket-messages-tests` | — | Runs `rsnano_websocket_messages` unit tests |
 | `make run-websocket-client-tests` | — | Runs `rsnano_websocket_client` unit tests |
 | `make run-websocket-server-tests` | — | Runs `rsnano_websocket_server` unit tests |
+| `make build-lmdb-to-nvme` | — | Builds the host-side [`tools/lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) binary (`x86_64`) for migrating a Nano `data.ldb` snapshot directly to NVMe sectors |
+| `make build-nvme-snapshot` | — | Builds the host-side [`tools/nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) binary (`x86_64`) for dumping a compact raw ledger snapshot from a synced NVMe SSD (`dump`), inspecting it (`info`), and restoring it to an NVMe SSD (`restore`) |
 | `make build-stress` | — | Builds the host-side `tools/nano-stress` binary (`x86_64`) |
 | `make run-stress` / `make stress` | — | **Network stress test** — streams blocks to the node on port `7075` |
 | `make run-picocom` | — | Captures serial console output from `/dev/ttyUSB0` to `orpi.log` |
@@ -608,6 +639,134 @@ When pruning runs ([`LedgerPruning::ledger_pruning`](file:///mnt/data/rust-works
 
 In a bare-metal environment with an incomplete ledger during initial sync, public representatives may appear to have 0 weight locally until their account chains are synced. Setting `representative_vote_weight_minimum = "0"` under `[node]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) allows observing all voting representatives during initial sync.
 
+## Fast Ledger Bootstrap: Direct LMDB to NVMe Migration (`tools/lmdb-to-nvme`)
+
+Syncing 220M+ blocks from scratch over P2P bootstrap can take many hours. If you have a standard C++ `nano_node` or `rsnano` LMDB ledger snapshot (`data.ldb`), you can attach the 1 TB NVMe SSD to a Linux workstation (e.g. via a USB-C NVMe enclosure at `/dev/sda`) and use [`tools/lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) ([`tools/lmdb_to_nvme.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb_to_nvme.sh)) to convert and write the entire ledger directly onto the raw NVMe sectors in minutes.
+
+### 1. How the Two-Pass Streaming Converter Works
+
+Standard Nano nodes store their ledger in an LMDB file (`data.ldb`) with separate named sub-databases (`accounts`, `blocks`, `confirmation_height`, `pending`, `rep_weights`, `online_weight`, `peers`, `version`), whereas `barely-nano` uses a bare-metal 16-shard Slotted-Page B-Tree (`53 GB` per shard, `4 KB` pages, 1-byte `table_id` key prefix) plus a `64 MB` on-disk `BlockBloom` filter.
+
+Instead of performing random 4 KB B-Tree insertions across 220M+ records (which would cause severe SSD write amplification), [`tools/lmdb-to-nvme/src/main.rs`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs) executes a **2-pass parallel streaming pipeline**:
+
+1. **Startup Self-Test (`verify_btree_builder_self_test`):** Before touching any disk sectors, the tool constructs an in-memory multi-level B-Tree of 5,000 entries and verifies that every page passes `barely-nano`'s exact [`!page_is_full`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage.rs#L1127-L1136) invariant and binary-search lookup semantics.
+2. **Pass 1 — Parallel Sequential `data.ldb` Leaf Scan:** Memory-maps `data.ldb` (`PROT_READ`, `MAP_PRIVATE`, `MADV_SEQUENTIAL`) and scans all 4 KB LMDB pages across all CPU cores (~6 GiB/s). Valid leaf pages (`mp_flags == 0x02`, `mp_pgno == pgno`) are parsed and each record is classified by its exact `(key_len, val_len)` and inner sub-tree root page numbers into:
+   - `accounts` (`TABLE_ID = 1`, 32B key $\rightarrow$ 129B value)
+   - `blocks` (`TABLE_ID = 2`, 32B key $\rightarrow$ block + sideband value, rotating the 32-byte `successor` inside the sideband to the final 32 bytes to match [`Block::deserialize_with_sideband`](file:///mnt/data/rust-workspace/barely-nano/core/src/blocks/mod.rs#L334-L361))
+   - `confirmation_height` (`TABLE_ID = 3`, 32B key $\rightarrow$ 40B value)
+   - `pruned` (`TABLE_ID = 5`, 32B key $\rightarrow$ 0B value, populated when `--prune` is enabled or if the source `data.ldb` contains pre-existing pruned hashes)
+   - `peers` (`TABLE_ID = 6`, 18B key $\rightarrow$ 8B value)
+   - `pending` (`TABLE_ID = 7`, 64B key $\rightarrow$ 49B value)
+   - `online_weight` (`TABLE_ID = 9`, 8B key $\rightarrow$ 16B value)
+   - `rep_weights` (`TABLE_ID = 12`, 32B key $\rightarrow$ 16B value)
+3. **Optional Full-History Pruning (`--prune` / `--prune-depth` / `--prune-age`):**
+   - When `--prune` is passed, right after Pass 1 the tool builds a 4,096-bucket in-memory [`ConfHeightIndex`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs#L878-L999) in parallel across all 16 shards (~1.5s).
+   - During Pass 2, each block's `(account, height, timestamp, successor)` is inspected directly from its raw LMDB bytes in $O(1)$ time via [`should_prune_block`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs#L1003-L1059).
+   - The Genesis block, any account head block (`successor == 0`), any unconfirmed block (`height > confirmed_height`), and the top `--prune-depth` confirmed blocks (`height > confirmed_height - max_depth`, default `1` = confirmed frontier) are retained in `TABLE_BLOCKS (2)`.
+   - All older confirmed blocks (`1 ..= confirmed_height - max_depth`) are omitted from `TABLE_BLOCKS (2)` and streamed in sorted order into `TABLE_PRUNED (5)` (`0`-byte value), reducing total NVMe B-Tree storage by **~65%** while recording exact `(account_count, block_count, confirmed_count, pruned_count)` in `CACHCNTS`.
+4. **Pass 2 — Per-Shard 256-Bucket Parallel Radix Sort & Bottom-Up B-Tree Construction:**
+   - Processes all 16 shards (`shard_idx = (key[1] >> 4)`), running Shard `4` last (`b'C' >> 4 == 4`) so that `TABLE_VERSION = 11` receives the exact deduplicated global `CACHCNTS` (`account_count`, `block_count`, `confirmed_count`, `pruned_count`).
+   - Within each `(shard, table)`, records are partitioned by their next key byte into 256 strictly ordered sub-buckets, sorted in parallel across all CPU threads, and deduplicated so only the newest LMDB Copy-On-Write record for each key survives.
+   - [`StreamingBTreeBuilder`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs#L228-L353) packs sorted records into 4 KB leaf and internal pages at an **~88% fill factor** (`PAGE_TARGET_USED = 3584` bytes, `dead_bytes = 0`, leaving headroom so runtime mutations never trigger an unsplit `page_is_full`) and flushes them in **16 MB sequential chunks** to `/dev/sda`.
+5. **64 MB `BlockBloom` Filter & Global Storage Header:**
+   - Every unique 32-byte block hash (both full and pruned) sets its bit positions in the 64 MB `BlockBloom` filter written to `BLOOM_DATA_LBA = 524,296` and `BLOOM_HEADER_LBA = 524,288` (`MAGIC = 0x424C4F4D56320006`), enabling $O(1)$ negative block lookups immediately on boot.
+   - Zeroes both WAL area headers (`wal_base` and `wal_base + wal_pages / 2`) for every shard and writes the master `STORAGE_MAGIC = 0x5348415244534834` (`"SHARDSH4"`) header to `STORAGE_BASE_LBA = 1,048,576` (`512 MB` offset) last.
+   - **Hardware Wallet Preservation:** The isolated hardware wallet region at `WALLET_STORAGE_LBA = 786,432` (`384 MB` offset) is never touched, preserving any existing encrypted representative or wallet keys on the NVMe drive.
+
+### 2. Step-by-Step Usage (`tools/lmdb_to_nvme.sh`)
+
+1. Place your downloaded Nano LMDB snapshot at `database/data.ldb` (or pass any path as the first argument).
+2. Connect the Orange Pi RV2's 1 TB NVMe SSD to your host machine via a USB-C NVMe adapter and verify its block device path (e.g. `/dev/sda`) using `lsblk`.
+3. **(Optional) Dry Run:** Validate the `data.ldb` file and inspect page classification (and pruning index statistics when `--prune` is passed) without writing to any block device:
+   ```bash
+   ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --dry-run
+   ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --prune --dry-run
+   ```
+4. **Flash Ledger to NVMe (Full or Pruned):** Run the wrapper script (it automatically builds the release binary via `make build-lmdb-to-nvme` and elevates via `sudo` if `/dev/sda` requires root write permissions):
+   ```bash
+   # Option A: Migrate full unpruned ledger
+   ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda
+
+   # Option B: Prune history on the fly (retains confirmed frontier + unconfirmed blocks per account)
+   ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --prune
+
+   # Option C: Prune history keeping the latest 5 confirmed blocks per account (or blocks newer than 48h)
+   ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --prune --prune-depth 5
+   ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --prune --prune-age 172800
+   ```
+5. Ensure `wipe_blocks = false` under `[bare_metal]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml), re-insert the NVMe SSD into the Orange Pi RV2, and boot the board. The node will detect `STORAGE_MAGIC` (`"SHARDSH4"`) and `BLOOM_MAGIC` (`"BLOMV2"`), load the exact block/cemented/account/pruned counts from `CACHCNTS` (automatically enabling `enable_pruning` if `pruned_count > 0`), and immediately join live consensus at the snapshot frontier.
+
+## Direct NVMe Ledger Snapshot & Restore (`tools/nvme-snapshot`)
+
+Once your Orange Pi RV2 has finished syncing the live Nano ledger on its NVMe SSD, you can attach the NVMe SSD to a Linux host over USB-C (e.g. `/dev/sda`) and use [`tools/nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) ([`tools/nvme_snapshot.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme_snapshot.sh)) to export a **compact, checksummed raw ledger snapshot file (`BNSNAPV1`)** or restore a snapshot file directly onto any target NVMe SSD in minutes.
+
+### 1. How Sparse-Shard Snapshot Streaming & WAL Replay Works
+
+On a 1 TB NVMe drive, the 16 B-Tree shards are spaced ~60 GB apart across the 1 TB LBA address space (`shard_size = 15,615,908` pages per shard), even though the allocated B-Tree pages (`0 .. next_free_page`) occupy only **~90.4 GiB total** (`~5.65 GiB` per shard) for an unpruned ledger or **~30 GiB total** for a pruned ledger.
+
+Instead of `dd`-ing 1,000 GB of mostly unallocated sectors, [`tools/nvme-snapshot/src/main.rs`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot/src/main.rs) operates directly on `barely-nano`'s native storage structures:
+
+1. **Non-Destructive In-Memory WAL Replay on Dump (`collect_wal_overlay`):**
+   - Opens `/dev/sda` strictly **read-only (`O_RDONLY`)** during `dump` and `info`.
+   - Inspects both 128 MB WAL areas (`wal_base` and `wal_base + wal_pages / 2`) using `barely-nano`'s exact `WAL_DESC` (`0x57414C5F44455343`), `WAL_CMIT` (`0x57414C5F434D4954`), and 64-bit checksum verification (`common/src/storage/wal.rs`).
+   - If the board was powered off while a committed WAL batch had not yet been checkpointed to its home shard pages, those pages are overlaid in memory while streaming the snapshot—guaranteeing a **100% transactionally consistent snapshot** without modifying a single sector on the source NVMe.
+2. **Sparse-Shard 16 MB Sequential Streaming (`BNSNAPV1` Format):**
+   - Reads the 4 KB `STORAGE_MAGIC` (`"SHARDSH4"`) header at `STORAGE_BASE_LBA = 1,048,576` (`512 MB` mark), extracts `CACHCNTS` (`account_count`, `block_count`, `confirmed_count`, `pruned_count`) from Shard 4's B-Tree, and reads each shard's `MetaData` page (`0xBEEFCB03`).
+   - Streams only the allocated pages `0 .. next_free_page` from each of the 16 shards (plus the `64 MB` `BlockBloom` filter at `BLOOM_HEADER_LBA = 524,288`) in **16 MB sequential chunks**, packing them contiguously into the output `.snap` file (~90.4 GiB unpruned vs. 1,000 GB raw disk).
+3. **End-to-End 64-Bit Integrity Checksums:**
+   - Computes a 64-bit checksum over the 64 MB `BlockBloom` region, each of the 16 B-Tree shard payloads, the optional 16.25 MB wallet partition, and the 4 KB `BNSNAPV1` file header itself.
+   - During `restore`, every region's checksum and `BTREE_META_MAGIC` (`0xBEEFCB03`) are verified before committing `STORAGE_MAGIC` (`"SHARDSH4"`) to the target NVMe.
+4. **Cross-Drive Capacity Portability on Restore:**
+   - When restoring onto a different-sized NVMe SSD (e.g. restoring a snapshot taken from a 1 TB NVMe onto a 256 GB or 512 GB NVMe), `restore` queries the target drive's sector count via `BLKGETSIZE64`, computes the target drive's `shard_size`, `wal_base`, and `wal_pages`, verifies that every shard's `next_free_page` fits within the target `shard_size`, and writes each shard `0..16` to its proper target `base_page = 1 + i * (target_shard_size + 1)`.
+5. **Hardware Wallet Isolation (`--include-wallets` Optional):**
+   - By default, both `dump` and `restore` **skip** the isolated hardware wallet partition at `WALLET_STORAGE_LBA = 786,432` (`384 MB` mark), so restoring a ledger snapshot onto a node never overwrites its eFuse-encrypted representative or wallet keys. Pass `--include-wallets` to include or restore the 16.25 MB wallet B-Tree + redo journal when cloning an entire node onto the same board.
+
+### 2. `BNSNAPV1` Raw Snapshot File Layout
+
+Every `.snap` file generated by `nvme-snapshot dump` uses a deterministic, page-aligned (`4 KB`) binary container (`SNAP_MAGIC = 0x3156_5041_4E53_4E42`, `"BNSNAPV1"`):
+
+| File Offset | Size | Region | Description |
+| :--- | :--- | :--- | :--- |
+| `0x0000_0000` | `4 KB` (`1` page) | **`BNSNAPV1` Header** | Magic (`"BNSNAPV1"`), flags (`FLAG_HAS_BLOOM`, `FLAG_HAS_WALLETS`, `FLAG_PRUNED`), timestamp, source `shard_size` & `wal_epoch`, cached ledger counts (`accounts`, `blocks`, `confirmed`, `pruned`), 64-bit region checksums, and 16 × 32-byte [`ShardDescriptor`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot/src/main.rs#L67-L74) entries (`root_page_id`, `next_free_page`, `first_free_page`, `file_offset_bytes`, `checksum`) |
+| `0x0000_1000` | `64 MB + 4 KB` (`16,385` pages) | **`BlockBloom` Filter** | Raw copy of `BLOOM_HEADER_LBA` (`524,288`) + `BLOOM_DATA_LBA` (`524,296`, `64 MB` bitset) for instant $O(1)$ negative block lookups on boot |
+| *(Optional)* | `16.25 MB` (`4,161` pages) | **Wallet Partition** | Present only when `--include-wallets` is passed; holds `WALLET_STORAGE_LBA` (`786,432`, `4,096` B-Tree pages + `1` header + `64` journal pages) |
+| Contiguous | `next_free_page × 4 KB` per shard | **Shards `0..15` B-Tree Pages** | Only the allocated pages (`0 .. next_free_page`) of each of the 16 B-Tree shards (~90.4 GiB total unpruned / ~30 GiB pruned), with any committed WAL pages already overlaid in place |
+
+### 3. Step-by-Step Usage (`tools/nvme_snapshot.sh`)
+
+1. Power off the Orange Pi RV2, move the NVMe SSD into a USB-C NVMe enclosure on your Linux host, and check its device path with `lsblk` (e.g. `/dev/sda`).
+2. **Inspect the NVMe SSD (`info`):** View the live ledger counts (`accounts`, `blocks`, `confirmed`, `pruned`), WAL status, and allocated page counts per shard without modifying the drive:
+   ```bash
+   ./tools/nvme_snapshot.sh info /dev/sda
+   ```
+3. **Create a Raw Ledger Snapshot File from NVMe (`dump`):** Stream the synced NVMe ledger into a compact `.snap` file (automatically builds `nvme-snapshot` via `make build-nvme-snapshot` and requests `sudo` if `/dev/sda` requires root read access):
+   ```bash
+   # Optional: Dry-run validation to preview snapshot size without writing a file
+   ./tools/nvme_snapshot.sh dump /dev/sda database/nano_ledger.snap --dry-run
+
+   # Dump the synced ledger from /dev/sda to database/nano_ledger.snap
+   ./tools/nvme_snapshot.sh dump /dev/sda database/nano_ledger.snap
+
+   # Optional: Include the 16.25 MB hardware-bound wallet partition in the snapshot
+   ./tools/nvme_snapshot.sh dump /dev/sda database/nano_ledger.snap --include-wallets
+   ```
+4. **Inspect the Generated Snapshot File (`info`):**
+   ```bash
+   ./tools/nvme_snapshot.sh info database/nano_ledger.snap
+   ```
+5. **Write / Restore the Raw Snapshot File Back to an NVMe SSD (`restore`):**
+   ```bash
+   # Optional: Verify all 64-bit shard checksums and target NVMe capacity without writing to /dev/sda
+   ./tools/nvme_snapshot.sh restore database/nano_ledger.snap /dev/sda --dry-run
+
+   # Write the raw snapshot back onto /dev/sda (preserves target NVMe wallets at 384 MB by default)
+   ./tools/nvme_snapshot.sh restore database/nano_ledger.snap /dev/sda
+
+   # Optional: Also restore the wallet partition (only if restoring to the same OrangePi RV2 board)
+   ./tools/nvme_snapshot.sh restore database/nano_ledger.snap /dev/sda --include-wallets
+   ```
+6. Re-insert the NVMe SSD into the Orange Pi RV2 (with `wipe_blocks = false` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml)) and boot. The node will immediately mount all 16 shards and the 64 MB `BlockBloom` filter with zero WAL recovery needed.
+
 ## Network Stress Testing (`tools/nano-stress`)
 
 The repository provides a high-throughput stress testing tool (`tools/nano-stress`) to test node stability, B-Tree storage performance, and queue behavior under heavy load by generating cryptographically valid blocks and streaming them directly over TCP to port **7075**.
@@ -676,6 +835,6 @@ make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
 - [`websocket_messages/`](file:///mnt/data/rust-workspace/barely-nano/websocket_messages), [`websocket_client/`](file:///mnt/data/rust-workspace/barely-nano/websocket_client), [`websocket_server/`](file:///mnt/data/rust-workspace/barely-nano/websocket_server) — Bare-metal `no_std` WebSocket envelopes, client, and real-time event broadcast server.
 - [`nullables/`](file:///mnt/data/rust-workspace/barely-nano/nullables) — Hardware/OS abstraction crates (`sha` RVV/Zbb crypto, `clock`, `random`, `tcp`, `http_client`, `output_tracker`) with nullable test doubles.
 - [`stats/`](file:///mnt/data/rust-workspace/barely-nano/stats) & [`work/`](file:///mnt/data/rust-workspace/barely-nano/work) — Node statistics collector and PoW work generation/validation.
-- [`tools/`](file:///mnt/data/rust-workspace/barely-nano/tools) — Host-side utilities: [`nano-stress`](file:///mnt/data/rust-workspace/barely-nano/tools/nano-stress) (P2P block streamer) and [`ws_subscribe.py`](file:///mnt/data/rust-workspace/barely-nano/tools/ws_subscribe.py) (WebSocket topic subscriber).
+- [`tools/`](file:///mnt/data/rust-workspace/barely-nano/tools) — Host-side utilities: [`lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) & [`lmdb_to_nvme.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb_to_nvme.sh) (direct `data.ldb` to raw NVMe B-Tree + Bloom migration tool), [`nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) & [`nvme_snapshot.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme_snapshot.sh) (direct NVMe to compact raw ledger snapshot dump & restore tool), [`nano-stress`](file:///mnt/data/rust-workspace/barely-nano/tools/nano-stress) (P2P block streamer), and [`ws_subscribe.py`](file:///mnt/data/rust-workspace/barely-nano/tools/ws_subscribe.py) (WebSocket topic subscriber).
 - [`u-boot-orangepi-k1/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-orangepi-k1) — Git submodule pointing to [`caiovini/u-boot-orangepi-k1`](https://github.com/caiovini/u-boot-orangepi-k1.git) (`CONFIG_API=y` U-Boot tree and `prebuilt/` bootloader images for Orange Pi RV2).
 - [`linker-smode.ld`](file:///mnt/data/rust-workspace/barely-nano/linker-smode.ld) — S-mode linker script mapping physical memory layout for the Orange Pi RV2.

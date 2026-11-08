@@ -68,8 +68,10 @@ impl<'a> FrontierChecker<'a> {
         // Check if account exists in our ledger
         if let Some((account, info)) = &self.account_crawler.current {
             if *account == frontier.account {
-                // Check for frontier mismatch
-                if info.head != frontier.hash {
+                // Check for frontier mismatch or missing local head block
+                if info.head != frontier.hash
+                    || (!cfg!(test) && !rsnano_ledger::block_may_exist(&frontier.hash))
+                {
                     // Check if frontier block exists in our ledger
                     if !self.any.block_exists_or_pruned(&frontier.hash) {
                         return FrontierCheckResult::Outdated; // Frontier is outdated
