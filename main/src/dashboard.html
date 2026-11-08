@@ -588,12 +588,12 @@ canvas {
 
           <div class="form-grid" style="margin-bottom:0">
             <div>
-              <label>Amount (NANO)</label>
-              <input id="pos-amount" type="number" step="any" min="0.000001" value="0.1">
+              <label>Value to Receive (NANO)</label>
+              <input id="pos-amount" type="number" step="any" min="0.000001" value="0.1" oninput="updatePosAmountLive()">
             </div>
             <div>
               <label>Order / Invoice Reference (Optional)</label>
-              <input id="pos-memo" placeholder="e.g. Order #1042">
+              <input id="pos-memo" placeholder="e.g. Order #1042" oninput="updatePosAmountLive()">
             </div>
           </div>
 
@@ -648,10 +648,14 @@ canvas {
 
           <div style="width:100%;max-width:460px;text-align:left">
             <label>Ephemeral Payment Address (<span id="pos-pow-status" style="color:var(--accent)">PoW: Idle</span>)</label>
-            <div class="input-group">
+            <div class="input-group" style="margin-bottom:8px">
               <input id="pos-eph-account" readonly placeholder="nano_..." style="font-size:12px">
-              <button class="btn btn-sec" onclick="copyPosField('addr')">Copy</button>
-              <button class="btn btn-sec" onclick="copyPosField('uri')">URI</button>
+              <button class="btn btn-sec" onclick="copyPosField('addr')">Copy Addr</button>
+            </div>
+            <label>QR Code Payload (Address + Value in Raw)</label>
+            <div class="input-group">
+              <input id="pos-eph-uri" readonly placeholder="nano:nano_...?amount=..." style="font-size:11px;color:var(--accent)">
+              <button class="btn btn-sec" onclick="copyPosField('uri')">Copy URI</button>
             </div>
           </div>
 
@@ -1209,6 +1213,26 @@ function posLog(msg) {
 
 function setPosAmount(val) {
   document.getElementById('pos-amount').value = val;
+  updatePosAmountLive();
+}
+
+function updatePosAmountLive() {
+  const amountStr = (document.getElementById('pos-amount').value || '0').trim();
+  const amountRaw = nanoToRawStr(amountStr);
+  const amountNano = rawToNanoStr(amountRaw);
+  document.getElementById('pos-disp-amount').textContent = amountNano;
+  if (!posActive || posActive.status !== 'WAITING') return;
+  const memo = document.getElementById('pos-memo').value.trim() || posActive.memo;
+  posActive.memo = memo;
+  posActive.amountRaw = amountRaw;
+  posActive.amountNano = amountNano;
+  posActive.uri = `nano:${posActive.account}?amount=${amountRaw}`;
+  document.getElementById('pos-eph-uri').value = posActive.uri;
+  const merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+  posActive.merchantDest = merchantDest;
+  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
+  renderQrCodeToCanvas(posActive.uri, document.getElementById('pos-qr'));
+  savePosHistory();
 }
 
 function savePosSettings() {
@@ -1216,6 +1240,7 @@ function savePosSettings() {
     const dest = document.getElementById('pos-merchant-dest').value.trim();
     if (dest) localStorage.setItem('barely_nano_pos_dest', dest);
   } catch (_) {}
+  updatePosAmountLive();
 }
 
 function savePosHistory() {
@@ -1225,14 +1250,14 @@ function savePosHistory() {
   renderPosHistory();
 }
 
-function initPosTab() {
+async function initPosTab() {
   try {
     const savedDest = localStorage.getItem('barely_nano_pos_dest');
     const destInput = document.getElementById('pos-merchant-dest');
     if (savedDest && !destInput.value) {
       destInput.value = savedDest;
     } else if (!destInput.value) {
-      fillPosFromWallet();
+      await fillPosFromWallet();
     }
     const savedHist = localStorage.getItem('barely_nano_pos_history');
     if (savedHist && posHistory.length === 0) {
@@ -1241,7 +1266,7 @@ function initPosTab() {
   } catch (_) {}
   renderPosHistory();
   if (!posActive) {
-    drawPosPlaceholderQr();
+    createPosPayment();
   }
 }
 
@@ -1284,7 +1309,7 @@ function togglePosPrivKey() {
 }
 
 async function createPosPayment() {
-  const amountStr = (document.getElementById('pos-amount').value || '0').trim();
+  const amountStr = (document.getElementById('pos-amount').value || '0.1').trim();
   const amountRaw = nanoToRawStr(amountStr);
   if (BigInt(amountRaw) <= 0n) {
     return alert('Enter a payment amount greater than 0 NANO');
@@ -1294,9 +1319,6 @@ async function createPosPayment() {
   if (autoSweep && !merchantDest) {
     await fillPosFromWallet();
     merchantDest = document.getElementById('pos-merchant-dest').value.trim();
-  }
-  if (autoSweep && !merchantDest.startsWith('nano_')) {
-    return alert('Enter a valid Merchant Settlement Account (nano_...) or uncheck Auto-sweep');
   }
   savePosSettings();
 
@@ -1345,8 +1367,9 @@ async function createPosPayment() {
   }
 
   document.getElementById('pos-disp-amount').textContent = posActive.amountNano;
-  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • Sweep -> ${merchantDest ? merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
   document.getElementById('pos-eph-account').value = posActive.account;
+  document.getElementById('pos-eph-uri').value = posActive.uri;
   document.getElementById('pos-privkey-box').style.display = 'none';
   document.getElementById('pos-cancel-btn').disabled = false;
   document.getElementById('pos-check-btn').disabled = false;
@@ -1359,7 +1382,8 @@ async function createPosPayment() {
 
   renderQrCodeToCanvas(uri, document.getElementById('pos-qr'));
   posLog(`Ephemeral Address ready: ${posActive.account}`);
-  posLog(`Expected: ${posActive.amountNano} NANO (${posActive.amountRaw} raw)`);
+  posLog(`QR Code URI: ${uri}`);
+  posLog(`Value to receive: ${posActive.amountNano} NANO (${posActive.amountRaw} raw)`);
 
   // Precompute Open-Block PoW in browser WASM so receiving is instant when customer pays!
   document.getElementById('pos-pow-status').textContent = 'Precomputing Open PoW in WASM...';
