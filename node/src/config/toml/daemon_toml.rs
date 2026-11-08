@@ -15,6 +15,8 @@ pub struct BareMetalToml {
     pub gateway: Option<String>,
     pub dns_server: Option<String>,
     pub wipe_blocks: Option<bool>,
+    pub dashboard_enable: Option<bool>,
+    pub dashboard_port: Option<u16>,
 }
 
 #[derive(Deserialize, Serialize)]

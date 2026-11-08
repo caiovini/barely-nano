@@ -28,6 +28,8 @@ pub struct BareMetalNetConfig {
     pub rpc_port: u16,
     pub rpc_enable: bool,
     pub rpc_enable_control: bool,
+    pub dashboard_port: u16,
+    pub dashboard_enable: bool,
 }
 
 impl Default for BareMetalNetConfig {
@@ -42,6 +44,8 @@ impl Default for BareMetalNetConfig {
             rpc_port: 7076,
             rpc_enable: true,
             rpc_enable_control: true,
+            dashboard_port: 7080,
+            dashboard_enable: true,
         }
     }
 }
@@ -56,6 +60,8 @@ pub static NET_CONFIG: Mutex<BareMetalNetConfig> = Mutex::new(BareMetalNetConfig
     rpc_port: 7076,
     rpc_enable: true,
     rpc_enable_control: true,
+    dashboard_port: 7080,
+    dashboard_enable: true,
 });
 
 pub fn set_net_config(cfg: BareMetalNetConfig) {
@@ -146,6 +152,7 @@ pub struct NetworkContext<'a> {
     pub peering_handle: smoltcp::iface::SocketHandle,
     pub udp_handle: smoltcp::iface::SocketHandle,
     pub rpc_handle: smoltcp::iface::SocketHandle,
+    pub dashboard_handle: smoltcp::iface::SocketHandle,
     pub sockets_to_drop: alloc::vec::Vec<smoltcp::iface::SocketHandle>,
 }
 
@@ -456,6 +463,14 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         }
         let rpc_handle = sockets.add(tcp_rpc);
 
+        let tcp_rx_buffer_4 = TcpSocketBuffer::new(vec![0; 131072]);
+        let tcp_tx_buffer_4 = TcpSocketBuffer::new(vec![0; 163840]);
+        let mut tcp_dashboard = TcpSocket::new(tcp_rx_buffer_4, tcp_tx_buffer_4);
+        if net_cfg.dashboard_enable {
+            let _ = tcp_dashboard.listen(net_cfg.dashboard_port);
+        }
+        let dashboard_handle = sockets.add(tcp_dashboard);
+
         return Some(NetworkContext {
             iface,
             device,
@@ -466,6 +481,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
             peering_handle,
             udp_handle,
             rpc_handle,
+            dashboard_handle,
             sockets_to_drop: alloc::vec::Vec::new(),
         });
     }

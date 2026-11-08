@@ -172,6 +172,17 @@ static NODE_INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 /// Secondary harts wait for this before grabbing globals to avoid lock contention.
 static HART_DISPATCH_READY: AtomicBool = AtomicBool::new(false);
 pub static DB_PAGES_FREE: AtomicUsize = AtomicUsize::new(1024);
+static MON_DB_KB: AtomicUsize = AtomicUsize::new(0);
+static MON_CACHE_MB: AtomicUsize = AtomicUsize::new(0);
+static MON_PEERS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MON_PEERS_OUT: AtomicUsize = AtomicUsize::new(0);
+static MON_STAKE_NANO: AtomicUsize = AtomicUsize::new(0);
+static MON_BPS: AtomicUsize = AtomicUsize::new(0);
+static MON_CPS: AtomicUsize = AtomicUsize::new(0);
+static MON_HEAP_USED_MB: AtomicUsize = AtomicUsize::new(0);
+static MON_HEAP_FREE_MB: AtomicUsize = AtomicUsize::new(0);
+static MON_SLAB_MB: AtomicUsize = AtomicUsize::new(0);
+static BOOT_MTIME: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static HEAP_MAGIC: AtomicUsize = AtomicUsize::new(0);
 const MAGIC_VAL: usize = 0xACE1FEED;
 static NODE: spin::Mutex<Option<NodeWrapper>> = spin::Mutex::new(None);
@@ -696,6 +707,12 @@ fn boot_hart_main(hart_id: usize) {
                     if let Ok(dns) = core::net::Ipv4Addr::from_str(dns_str) {
                         net_cfg.dns_server = dns.octets();
                     }
+                }
+                if let Some(dash_en) = bm.dashboard_enable {
+                    net_cfg.dashboard_enable = dash_en;
+                }
+                if let Some(dash_port) = bm.dashboard_port {
+                    net_cfg.dashboard_port = dash_port;
                 }
             }
             kernel_common::net::set_net_config(net_cfg);
@@ -1449,6 +1466,451 @@ fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Nod
     }
 }
 
+static DASHBOARD_HTML: &[u8] = include_bytes!("dashboard.html");
+static NANO_STRESS_WASM_GZ: &[u8] = include_bytes!(
+    "../../tools/nano-stress/wasm/target/wasm32-unknown-unknown/release/nano_stress_wasm.wasm.gz"
+);
+static DASH_ACTIVE_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DASH_RX_LEN: AtomicUsize = AtomicUsize::new(0);
+static mut DASH_RX_BUF: [u8; 65536] = [0u8; 65536];
+
+fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
+    let mut i = 0;
+    while i + 1 < buf.len() {
+        if i + 3 < buf.len()
+            && buf[i] == b'\r'
+            && buf[i + 1] == b'\n'
+            && buf[i + 2] == b'\r'
+            && buf[i + 3] == b'\n'
+        {
+            return Some((i, i + 4));
+        }
+        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
+            return Some((i, i + 2));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_http_content_length(headers_str: &str) -> Option<usize> {
+    for line in headers_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= 15
+            && trimmed.as_bytes()[..15].eq_ignore_ascii_case(b"content-length:")
+        {
+            if let Ok(len) = trimmed[15..].trim().parse::<usize>() {
+                return Some(len);
+            }
+        }
+    }
+    None
+}
+
+fn is_raw_http_complete(buf: &[u8]) -> Option<(usize, usize)> {
+    let (hdr_end, body_start) = find_http_header_end(buf)?;
+    let headers_str = core::str::from_utf8(&buf[..hdr_end]).ok()?;
+    if headers_str.starts_with("GET ") || headers_str.starts_with("OPTIONS ") {
+        return Some((hdr_end, body_start));
+    }
+    if let Some(expected_len) = parse_http_content_length(headers_str) {
+        if buf.len().saturating_sub(body_start) >= expected_len {
+            return Some((hdr_end, body_start));
+        }
+        return None;
+    }
+    let body = &buf[body_start..];
+    if !body.is_empty() && body.ends_with(b"}") {
+        return Some((hdr_end, body_start));
+    }
+    None
+}
+
+fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
+    let now = kernel_common::clint::mtime();
+    let boot = BOOT_MTIME.load(Ordering::Relaxed);
+    let uptime_sec = if boot > 0 && now >= boot {
+        (now - boot) / CLINT_FREQ
+    } else {
+        now / CLINT_FREQ
+    };
+
+    let blocks_stored = node.ledger.block_count();
+    let blocks_confirmed = node.ledger.confirmed_count();
+    let unchecked = node.unchecked.len();
+    let bpq_len = node.block_processor.total_queue_len();
+    let confirming_set_len = node.confirming_set.len();
+    let active_elections = node.active.try_read().map(|a| a.len()).unwrap_or(0);
+
+    let bp = &rsnano_node::block_processing::BLOCK_PROF;
+    let bp_ms = |i: usize| (bp[i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    let bp_n = |i: usize| bp[i].load(Ordering::Relaxed) as usize;
+
+    let ws = &kernel_common::storage::wal::WAL_STATS;
+    let wal_ckpts = ws[0].load(Ordering::Relaxed);
+    let wal_pages = ws[1].load(Ordering::Relaxed);
+    let wal_applied = ws[2].load(Ordering::Relaxed);
+    let wal_ms = (ws[3].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+
+    let h1_ms = |i: usize| (HART1_PROF[i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+
+    let body = alloc::format!(
+        "{{\"network\":\"{}\",\"uptime_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{}}}",
+        node.network_params.network.current_network.as_str(),
+        uptime_sec,
+        blocks_stored,
+        blocks_confirmed,
+        unchecked,
+        bpq_len,
+        confirming_set_len,
+        active_elections,
+        MON_BPS.load(Ordering::Relaxed),
+        MON_CPS.load(Ordering::Relaxed),
+        MON_PEERS_TOTAL.load(Ordering::Relaxed),
+        MON_PEERS_OUT.load(Ordering::Relaxed),
+        MON_STAKE_NANO.load(Ordering::Relaxed),
+        MON_HEAP_USED_MB.load(Ordering::Relaxed),
+        MON_HEAP_FREE_MB.load(Ordering::Relaxed),
+        MON_SLAB_MB.load(Ordering::Relaxed),
+        MON_DB_KB.load(Ordering::Relaxed),
+        MON_CACHE_MB.load(Ordering::Relaxed),
+        DB_PAGES_FREE.load(Ordering::Relaxed),
+        wal_ckpts,
+        wal_pages,
+        wal_applied,
+        wal_ms,
+        bp_ms(0),
+        bp_ms(1),
+        bp_ms(2),
+        bp_n(3),
+        bp_n(4),
+        bp_n(5),
+        h1_ms(0),
+        h1_ms(1),
+        h1_ms(2),
+        h1_ms(3),
+    );
+
+    alloc::format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn format_dashboard_wallets_json(node: &Arc<Node>) -> String {
+    use core::fmt::Write;
+    use rsnano_ledger::LedgerSet;
+    let wallet_ids = node.wallets.wallet_ids();
+    let any = node.ledger.any();
+    let mut body = String::from("{\"wallets\":[");
+    for (w_idx, wid) in wallet_ids.iter().enumerate() {
+        if w_idx > 0 {
+            body.push(',');
+        }
+        let _ = write!(body, "{{\"id\":\"{}\",\"accounts\":[", wid.encode_hex());
+        if let Ok(accounts) = node.wallets.get_accounts_of_wallet(wid) {
+            for (a_idx, acc) in accounts.iter().enumerate() {
+                if a_idx > 0 {
+                    body.push(',');
+                }
+                let bal = any.account_balance(acc);
+                let rec = any.account_receivable(acc);
+                let _ = write!(
+                    body,
+                    "{{\"account\":\"{}\",\"balance\":\"{}\",\"receivable\":\"{}\"}}",
+                    acc.encode_account(),
+                    bal.number(),
+                    rec.number()
+                );
+            }
+        }
+        body.push_str("]}");
+    }
+    body.push_str("]}");
+
+    alloc::format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn handle_dashboard_stress_batch(
+    node: &Arc<Node>,
+    request_line: &str,
+    body: &[u8],
+) -> String {
+    if !node.network_params.network.is_dev_network() {
+        let err = "{\"error\":\"Stress test is only enabled on the dev network\"}";
+        return alloc::format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            err.len(),
+            err
+        );
+    }
+    let zero_pow = request_line.contains("zero_pow=1");
+    let autoconfirm = request_line.contains("autoconfirm=1");
+
+    let count = body.len() / 216;
+    let mut blocks = alloc::vec::Vec::with_capacity(count);
+    for i in 0..count {
+        let slice = &body[i * 216..(i + 1) * 216];
+        let mut reader = rsnano_core::utils::BufferReader::new(slice);
+        if let Ok(sb) = rsnano_core::StateBlock::deserialize(&mut reader) {
+            blocks.push(rsnano_core::Block::State(sb));
+        }
+    }
+
+    let t0 = kernel_common::clint::mtime();
+    let n = blocks.len();
+    let mut valid_flags = alloc::vec![true; n];
+    if zero_pow {
+        for b in &blocks {
+            b.set_pow_base_verified(true);
+        }
+    } else {
+        let mut i = 0;
+        while i + 4 <= n {
+            let group = [&blocks[i], &blocks[i + 1], &blocks[i + 2], &blocks[i + 3]];
+            let res = node.network_params.work.validate_entry_blocks_4(group);
+            valid_flags[i] = res[0];
+            valid_flags[i + 1] = res[1];
+            valid_flags[i + 2] = res[2];
+            valid_flags[i + 3] = res[3];
+            i += 4;
+        }
+        while i < n {
+            valid_flags[i] = node.network_params.work.validate_entry_block(&blocks[i]);
+            i += 1;
+        }
+    }
+    let t1 = kernel_common::clint::mtime();
+
+    let mut accepted = 0usize;
+    let mut rejected_pow = 0usize;
+    let mut queue_full = 0usize;
+    let mut vote_hashes = alloc::vec::Vec::new();
+
+    for (block, pow_ok) in blocks.into_iter().zip(valid_flags.into_iter()) {
+        if !pow_ok {
+            rejected_pow += 1;
+            continue;
+        }
+        let hash = block.hash();
+        let ctx = rsnano_node::block_processing::BlockContext::new(
+            block,
+            rsnano_node::block_processing::BlockSource::LiveOriginator,
+            rsnano_network::ChannelId::LOOPBACK,
+        );
+        if node.block_processor_queue.push(ctx) {
+            accepted += 1;
+            if autoconfirm && vote_hashes.len() < 255 {
+                vote_hashes.push(hash);
+            }
+        } else {
+            queue_full += 1;
+        }
+    }
+
+    if autoconfirm && !vote_hashes.is_empty() {
+        let vote = Arc::new(rsnano_core::Vote::new_final(
+            &rsnano_core::DEV_GENESIS_KEY,
+            vote_hashes,
+        ));
+        let _ = node.vote_processor_queue.enqueue(
+            vote,
+            None,
+            rsnano_core::VoteSource::Live,
+            None,
+        );
+    }
+    let t2 = kernel_common::clint::mtime();
+
+    let ticks_per_us = (CLINT_FREQ / 1_000_000).max(1);
+    let pow_us = (t1.wrapping_sub(t0)) / ticks_per_us;
+    let enq_us = (t2.wrapping_sub(t1)) / ticks_per_us;
+    let bpq_len = node.block_processor.total_queue_len();
+
+    let resp_body = alloc::format!(
+        "{{\"accepted\":{},\"rejected_pow\":{},\"queue_full\":{},\"pow_us\":{},\"enq_us\":{},\"bpq_len\":{}}}",
+        accepted,
+        rejected_pow,
+        queue_full,
+        pow_us,
+        enq_us,
+        bpq_len
+    );
+    alloc::format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        resp_body.len(),
+        resp_body
+    )
+}
+
+fn handle_dashboard_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Node>) {
+    let net_cfg = kernel_common::net::get_net_config();
+    if !net_cfg.dashboard_enable {
+        return;
+    }
+    use smoltcp::socket::tcp::{Socket as SmolTcpSocket, State as SmolTcpState};
+    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.dashboard_handle);
+    let now = kernel_common::clint::mtime();
+    match socket.state() {
+        SmolTcpState::Closed => {
+            DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+            DASH_RX_LEN.store(0, Ordering::Relaxed);
+            let _ = socket.listen(net_cfg.dashboard_port);
+        }
+        SmolTcpState::Listen => {
+            DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+            DASH_RX_LEN.store(0, Ordering::Relaxed);
+        }
+        SmolTcpState::TimeWait => {
+            DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+            DASH_RX_LEN.store(0, Ordering::Relaxed);
+            socket.abort();
+            let _ = socket.listen(net_cfg.dashboard_port);
+        }
+        SmolTcpState::FinWait1
+        | SmolTcpState::FinWait2
+        | SmolTcpState::Closing
+        | SmolTcpState::LastAck
+        | SmolTcpState::CloseWait => {
+            if socket.send_queue() == 0
+                && matches!(
+                    socket.state(),
+                    SmolTcpState::CloseWait | SmolTcpState::LastAck | SmolTcpState::Closing
+                )
+            {
+                DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+                DASH_RX_LEN.store(0, Ordering::Relaxed);
+                socket.abort();
+                let _ = socket.listen(net_cfg.dashboard_port);
+            } else {
+                let since = DASH_ACTIVE_SINCE.load(Ordering::Relaxed);
+                if since > 0 && now.wrapping_sub(since) > seconds(8) {
+                    DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+                    DASH_RX_LEN.store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.dashboard_port);
+                }
+            }
+        }
+        SmolTcpState::SynReceived => {
+            let since = DASH_ACTIVE_SINCE.load(Ordering::Relaxed);
+            if since == 0 {
+                DASH_ACTIVE_SINCE.store(now, Ordering::Relaxed);
+            } else if now.wrapping_sub(since) > seconds(5) {
+                DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+                DASH_RX_LEN.store(0, Ordering::Relaxed);
+                socket.abort();
+                let _ = socket.listen(net_cfg.dashboard_port);
+            }
+        }
+        SmolTcpState::Established => {
+            let since = DASH_ACTIVE_SINCE.load(Ordering::Relaxed);
+            if since == 0 {
+                DASH_ACTIVE_SINCE.store(now, Ordering::Relaxed);
+            } else if now.wrapping_sub(since) > seconds(8) {
+                DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+                DASH_RX_LEN.store(0, Ordering::Relaxed);
+                socket.abort();
+                let _ = socket.listen(net_cfg.dashboard_port);
+                return;
+            }
+
+            if socket.can_recv() {
+                // Drain incoming TCP segments into contiguous static buffer `DASH_RX_BUF`
+                // so multi-segment POST bodies (up to 64 KB) never wrap around smoltcp's ring buffer.
+                // SAFETY: Only Hart 1 accesses `DASH_RX_BUF` inside `handle_dashboard_server`.
+                let mut rx_len = DASH_RX_LEN.load(Ordering::Relaxed);
+                unsafe {
+                    let buf_ptr = core::ptr::addr_of_mut!(DASH_RX_BUF) as *mut u8;
+                    if rx_len < 65536 {
+                        let dst = core::slice::from_raw_parts_mut(buf_ptr.add(rx_len), 65536 - rx_len);
+                        if let Ok(read_n) = socket.recv_slice(dst) {
+                            rx_len += read_n;
+                            DASH_RX_LEN.store(rx_len, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+
+            let rx_len = DASH_RX_LEN.load(Ordering::Relaxed);
+            if rx_len == 0 {
+                return;
+            }
+            // SAFETY: Only Hart 1 reads `DASH_RX_BUF`.
+            let req_slice = unsafe {
+                let buf_ptr = core::ptr::addr_of!(DASH_RX_BUF) as *const u8;
+                core::slice::from_raw_parts(buf_ptr, rx_len)
+            };
+            let complete_opt = is_raw_http_complete(req_slice);
+            let Some((hdr_end, body_start)) = complete_opt else {
+                if rx_len < 65000 {
+                    return;
+                }
+                DASH_RX_LEN.store(0, Ordering::Relaxed);
+                let _ = socket.send_slice(b"HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n");
+                socket.close();
+                return;
+            };
+
+            let headers_str = core::str::from_utf8(&req_slice[..hdr_end]).unwrap_or("");
+            let first_line = headers_str.lines().next().unwrap_or("");
+            let content_len = parse_http_content_length(headers_str).unwrap_or(rx_len.saturating_sub(body_start));
+            let body_end = (body_start + content_len).min(rx_len);
+            let body_bytes = &req_slice[body_start..body_end];
+
+            if first_line.starts_with("OPTIONS ") {
+                let _ = socket.send_slice(
+                    b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+                );
+            } else if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
+                let hdr = alloc::format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                    DASHBOARD_HTML.len()
+                );
+                let _ = socket.send_slice(hdr.as_bytes());
+                let _ = socket.send_slice(DASHBOARD_HTML);
+            } else if first_line.starts_with("GET /nano_stress.wasm") {
+                let hdr = alloc::format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/wasm\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                    NANO_STRESS_WASM_GZ.len()
+                );
+                let _ = socket.send_slice(hdr.as_bytes());
+                let _ = socket.send_slice(NANO_STRESS_WASM_GZ);
+            } else if first_line.starts_with("GET /api/metrics") {
+                let resp = format_dashboard_metrics_json(&node);
+                let _ = socket.send_slice(resp.as_bytes());
+            } else if first_line.starts_with("GET /api/wallets") {
+                let resp = format_dashboard_wallets_json(&node);
+                let _ = socket.send_slice(resp.as_bytes());
+            } else if first_line.starts_with("POST /api/stress_batch") {
+                let resp = handle_dashboard_stress_batch(&node, first_line, body_bytes);
+                let _ = socket.send_slice(resp.as_bytes());
+            } else if first_line.starts_with("POST /api/rpc") || first_line.starts_with("POST / ") {
+                let req_str = core::str::from_utf8(req_slice).unwrap_or("");
+                let handler = RpcCommandHandler::new(node.clone(), net_cfg.rpc_enable_control);
+                let server = BareMetalRpcServer::new(handler);
+                if let Some(resp_str) = server.handle_request(req_str) {
+                    let _ = socket.send_slice(resp_str.as_bytes());
+                } else {
+                    let _ = socket.send_slice(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+                }
+            } else {
+                let _ = socket.send_slice(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+            }
+
+            DASH_RX_LEN.store(0, Ordering::Relaxed);
+            DASH_ACTIVE_SINCE.store(now, Ordering::Relaxed);
+            socket.close();
+        }
+        _ => {}
+    }
+}
+
 struct BareMetalDnsResolver;
 impl rsnano_network::AsyncDnsResolver for BareMetalDnsResolver {
     fn resolve(
@@ -1517,13 +1979,30 @@ fn run_storage_flush_and_monitor_loop(
         }
     }
     let mut cached_db_kb: usize = shard_pages.iter().sum::<usize>() * 4;
+    let cached_init_mb: usize = (shard_cached.iter().sum::<usize>() * 4) / 1024;
+    let free_init: usize = shard_free.iter().sum();
+    DB_PAGES_FREE.store(free_init, Ordering::Relaxed);
+    MON_DB_KB.store(cached_db_kb, Ordering::Relaxed);
+    MON_CACHE_MB.store(cached_init_mb, Ordering::Relaxed);
+    BOOT_MTIME.store(kernel_common::clint::mtime(), Ordering::Relaxed);
+    {
+        let (used, free) = {
+            let h = ALLOCATOR.0.lock();
+            (h.used(), h.free())
+        };
+        MON_HEAP_USED_MB.store(used / 1024 / 1024, Ordering::Relaxed);
+        MON_HEAP_FREE_MB.store(free / 1024 / 1024, Ordering::Relaxed);
+        MON_SLAB_MB.store(InterruptSafeAllocator::slab_cached_bytes() / 1024 / 1024, Ordering::Relaxed);
+    }
     let mut iterations = 0;
 
     // Initial OLED status render right after boot completes
     {
-        let peers = node_mon.network.try_read().map(|n| n.channels_info().total).unwrap_or(0);
+        let ch_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
+        MON_PEERS_TOTAL.store(ch_info.total, Ordering::Relaxed);
+        MON_PEERS_OUT.store(ch_info.outbound, Ordering::Relaxed);
         kernel_common::oled::update_status(
-            peers,
+            ch_info.total,
             last_stored_count as usize,
             last_confirmed_count as usize,
             0,
@@ -1556,9 +2035,12 @@ fn run_storage_flush_and_monitor_loop(
             let confirmed_now = node_mon.ledger.confirmed_count();
             let oled_bps = stored_now.saturating_sub(last_oled_stored) / 2;
             last_oled_stored = stored_now;
-            let peers = node_mon.network.try_read().map(|n| n.channels_info().total).unwrap_or(0);
+            let ch_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
+            MON_PEERS_TOTAL.store(ch_info.total, Ordering::Relaxed);
+            MON_PEERS_OUT.store(ch_info.outbound, Ordering::Relaxed);
+            MON_BPS.store(oled_bps as usize, Ordering::Relaxed);
             kernel_common::oled::update_status(
-                peers,
+                ch_info.total,
                 stored_now as usize,
                 confirmed_now as usize,
                 oled_bps as usize,
@@ -1594,19 +2076,34 @@ fn run_storage_flush_and_monitor_loop(
             let cache_mb = (cached_pages * 4) / 1024;
             cached_db_kb = db_kb;
 
-            let used = ALLOCATOR.0.lock().used();
+            let (used, free_heap) = {
+                let h = ALLOCATOR.0.lock();
+                (h.used(), h.free())
+            };
             let slab_mb = InterruptSafeAllocator::slab_cached_bytes() / 1024 / 1024;
             let stored_count = node_mon.ledger.block_count();
             let confirmed_count = node_mon.ledger.confirmed_count();
 
             let bps = stored_count.saturating_sub(last_stored_count) / 15;
-            let _cps = confirmed_count.saturating_sub(last_confirmed_count) / 15;
+            let cps = confirmed_count.saturating_sub(last_confirmed_count) / 15;
             last_stored_count = stored_count;
             last_confirmed_count = confirmed_count;
 
             let channels_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
             let online_stake = node_mon.online_reps.try_lock().map(|r| r.online_weight()).unwrap_or_default();
             let stake_nano = (online_stake.number() / (10u128.pow(30))) as usize;
+
+            DB_PAGES_FREE.store(free_pages, Ordering::Relaxed);
+            MON_DB_KB.store(db_kb, Ordering::Relaxed);
+            MON_CACHE_MB.store(cache_mb, Ordering::Relaxed);
+            MON_PEERS_TOTAL.store(channels_info.total, Ordering::Relaxed);
+            MON_PEERS_OUT.store(channels_info.outbound, Ordering::Relaxed);
+            MON_STAKE_NANO.store(stake_nano, Ordering::Relaxed);
+            MON_BPS.store(bps as usize, Ordering::Relaxed);
+            MON_CPS.store(cps as usize, Ordering::Relaxed);
+            MON_HEAP_USED_MB.store(used / 1024 / 1024, Ordering::Relaxed);
+            MON_HEAP_FREE_MB.store(free_heap / 1024 / 1024, Ordering::Relaxed);
+            MON_SLAB_MB.store(slab_mb, Ordering::Relaxed);
 
             if db_kb >= 1024 {
                 tracing::info!(
@@ -2400,6 +2897,7 @@ fn run_maintenance_and_network_loop(
             if let Some(ref mut ctx_val) = *ctx {
                 net_active = ctx_val.poll(mtime);
                 handle_rpc_server(ctx_val, node_arc.clone());
+                handle_dashboard_server(ctx_val, node_arc.clone());
 
                 if mtime - last_ping > seconds(5) {
                     let gw = kernel_common::net::get_net_config().gateway;

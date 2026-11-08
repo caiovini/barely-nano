@@ -21,6 +21,9 @@ ipv4_prefix_len = 24
 gateway = "192.168.1.1"
 # DNS resolver address
 dns_server = "192.168.1.1"
+# On-board Web Dashboard (Node Metrics, Wallet, and WebAssembly Stress Test)
+dashboard_enable = true
+dashboard_port = 7080
 
 [node]
 peering_port = 7075

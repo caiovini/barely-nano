@@ -27,6 +27,7 @@ env
 
 # Tools
 tools/nano-stress/target/
+tools/nano-stress/wasm/target/
 tools/*/target/
 
 # bin

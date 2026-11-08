@@ -1,0 +1,2036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Barely-Nano • RISC-V Bare-Metal Node Dashboard</title>
+<style>
+:root {
+  --bg: #0b0f17;
+  --panel: #131b2e;
+  --panel-alt: #19233c;
+  --border: #263554;
+  --text: #e2e8f0;
+  --muted: #8b9bb4;
+  --accent: #38bdf8;
+  --accent-hover: #0ea5e9;
+  --green: #22c55e;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.brand-logo {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #0284c7, #38bdf8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  color: #fff;
+  font-size: 18px;
+}
+.brand h1 { font-size: 17px; font-weight: 700; letter-spacing: 0.2px; }
+.brand span { font-size: 12px; color: var(--muted); display: block; }
+.status-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+.badge {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-weight: 600;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.badge.ok { color: var(--green); border-color: rgba(34,197,94,0.4); }
+.badge.warn { color: var(--amber); border-color: rgba(245,158,11,0.4); }
+nav {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.tab-btn {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 12px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+main {
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 20px 24px;
+}
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  min-width: 0;
+}
+.card-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.card-value {
+  font-size: 24px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--text);
+  word-break: break-word;
+}
+.card-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-family: var(--mono);
+}
+.row-2 {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+@media (max-width: 960px) {
+  .row-2 { grid-template-columns: 1fr; }
+}
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th, td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+td.mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+  align-items: start;
+}
+.form-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+  align-items: start;
+}
+label {
+  display: block;
+  font-size: 12px;
+  line-height: 16px;
+  height: 16px;
+  color: var(--muted);
+  margin-bottom: 6px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+label.chk-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: auto;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  cursor: pointer;
+  margin: 0;
+  line-height: 1.35;
+}
+label.chk-label input[type="checkbox"] {
+  width: auto;
+  height: auto;
+  flex-shrink: 0;
+  margin: 0;
+}
+.input-group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  height: 36px;
+}
+.input-group input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+}
+.input-group .btn {
+  flex-shrink: 0;
+  height: 36px;
+}
+input, select, textarea {
+  width: 100%;
+  height: 36px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0 10px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 34px;
+  min-width: 0;
+}
+textarea {
+  height: auto;
+  padding: 8px 10px;
+  line-height: 1.4;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  background: var(--accent);
+  color: #0b0f17;
+  border: none;
+  border-radius: 6px;
+  padding: 0 14px;
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.btn:hover { background: var(--accent-hover); color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-sec {
+  background: var(--panel-alt);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn-sec:hover { background: var(--border); }
+.btn-danger { background: var(--red); color: #fff; }
+.btn-green { background: var(--green); color: #052e16; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.log-box {
+  background: #070a10;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  height: 280px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #cbd5e1;
+}
+.progress-wrap {
+  width: 100%;
+  height: 10px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 10px 0;
+  border: 1px solid var(--border);
+}
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  width: 0%;
+  transition: width 0.15s;
+}
+canvas {
+  width: 100%;
+  height: 190px;
+  background: #080c14;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.pill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--mono);
+  background: var(--panel-alt);
+  color: var(--accent);
+}
+@media (max-width: 640px) {
+  header { padding: 10px 14px; gap: 8px; }
+  .brand h1 { font-size: 15px; }
+  .brand span { font-size: 11px; }
+  .status-bar { width: 100%; gap: 6px; }
+  .badge { padding: 3px 8px; font-size: 11px; }
+  nav { padding: 0 10px; gap: 2px; }
+  .tab-btn { flex: 1; text-align: center; padding: 10px 8px; font-size: 13px; }
+  main { padding: 12px; }
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .card { padding: 12px; }
+  .card-title { font-size: 11px; }
+  .card-value { font-size: 18px; }
+  .card-sub { font-size: 11px; }
+  .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .form-grid-3 { grid-template-columns: 1fr; gap: 10px; }
+  .form-grid .span-full { grid-column: 1 / -1; }
+  canvas { height: 150px; }
+  .log-box { height: 210px; font-size: 11px; padding: 10px; }
+  th, td { padding: 6px 8px; font-size: 12px; }
+}
+@media (max-width: 380px) {
+  .grid { grid-template-columns: 1fr; }
+  .form-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-logo">N</div>
+    <div>
+      <h1>Barely-Nano RISC-V Dashboard</h1>
+      <span>OrangePi RV2 (SpacemiT K1 8-Hart Bare-Metal • NVMe B-Tree Engine)</span>
+    </div>
+  </div>
+  <div class="status-bar">
+    <span id="hdr-net" class="badge">NET: --</span>
+    <span id="hdr-bps" class="badge ok">0 BPS / 0 CPS</span>
+    <span id="hdr-uptime" class="badge">UP: 0s</span>
+    <span id="hdr-status" class="badge ok">ONLINE</span>
+  </div>
+</header>
+
+<nav>
+  <button class="tab-btn active" id="nav-metrics-btn" onclick="switchTab('metrics', this)">Node Metrics</button>
+  <button class="tab-btn" id="nav-wallet-btn" onclick="switchTab('wallet', this)">Wallet</button>
+  <button class="tab-btn" id="nav-pos-btn" onclick="switchTab('pos', this)">PoS</button>
+  <button class="tab-btn" id="nav-stress-btn" style="display:none" onclick="switchTab('stress', this)">Stress Test</button>
+</nav>
+
+<main>
+  <!-- ==================== TAB 1: NODE METRICS ==================== -->
+  <section id="tab-metrics" class="tab-pane active">
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">Stored Blocks</div>
+        <div class="card-value" id="m-stored">0</div>
+        <div class="card-sub">Unchecked: <span id="m-unchecked">0</span> | BPQ: <span id="m-bpq">0</span></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Confirmed (Cemented)</div>
+        <div class="card-value" id="m-confirmed">0</div>
+        <div class="card-sub">Cemented: <span id="m-cem-pct">0%</span> | Queue: <span id="m-conf-q">0</span></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Live Throughput</div>
+        <div class="card-value"><span id="m-bps">0</span> <small style="font-size:13px;color:var(--muted)">bps</small></div>
+        <div class="card-sub">Confirm Rate: <span id="m-cps">0</span> cps</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Consensus & Peers</div>
+        <div class="card-value" id="m-peers">0</div>
+        <div class="card-sub">Active Elec: <span id="m-active">0</span> | Stake: <span id="m-stake">0</span>M</div>
+      </div>
+      <div class="card">
+        <div class="card-title">RAM & Slab Allocator</div>
+        <div class="card-value"><span id="m-heap">0</span> <small style="font-size:13px;color:var(--muted)">MB</small></div>
+        <div class="card-sub">Slab Cache: <span id="m-slab">0</span> MB | Free: <span id="m-heap-free">0</span> MB</div>
+      </div>
+      <div class="card">
+        <div class="card-title">NVMe B-Tree Storage</div>
+        <div class="card-value" id="m-db-size">0 KB</div>
+        <div class="card-sub">BPM Cache: <span id="m-db-cache">0</span> MB | WAL Ckpts: <span id="m-wal-ckpts">0</span></div>
+      </div>
+    </div>
+
+    <div class="row-2">
+      <div class="card">
+        <h2>
+          <span>Real-Time Throughput (BPS / CPS)</span>
+          <span class="pill">60s Rolling Window</span>
+        </h2>
+        <canvas id="bps-chart" width="680" height="190"></canvas>
+      </div>
+      <div class="card">
+        <h2>
+          <span>8-Hart RISC-V Pipeline Profiler</span>
+          <span class="pill">CLINT @ 24 MHz</span>
+        </h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Stage / Hart</th><th>Metric</th><th>Cumulative</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Harts 0, 2, 3 (SIMD Crypto)</td><td>Verified Sigs</td><td class="mono" id="p-verified">0</td></tr>
+              <tr><td>Hart 1 (Smoltcp + RPC)</td><td>Net / MsgProc</td><td class="mono" id="p-hart1">0 ms / 0 ms</td></tr>
+              <tr><td>Hart 6 (Sig Wait)</td><td>Batch Sig Wait</td><td class="mono" id="p-sig-ms">0 ms</td></tr>
+              <tr><td>Hart 6 (B-Tree Insert)</td><td>Ledger Commit</td><td class="mono" id="p-ledger-ms">0 ms</td></tr>
+              <tr><td>Hart 6 (Post/Unchecked)</td><td>Trigger & Events</td><td class="mono" id="p-post-ms">0 ms</td></tr>
+              <tr><td>Hart 6 (WAL Checkpoint)</td><td>Pages / Time</td><td class="mono" id="p-wal">0 pgs / 0 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="row-2">
+      <div class="card">
+        <h2>
+          <span>Connected Peers (<span id="peer-list-count">0</span>)</span>
+          <button class="btn btn-sec" style="padding:4px 10px;font-size:12px" onclick="refreshPeers()">Refresh Peers</button>
+        </h2>
+        <div class="table-wrap" style="max-height:220px;overflow-y:auto">
+          <table>
+            <thead><tr><th>Peer Endpoint</th><th>Version</th><th>Type</th></tr></thead>
+            <tbody id="peers-tbody"><tr><td colspan="3" style="color:var(--muted)">Loading peers...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>
+          <span>WebSocket Live Stream (Port 7078)</span>
+          <button id="ws-btn" class="btn btn-sec" style="padding:4px 10px;font-size:12px" onclick="toggleWs()">Connect WS</button>
+        </h2>
+        <div id="ws-log" class="log-box" style="height:220px">Click "Connect WS" to subscribe to live block confirmations and votes on port 7078...</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== TAB 2: WALLET ==================== -->
+  <section id="tab-wallet" class="tab-pane">
+    <div class="card" style="margin-bottom:16px">
+      <h2>
+        <span>Hardware-Encrypted Node Wallets (eFuse Key)</span>
+        <div class="btn-row">
+          <button class="btn btn-sec" onclick="loadWallets()">Refresh Wallets</button>
+          <button class="btn" onclick="createWallet()">+ New Wallet</button>
+          <button class="btn btn-sec" onclick="createAccount()">+ New Account</button>
+          <button class="btn btn-green" onclick="receiveAllPending()">Receive All Pending</button>
+        </div>
+      </h2>
+      <div class="form-grid-3">
+        <div>
+          <label>Active Wallet ID</label>
+          <select id="w-select" onchange="onWalletSelect()"></select>
+        </div>
+        <div>
+          <label>Custom Wallet ID / Seed Import</label>
+          <div class="input-group">
+            <input id="w-seed-input" type="password" placeholder="Optional 64-hex seed to import">
+            <button class="btn btn-sec" onclick="changeWalletSeed()">Set Seed</button>
+          </div>
+        </div>
+        <div>
+          <label>Wallet Password (Optional)</label>
+          <div class="input-group">
+            <input id="w-pass-input" type="password" placeholder="Password">
+            <button class="btn btn-sec" onclick="unlockWallet()">Unlock</button>
+          </div>
+        </div>
+      </div>
+      <div id="w-status" style="font-size:12px;color:var(--accent);font-family:var(--mono);word-break:break-all"></div>
+    </div>
+
+    <div class="row-2">
+      <div class="card">
+        <h2>
+          <span>Wallet Accounts & Balances</span>
+          <span class="pill" id="w-acc-count">0 Accounts</span>
+        </h2>
+        <div class="table-wrap" style="max-height:320px;overflow-y:auto">
+          <table>
+            <thead>
+              <tr><th>Account</th><th>Balance (NANO)</th><th>Receivable</th><th>Action</th></tr>
+            </thead>
+            <tbody id="w-accounts-tbody">
+              <tr><td colspan="4" style="color:var(--muted)">No wallet selected. Click "+ New Wallet" or "Refresh Wallets".</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>
+          <span>Send NANO</span>
+          <span class="pill">WASM PoW Assisted</span>
+        </h2>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div>
+            <label>Source Account</label>
+            <select id="w-send-source"></select>
+          </div>
+          <div>
+            <label>Destination Account (nano_...)</label>
+            <input id="w-send-dest" placeholder="nano_1...">
+          </div>
+          <div>
+            <label>Amount (NANO, e.g. 0.5 or raw integer)</label>
+            <input id="w-send-amount" placeholder="0.1" value="0.001">
+          </div>
+          <div>
+            <label class="chk-label"><input type="checkbox" id="w-use-wasm-pow" checked>Precompute Proof-of-Work in Browser via WebAssembly (Zero Node CPU Load)</label>
+          </div>
+          <div class="btn-row">
+            <button class="btn" id="w-send-btn" onclick="sendNano()">Send Transaction</button>
+          </div>
+          <div id="w-send-result" class="mono" style="font-size:12px;color:var(--green);word-break:break-all"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>
+        <span>Account Block History & Receivable Inspector</span>
+        <div class="input-group" style="flex:1;min-width:220px;max-width:480px">
+          <input id="w-hist-account" placeholder="nano_...">
+          <button class="btn btn-sec" onclick="inspectAccount()">Inspect</button>
+        </div>
+      </h2>
+      <div id="w-history-box" class="log-box" style="height:180px">Select an account above to inspect its frontier, receivable blocks, and transaction history...</div>
+    </div>
+  </section>
+
+  <!-- ==================== TAB 3: POINT OF SALE (PoS) ==================== -->
+  <section id="tab-pos" class="tab-pane">
+    <div class="row-2">
+      <div class="card">
+        <h2>
+          <span>Merchant Point-of-Sale (Ephemeral Address)</span>
+          <span class="pill">Zero-Link Privacy + Auto-Sweep</span>
+        </h2>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div>
+            <label>Merchant Settlement Account (Final Destination)</label>
+            <div class="input-group">
+              <input id="pos-merchant-dest" placeholder="nano_1... (where payment will be swept)" onchange="savePosSettings()">
+              <button class="btn btn-sec" onclick="fillPosFromWallet()" title="Use selected account from Wallet tab">From Wallet</button>
+            </div>
+          </div>
+
+          <div class="form-grid" style="margin-bottom:0">
+            <div>
+              <label>Amount (NANO)</label>
+              <input id="pos-amount" type="number" step="any" min="0.000001" value="0.1">
+            </div>
+            <div>
+              <label>Order / Invoice Reference (Optional)</label>
+              <input id="pos-memo" placeholder="e.g. Order #1042">
+            </div>
+          </div>
+
+          <div>
+            <label>Quick Amount Presets (NANO)</label>
+            <div class="btn-row">
+              <button class="btn btn-sec" style="height:30px;padding:0 10px;font-size:12px" onclick="setPosAmount('0.001')">0.001</button>
+              <button class="btn btn-sec" style="height:30px;padding:0 10px;font-size:12px" onclick="setPosAmount('0.01')">0.01</button>
+              <button class="btn btn-sec" style="height:30px;padding:0 10px;font-size:12px" onclick="setPosAmount('0.1')">0.1</button>
+              <button class="btn btn-sec" style="height:30px;padding:0 10px;font-size:12px" onclick="setPosAmount('0.5')">0.5</button>
+              <button class="btn btn-sec" style="height:30px;padding:0 10px;font-size:12px" onclick="setPosAmount('1')">1</button>
+              <button class="btn btn-sec" style="height:30px;padding:0 10px;font-size:12px" onclick="setPosAmount('5')">5</button>
+              <button class="btn btn-sec" style="height:30px;padding:0 10px;font-size:12px" onclick="setPosAmount('10')">10</button>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-wrap:wrap;gap:10px 18px">
+            <label class="chk-label">
+              <input type="checkbox" id="pos-autosweep" checked>
+              Auto-sweep payment to Merchant Settlement Account
+            </label>
+            <label class="chk-label">
+              <input type="checkbox" id="pos-wallet-backup" checked>
+              Import ephemeral key into active Node Wallet as backup
+            </label>
+          </div>
+
+          <div class="btn-row" style="margin-top:4px">
+            <button class="btn" id="pos-gen-btn" onclick="createPosPayment()">⚡ Generate Ephemeral Payment Address</button>
+            <button class="btn btn-danger" id="pos-cancel-btn" onclick="cancelPosPayment()" disabled>✕ Cancel</button>
+          </div>
+
+          <div id="pos-log" class="log-box" style="height:145px">Ready. Click "Generate Ephemeral Payment Address" to create a fresh one-time Nano address and QR code for your customer.</div>
+        </div>
+      </div>
+
+      <div class="card" style="display:flex;flex-direction:column;justify-content:space-between">
+        <h2>
+          <span>Customer Payment Terminal</span>
+          <span class="badge" id="pos-state-badge">IDLE</span>
+        </h2>
+
+        <div style="display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px;padding:6px 0">
+          <div style="font-size:26px;font-weight:800;font-family:var(--mono);color:var(--accent)">
+            <span id="pos-disp-amount">0.00</span> <small style="font-size:14px;color:var(--text)">NANO</small>
+          </div>
+          <div id="pos-disp-memo" style="font-size:12px;color:var(--muted);min-height:18px">No active payment request</div>
+
+          <div style="background:#fff;padding:12px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;box-shadow:0 6px 24px rgba(0,0,0,0.4)">
+            <canvas id="pos-qr" width="220" height="220" style="width:220px;height:220px;background:#fff;border:none;border-radius:4px"></canvas>
+          </div>
+
+          <div style="width:100%;max-width:460px;text-align:left">
+            <label>Ephemeral Payment Address (<span id="pos-pow-status" style="color:var(--accent)">PoW: Idle</span>)</label>
+            <div class="input-group">
+              <input id="pos-eph-account" readonly placeholder="nano_..." style="font-size:12px">
+              <button class="btn btn-sec" onclick="copyPosField('addr')">Copy</button>
+              <button class="btn btn-sec" onclick="copyPosField('uri')">URI</button>
+            </div>
+          </div>
+
+          <div class="progress-wrap" style="max-width:460px"><div id="pos-progress" class="progress-bar"></div></div>
+
+          <div class="btn-row" style="justify-content:center">
+            <button class="btn btn-sec" id="pos-check-btn" onclick="checkAndSweepPosNow()" disabled>↻ Check / Sweep Now</button>
+            <button class="btn btn-sec" id="pos-key-btn" onclick="togglePosPrivKey()" disabled>🔑 Backup Key</button>
+          </div>
+          <div id="pos-privkey-box" class="mono" style="display:none;font-size:11px;color:var(--amber);background:var(--bg);padding:6px 10px;border-radius:6px;border:1px solid var(--border);word-break:break-all;max-width:460px;width:100%"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>
+        <span>PoS Ephemeral Payment History</span>
+        <div class="btn-row">
+          <span class="pill" id="pos-hist-count">0 Invoices</span>
+          <button class="btn btn-sec" style="height:28px;padding:0 10px;font-size:12px" onclick="clearPosHistory()">Clear History</button>
+        </div>
+      </h2>
+      <div class="table-wrap" style="max-height:240px;overflow-y:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Order / Reference</th>
+              <th>Amount (NANO)</th>
+              <th>Ephemeral Address</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="pos-history-tbody">
+            <tr><td colspan="6" style="color:var(--muted)">No PoS invoices generated yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== TAB 3: STRESS TEST ==================== -->
+  <section id="tab-stress" class="tab-pane">
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">WASM Engine Status</div>
+        <div class="card-value" id="st-wasm-status" style="font-size:18px;color:var(--green)">Loading...</div>
+        <div class="card-sub" id="st-wasm-sub">tools/nano-stress (Blake2b + Ed25519)</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Gen Throughput</div>
+        <div class="card-value"><span id="st-gen-bps">0</span> <small style="font-size:13px;color:var(--muted)">bps</small></div>
+        <div class="card-sub">Generated: <span id="st-gen-count">0</span> blks</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Streamed to Node</div>
+        <div class="card-value"><span id="st-sent-bps">0</span> <small style="font-size:13px;color:var(--muted)">bps</small></div>
+        <div class="card-sub">Accepted: <span id="st-accepted">0</span> | BPQ: <span id="st-bpq">0</span></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Node E2E Commit Rate</div>
+        <div class="card-value"><span id="st-commit-bps">0</span> <small style="font-size:13px;color:var(--muted)">bps</small></div>
+        <div class="card-sub">Ledger Growth: +<span id="st-growth">0</span> | Cem: +<span id="st-cem-growth">0</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2>
+        <span>Stress Test Configuration (tools/nano-stress)</span>
+        <span class="pill" id="st-frontier-pill">Frontier: Not synced</span>
+      </h2>
+      <div class="form-grid">
+        <div>
+          <label>Total Blocks</label>
+          <input id="st-blocks" type="number" value="500" min="1" max="50000">
+        </div>
+        <div>
+          <label>Batch Size (1..256)</label>
+          <input id="st-batch" type="number" value="128" min="1" max="256">
+        </div>
+        <div>
+          <label>Rate BPS (0 = Max)</label>
+          <input id="st-rate" type="number" value="0" min="0" max="50000">
+        </div>
+        <div>
+          <label>Accounts (1..64)</label>
+          <input id="st-accounts" type="number" value="1" min="1" max="64">
+        </div>
+        <div>
+          <label>Block Strategy</label>
+          <select id="st-strategy">
+            <option value="0">Chained (State Send)</option>
+            <option value="1">Change (Representative Change)</option>
+          </select>
+        </div>
+        <div>
+          <label>PoW Difficulty</label>
+          <select id="st-pow">
+            <option value="zero">Zero PoW (0x0 • Max Crypto + B-Tree Burst)</option>
+            <option value="dev">Dev Threshold (0xffc0000000000000)</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="span-full">
+          <label>Signer Private Key (64-hex, defaults to DEV_GENESIS_KEY)</label>
+          <input id="st-privkey" value="34F0A37AAD20F4A260F0A5B3CB3D7FB50673212263E58A380BC10474BB039CE4">
+        </div>
+        <div class="span-full" style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;padding-bottom:6px">
+          <label class="chk-label">
+            <input type="checkbox" id="st-autoconfirm" checked>
+            Bundled Final Vote (Auto-Cement)
+          </label>
+          <label class="chk-label">
+            <input type="checkbox" id="st-dryrun">
+            Browser Dry-Run Only (--dry-run)
+          </label>
+        </div>
+      </div>
+
+      <div class="progress-wrap"><div id="st-progress" class="progress-bar"></div></div>
+
+      <div class="btn-row">
+        <button class="btn" id="st-start-btn" onclick="runWasmStressTest()">▶ Start Stress Test</button>
+        <button class="btn btn-danger" id="st-stop-btn" onclick="stopWasmStressTest()" disabled>■ Stop</button>
+        <button class="btn btn-sec" onclick="syncStressFrontier()">↻ Sync Frontier from Node</button>
+        <button class="btn btn-sec" onclick="clearStressLog()">Clear Log</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>
+        <span>Stress Test Execution Log</span>
+        <span class="pill" id="st-stage-pill">IDLE</span>
+      </h2>
+      <div id="st-log" class="log-box">Ready. Blocks are constructed, hashed (Blake2b), PoW-solved, and signed (Ed25519) directly in your browser via WebAssembly (compiled from tools/nano-stress) and streamed in binary batches to the node.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+// ==================== GLOBAL STATE ====================
+let lastMetrics = null;
+let bpsHistory = [];
+let cpsHistory = [];
+let wsConn = null;
+let wasmExports = null;
+let wasmMemory = null;
+let stressRunning = false;
+let stressAbort = false;
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if ((name === 'wallet' || name === 'pos') && document.getElementById('w-select').options.length === 0) {
+    loadWallets();
+  }
+  if (name === 'pos') {
+    initPosTab();
+  }
+}
+
+function fmtNum(n) {
+  return Number(n || 0).toLocaleString();
+}
+
+function fmtUptime(sec) {
+  sec = Math.floor(Number(sec || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function rawToNanoStr(rawStr) {
+  try {
+    const raw = BigInt(rawStr || "0");
+    const base = 10n ** 30n;
+    const whole = raw / base;
+    const frac = (raw % base).toString().padStart(30, '0').slice(0, 6).replace(/0+$/, '');
+    return frac ? `${whole}.${frac}` : `${whole}`;
+  } catch (_) {
+    return "0";
+  }
+}
+
+function nanoToRawStr(valStr) {
+  valStr = (valStr || "0").trim();
+  if (/^\d{25,}$/.test(valStr)) return valStr; // Already raw
+  const parts = valStr.split('.');
+  const whole = BigInt(parts[0] || "0") * (10n ** 30n);
+  let fracStr = (parts[1] || "").slice(0, 30).padEnd(30, '0');
+  const frac = BigInt(fracStr || "0");
+  return (whole + frac).toString();
+}
+
+function hexToBytes(hex) {
+  hex = hex.replace(/^0x/i, '').trim();
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16) || 0;
+  }
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+
+async function rpcCall(payload) {
+  const res = await fetch('/api/rpc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return await res.json();
+}
+
+// ==================== METRICS POLLING & CHART ====================
+async function pollMetrics() {
+  try {
+    const res = await fetch('/api/metrics');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const m = await res.json();
+    lastMetrics = m;
+
+    const netStr = (m.network || 'live').toLowerCase();
+    document.getElementById('hdr-net').textContent = 'NET: ' + netStr.toUpperCase();
+    const isDev = netStr === 'dev';
+    const stressTabBtn = document.getElementById('nav-stress-btn');
+    if (stressTabBtn) {
+      stressTabBtn.style.display = isDev ? '' : 'none';
+      if (!isDev && document.getElementById('tab-stress').classList.contains('active')) {
+        switchTab('metrics', document.getElementById('nav-metrics-btn'));
+      }
+    }
+    document.getElementById('hdr-bps').textContent = `${fmtNum(m.bps)} BPS / ${fmtNum(m.cps)} CPS`;
+    document.getElementById('hdr-uptime').textContent = 'UP: ' + fmtUptime(m.uptime_sec);
+    const stBadge = document.getElementById('hdr-status');
+    stBadge.textContent = 'ONLINE';
+    stBadge.className = 'badge ok';
+
+    document.getElementById('m-stored').textContent = fmtNum(m.blocks_stored);
+    document.getElementById('m-unchecked').textContent = fmtNum(m.unchecked);
+    document.getElementById('m-bpq').textContent = fmtNum(m.bpq_len);
+    document.getElementById('m-confirmed').textContent = fmtNum(m.blocks_confirmed);
+    const cemPct = m.blocks_stored > 0 ? ((m.blocks_confirmed / m.blocks_stored) * 100).toFixed(1) : '100.0';
+    document.getElementById('m-cem-pct').textContent = cemPct + '%';
+    document.getElementById('m-conf-q').textContent = fmtNum(m.confirming_set_len);
+    document.getElementById('m-bps').textContent = fmtNum(m.bps);
+    document.getElementById('m-cps').textContent = fmtNum(m.cps);
+    document.getElementById('m-peers').textContent = `${m.peers_total} (${m.peers_outbound} out)`;
+    document.getElementById('m-active').textContent = fmtNum(m.active_elections);
+    document.getElementById('m-stake').textContent = fmtNum(m.online_stake_nano);
+    document.getElementById('m-heap').textContent = fmtNum(m.heap_used_mb);
+    document.getElementById('m-slab').textContent = fmtNum(m.slab_cached_mb);
+    document.getElementById('m-heap-free').textContent = fmtNum(m.heap_free_mb);
+    document.getElementById('m-db-size').textContent = m.db_kb >= 1024 ? `${(m.db_kb / 1024).toFixed(1)} MB` : `${m.db_kb} KB`;
+    document.getElementById('m-db-cache').textContent = fmtNum(m.db_cache_mb);
+    document.getElementById('m-wal-ckpts').textContent = fmtNum(m.wal_checkpoints);
+
+    document.getElementById('p-verified').textContent = fmtNum(m.prof_verified);
+    document.getElementById('p-hart1').textContent = `${fmtNum(m.hart1_net_ms)} ms / ${fmtNum(m.hart1_msgproc_ms)} ms`;
+    document.getElementById('p-sig-ms').textContent = `${fmtNum(m.prof_sig_ms)} ms (${fmtNum(m.prof_batches)} batches)`;
+    document.getElementById('p-ledger-ms').textContent = `${fmtNum(m.prof_ledger_ms)} ms (${fmtNum(m.prof_blocks)} blks)`;
+    document.getElementById('p-post-ms').textContent = `${fmtNum(m.prof_post_ms)} ms`;
+    document.getElementById('p-wal').textContent = `${fmtNum(m.wal_applied_pages)} pgs / ${fmtNum(m.wal_ckpt_ms)} ms`;
+    document.getElementById('st-bpq').textContent = fmtNum(m.bpq_len);
+
+    bpsHistory.push(m.bps || 0);
+    cpsHistory.push(m.cps || 0);
+    if (bpsHistory.length > 60) { bpsHistory.shift(); cpsHistory.shift(); }
+    drawChart();
+  } catch (e) {
+    const stBadge = document.getElementById('hdr-status');
+    stBadge.textContent = 'OFFLINE';
+    stBadge.className = 'badge warn';
+  }
+}
+
+function drawChart() {
+  const canvas = document.getElementById('bps-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const maxVal = Math.max(10, ...bpsHistory, ...cpsHistory);
+  ctx.strokeStyle = '#1e293b';
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i++) {
+    const y = (h / 4) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+
+  function plot(arr, color) {
+    if (arr.length < 2) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    arr.forEach((v, idx) => {
+      const x = (idx / 59) * (w - 20) + 10;
+      const y = h - 16 - ((v / maxVal) * (h - 32));
+      if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  plot(bpsHistory, '#38bdf8');
+  plot(cpsHistory, '#22c55e');
+
+  ctx.fillStyle = '#38bdf8';
+  ctx.font = '11px monospace';
+  ctx.fillText(`■ Stored BPS (Peak: ${maxVal})`, 12, 14);
+  ctx.fillStyle = '#22c55e';
+  ctx.fillText(`■ Confirmed CPS`, 190, 14);
+}
+
+async function refreshPeers() {
+  try {
+    const data = await rpcCall({ action: 'peers', peer_details: 'true' });
+    const tbody = document.getElementById('peers-tbody');
+    const peersObj = data.peers || {};
+    const keys = Object.keys(peersObj);
+    document.getElementById('peer-list-count').textContent = keys.length;
+    if (keys.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">No active peers</td></tr>';
+      return;
+    }
+    tbody.innerHTML = keys.slice(0, 50).map(k => {
+      const val = peersObj[k];
+      const ver = typeof val === 'object' ? val.protocol_version : val;
+      const type = typeof val === 'object' ? (val.type || 'tcp') : 'tcp';
+      return `<tr><td class="mono">${k}</td><td class="mono">v${ver}</td><td><span class="pill">${type}</span></td></tr>`;
+    }).join('');
+  } catch (_) {}
+}
+
+// ==================== WEBSOCKET LIVE STREAM ====================
+function toggleWs() {
+  const btn = document.getElementById('ws-btn');
+  const log = document.getElementById('ws-log');
+  if (wsConn) {
+    wsConn.close();
+    wsConn = null;
+    btn.textContent = 'Connect WS';
+    return;
+  }
+  const wsUrl = `ws://${location.hostname}:7078`;
+  log.textContent = `Connecting to ${wsUrl}...\n`;
+  wsConn = new WebSocket(wsUrl);
+  wsConn.onopen = () => {
+    btn.textContent = 'Disconnect WS';
+    log.textContent += `Connected! Subscribing to confirmation & vote topics...\n`;
+    wsConn.send(JSON.stringify({ action: 'subscribe', topic: 'confirmation', ack: true }));
+    wsConn.send(JSON.stringify({ action: 'subscribe', topic: 'vote', ack: true }));
+  };
+  wsConn.onmessage = (ev) => {
+    log.textContent = (log.textContent + ev.data + '\n').slice(-6000);
+    log.scrollTop = log.scrollHeight;
+  };
+  wsConn.onclose = () => {
+    btn.textContent = 'Connect WS';
+    wsConn = null;
+    log.textContent += `WebSocket closed.\n`;
+  };
+}
+
+// ==================== WALLET TAB ====================
+async function loadWallets() {
+  try {
+    const res = await fetch('/api/wallets');
+    const data = await res.json();
+    const sel = document.getElementById('w-select');
+    const current = sel.value;
+    sel.innerHTML = '';
+    (data.wallets || []).forEach(w => {
+      const opt = document.createElement('option');
+      opt.value = w.id;
+      opt.textContent = `${w.id.slice(0, 16)}... (${w.accounts.length} accts)`;
+      sel.appendChild(opt);
+    });
+    if (current && Array.from(sel.options).some(o => o.value === current)) {
+      sel.value = current;
+    }
+    renderSelectedWallet(data.wallets || []);
+  } catch (e) {
+    document.getElementById('w-status').textContent = 'Error loading wallets: ' + e.message;
+  }
+}
+
+function onWalletSelect() {
+  loadWallets();
+}
+
+function renderSelectedWallet(wallets) {
+  const wid = document.getElementById('w-select').value;
+  const w = wallets.find(x => x.id === wid);
+  const tbody = document.getElementById('w-accounts-tbody');
+  const sendSel = document.getElementById('w-send-source');
+  sendSel.innerHTML = '';
+  if (!w) {
+    document.getElementById('w-acc-count').textContent = '0 Accounts';
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No wallet found. Click "+ New Wallet" to create one.</td></tr>';
+    return;
+  }
+  document.getElementById('w-status').textContent = `Active Wallet: ${w.id}`;
+  document.getElementById('w-acc-count').textContent = `${w.accounts.length} Accounts`;
+  if (w.accounts.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No accounts in wallet. Click "+ New Account".</td></tr>';
+    return;
+  }
+  tbody.innerHTML = w.accounts.map(a => {
+    const opt = document.createElement('option');
+    opt.value = a.account;
+    opt.textContent = `${a.account.slice(0, 22)}... (${rawToNanoStr(a.balance)} NANO)`;
+    sendSel.appendChild(opt);
+    return `<tr>
+      <td class="mono">${a.account}</td>
+      <td class="mono">${rawToNanoStr(a.balance)}</td>
+      <td class="mono">${rawToNanoStr(a.receivable)}</td>
+      <td>
+        <button class="btn btn-sec" style="padding:3px 8px;font-size:11px" onclick="inspectAccount('${a.account}')">History</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function createWallet() {
+  const res = await rpcCall({ action: 'wallet_create' });
+  if (res.wallet) {
+    await rpcCall({ action: 'account_create', wallet: res.wallet });
+    await loadWallets();
+    document.getElementById('w-select').value = res.wallet;
+    await loadWallets();
+  }
+}
+
+async function createAccount() {
+  const wid = document.getElementById('w-select').value;
+  if (!wid) return alert('Create or select a wallet first');
+  await rpcCall({ action: 'account_create', wallet: wid });
+  await loadWallets();
+}
+
+async function changeWalletSeed() {
+  const wid = document.getElementById('w-select').value;
+  const seed = document.getElementById('w-seed-input').value.trim();
+  if (!wid || seed.length !== 64) return alert('Select a wallet and enter a 64-character hex seed');
+  const res = await rpcCall({ action: 'wallet_change_seed', wallet: wid, seed });
+  document.getElementById('w-status').textContent = JSON.stringify(res);
+  await loadWallets();
+}
+
+async function unlockWallet() {
+  const wid = document.getElementById('w-select').value;
+  const password = document.getElementById('w-pass-input').value;
+  if (!wid) return;
+  const res = await rpcCall({ action: 'password_enter', wallet: wid, password });
+  document.getElementById('w-status').textContent = `Password valid: ${res.valid}`;
+}
+
+async function computeWasmWorkForRoot(rootHex) {
+  if (!wasmExports || rootHex.length !== 64) return null;
+  const rootBytes = hexToBytes(rootHex);
+  const rootPtr = wasmExports.wasm_get_pow_root_ptr();
+  new Uint8Array(wasmMemory.buffer, rootPtr, 32).set(rootBytes);
+  const isDev = (lastMetrics && lastMetrics.network === 'dev');
+  const hi = isDev ? 0xffc00000 : 0xffffffc0;
+  const lo = 0x00000000;
+  for (let round = 0; round < 500; round++) {
+    const found = wasmExports.wasm_compute_pow_step(hi, lo, 16384);
+    if (found === 1) {
+      const outPtr = wasmExports.wasm_get_pow_out_ptr();
+      return bytesToHex(new Uint8Array(wasmMemory.buffer, outPtr, 8));
+    }
+    await new Promise(r => setTimeout(r, 0));
+  }
+  return null;
+}
+
+async function sendNano() {
+  const wid = document.getElementById('w-select').value;
+  const source = document.getElementById('w-send-source').value;
+  const destination = document.getElementById('w-send-dest').value.trim();
+  const amountRaw = nanoToRawStr(document.getElementById('w-send-amount').value);
+  const outEl = document.getElementById('w-send-result');
+  if (!wid || !source || !destination) return alert('Fill in source and destination');
+
+  outEl.textContent = 'Preparing transaction...';
+  let workHex = undefined;
+  if (document.getElementById('w-use-wasm-pow').checked && wasmExports) {
+    const info = await rpcCall({ action: 'account_info', account: source });
+    if (info && info.frontier) {
+      outEl.textContent = 'Computing Proof-of-Work in browser via WebAssembly...';
+      workHex = await computeWasmWorkForRoot(info.frontier);
+    }
+  }
+  const payload = { action: 'send', wallet: wid, source, destination, amount: amountRaw };
+  if (workHex) payload.work = workHex;
+  const res = await rpcCall(payload);
+  outEl.textContent = JSON.stringify(res);
+  await loadWallets();
+}
+
+async function receiveAllPending() {
+  const wid = document.getElementById('w-select').value;
+  if (!wid) return;
+  const outEl = document.getElementById('w-status');
+  const rec = await rpcCall({ action: 'wallet_receivable', wallet: wid, count: '20' });
+  const blocksMap = rec.blocks || {};
+  let received = 0;
+  for (const acc of Object.keys(blocksMap)) {
+    const hashes = Array.isArray(blocksMap[acc]) ? blocksMap[acc] : Object.keys(blocksMap[acc] || {});
+    for (const h of hashes) {
+      await rpcCall({ action: 'receive', wallet: wid, account: acc, block: h });
+      received++;
+    }
+  }
+  outEl.textContent = `Received ${received} pending block(s).`;
+  await loadWallets();
+}
+
+async function inspectAccount(accArg) {
+  const acc = accArg || document.getElementById('w-hist-account').value.trim();
+  if (!acc) return;
+  document.getElementById('w-hist-account').value = acc;
+  const box = document.getElementById('w-history-box');
+  box.textContent = `Querying ${acc}...\n`;
+  const [info, hist, rec] = await Promise.all([
+    rpcCall({ action: 'account_info', account: acc }),
+    rpcCall({ action: 'account_history', account: acc, count: '10' }),
+    rpcCall({ action: 'receivable', account: acc, count: '10' })
+  ]);
+  box.textContent = `=== Account Info ===\n${JSON.stringify(info, null, 2)}\n\n=== Receivable ===\n${JSON.stringify(rec, null, 2)}\n\n=== Recent History ===\n${JSON.stringify(hist, null, 2)}`;
+}
+
+// ==================== POINT OF SALE (PoS) & QR ENGINE ====================
+let posActive = null;
+let posPollTimer = null;
+let posBusy = false;
+let posHistory = [];
+
+function posLog(msg) {
+  const el = document.getElementById('pos-log');
+  if (!el) return;
+  const ts = new Date().toLocaleTimeString();
+  el.textContent += `[${ts}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setPosAmount(val) {
+  document.getElementById('pos-amount').value = val;
+}
+
+function savePosSettings() {
+  try {
+    const dest = document.getElementById('pos-merchant-dest').value.trim();
+    if (dest) localStorage.setItem('barely_nano_pos_dest', dest);
+  } catch (_) {}
+}
+
+function savePosHistory() {
+  try {
+    localStorage.setItem('barely_nano_pos_history', JSON.stringify(posHistory.slice(0, 50)));
+  } catch (_) {}
+  renderPosHistory();
+}
+
+function initPosTab() {
+  try {
+    const savedDest = localStorage.getItem('barely_nano_pos_dest');
+    const destInput = document.getElementById('pos-merchant-dest');
+    if (savedDest && !destInput.value) {
+      destInput.value = savedDest;
+    } else if (!destInput.value) {
+      fillPosFromWallet();
+    }
+    const savedHist = localStorage.getItem('barely_nano_pos_history');
+    if (savedHist && posHistory.length === 0) {
+      posHistory = JSON.parse(savedHist) || [];
+    }
+  } catch (_) {}
+  renderPosHistory();
+  if (!posActive) {
+    drawPosPlaceholderQr();
+  }
+}
+
+async function fillPosFromWallet() {
+  const sendSel = document.getElementById('w-send-source');
+  if (sendSel && sendSel.options.length > 0 && sendSel.value) {
+    document.getElementById('pos-merchant-dest').value = sendSel.value;
+    savePosSettings();
+    return;
+  }
+  try {
+    const res = await fetch('/api/wallets');
+    const data = await res.json();
+    const wallets = data.wallets || [];
+    if (wallets.length > 0 && wallets[0].accounts && wallets[0].accounts.length > 0) {
+      document.getElementById('pos-merchant-dest').value = wallets[0].accounts[0].account;
+      savePosSettings();
+    }
+  } catch (_) {}
+}
+
+function copyPosField(kind) {
+  if (!posActive) return;
+  const text = kind === 'uri' ? posActive.uri : posActive.account;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text);
+  }
+  posLog(`Copied ${kind === 'uri' ? 'payment URI' : 'ephemeral address'} to clipboard.`);
+}
+
+function togglePosPrivKey() {
+  const box = document.getElementById('pos-privkey-box');
+  if (!posActive || !box) return;
+  if (box.style.display === 'none') {
+    box.style.display = 'block';
+    box.textContent = `Ephemeral Private Key: ${posActive.privateKey}`;
+  } else {
+    box.style.display = 'none';
+  }
+}
+
+async function createPosPayment() {
+  const amountStr = (document.getElementById('pos-amount').value || '0').trim();
+  const amountRaw = nanoToRawStr(amountStr);
+  if (BigInt(amountRaw) <= 0n) {
+    return alert('Enter a payment amount greater than 0 NANO');
+  }
+  let merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+  const autoSweep = document.getElementById('pos-autosweep').checked;
+  if (autoSweep && !merchantDest) {
+    await fillPosFromWallet();
+    merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+  }
+  if (autoSweep && !merchantDest.startsWith('nano_')) {
+    return alert('Enter a valid Merchant Settlement Account (nano_...) or uncheck Auto-sweep');
+  }
+  savePosSettings();
+
+  if (posPollTimer) {
+    clearInterval(posPollTimer);
+    posPollTimer = null;
+  }
+
+  document.getElementById('pos-log').textContent = '';
+  posLog('Generating fresh ephemeral keypair...');
+  const keyRes = await rpcCall({ action: 'key_create' });
+  if (!keyRes || !keyRes.account || !keyRes.private || !keyRes.public) {
+    posLog('ERROR: Failed to generate key via RPC key_create');
+    return;
+  }
+
+  const memo = document.getElementById('pos-memo').value.trim() || `Invoice #${posHistory.length + 1}`;
+  const uri = `nano:${keyRes.account}?amount=${amountRaw}`;
+
+  posActive = {
+    id: Date.now().toString(36),
+    createdAt: new Date().toLocaleTimeString(),
+    memo,
+    amountNano: rawToNanoStr(amountRaw),
+    amountRaw,
+    account: keyRes.account,
+    publicKey: keyRes.public,
+    privateKey: keyRes.private,
+    merchantDest,
+    autoSweep,
+    uri,
+    openWork: null,
+    status: 'WAITING',
+    openHash: null,
+    sweepHash: null
+  };
+
+  posHistory.unshift(posActive);
+  savePosHistory();
+
+  if (document.getElementById('pos-wallet-backup').checked) {
+    const wid = document.getElementById('w-select').value;
+    if (wid) {
+      rpcCall({ action: 'wallet_add', wallet: wid, key: keyRes.private, work: 'false' }).catch(() => {});
+    }
+  }
+
+  document.getElementById('pos-disp-amount').textContent = posActive.amountNano;
+  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • Sweep -> ${merchantDest ? merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-eph-account').value = posActive.account;
+  document.getElementById('pos-privkey-box').style.display = 'none';
+  document.getElementById('pos-cancel-btn').disabled = false;
+  document.getElementById('pos-check-btn').disabled = false;
+  document.getElementById('pos-key-btn').disabled = false;
+  document.getElementById('pos-progress').style.width = '25%';
+
+  const badge = document.getElementById('pos-state-badge');
+  badge.textContent = 'WAITING FOR PAYMENT';
+  badge.className = 'badge warn';
+
+  renderQrCodeToCanvas(uri, document.getElementById('pos-qr'));
+  posLog(`Ephemeral Address ready: ${posActive.account}`);
+  posLog(`Expected: ${posActive.amountNano} NANO (${posActive.amountRaw} raw)`);
+
+  // Precompute Open-Block PoW in browser WASM so receiving is instant when customer pays!
+  document.getElementById('pos-pow-status').textContent = 'Precomputing Open PoW in WASM...';
+  computeWasmWorkForRoot(posActive.publicKey).then(workHex => {
+    if (posActive && posActive.publicKey === keyRes.public && workHex) {
+      posActive.openWork = workHex;
+      document.getElementById('pos-pow-status').textContent = `Open PoW Ready (${workHex}) ✓`;
+      document.getElementById('pos-pow-status').style.color = 'var(--green)';
+      posLog(`Precomputed Open Block PoW in browser WASM: ${workHex}`);
+    }
+  });
+
+  posPollTimer = setInterval(() => {
+    checkAndSweepPosNow();
+  }, 1500);
+}
+
+function cancelPosPayment() {
+  if (posPollTimer) {
+    clearInterval(posPollTimer);
+    posPollTimer = null;
+  }
+  if (posActive && posActive.status === 'WAITING') {
+    posActive.status = 'CANCELLED';
+    savePosHistory();
+  }
+  posActive = null;
+  document.getElementById('pos-state-badge').textContent = 'CANCELLED';
+  document.getElementById('pos-state-badge').className = 'badge';
+  document.getElementById('pos-cancel-btn').disabled = true;
+  document.getElementById('pos-check-btn').disabled = true;
+  document.getElementById('pos-progress').style.width = '0%';
+  drawPosPlaceholderQr();
+  posLog('Payment request cancelled.');
+}
+
+async function checkAndSweepPosNow(targetInvoice) {
+  const inv = targetInvoice || posActive;
+  if (!inv || posBusy) return;
+  posBusy = true;
+  try {
+    // 1. Check for confirmed receivable blocks on the ephemeral address
+    const rec = await rpcCall({
+      action: 'receivable',
+      account: inv.account,
+      threshold: '1',
+      include_only_confirmed: 'true'
+    });
+    const blocksObj = (rec && rec.blocks && typeof rec.blocks === 'object' && !Array.isArray(rec.blocks))
+      ? rec.blocks
+      : {};
+    const sendHashes = Object.keys(blocksObj);
+
+    if (sendHashes.length > 0) {
+      const badge = document.getElementById('pos-state-badge');
+      if (inv === posActive) {
+        badge.textContent = 'RECEIVING & SWEEPING...';
+        badge.className = 'badge warn';
+        document.getElementById('pos-progress').style.width = '65%';
+      }
+
+      for (const sendHash of sendHashes) {
+        const amtRawStr = blocksObj[sendHash];
+        posLog(`Incoming confirmed payment detected! Block: ${sendHash.slice(0, 16)}... (${rawToNanoStr(amtRawStr)} NANO)`);
+
+        const info = await rpcCall({ action: 'account_info', account: inv.account });
+        const hasFrontier = info && info.frontier && !info.error;
+        const prevHash = hasFrontier
+          ? info.frontier
+          : '0000000000000000000000000000000000000000000000000000000000000000';
+        const curBal = hasFrontier ? BigInt(info.balance || '0') : 0n;
+        const newBal = (curBal + BigInt(amtRawStr)).toString();
+        const powRoot = hasFrontier ? info.frontier : inv.publicKey;
+        const repAccount = (inv.merchantDest && inv.merchantDest.startsWith('nano_'))
+          ? inv.merchantDest
+          : inv.account;
+
+        let workHex = (!hasFrontier && inv.openWork) ? inv.openWork : await computeWasmWorkForRoot(powRoot);
+        const createArgs = {
+          action: 'block_create',
+          json_block: 'true',
+          type: 'state',
+          key: inv.privateKey,
+          account: inv.account,
+          previous: prevHash,
+          representative: repAccount,
+          balance: newBal,
+          link: sendHash
+        };
+        if (workHex) createArgs.work = workHex;
+
+        const created = await rpcCall(createArgs);
+        if (created && created.block) {
+          const proc = await rpcCall({
+            action: 'process',
+            json_block: 'true',
+            subtype: hasFrontier ? 'receive' : 'open',
+            block: created.block
+          });
+          if (proc && proc.hash) {
+            inv.openHash = proc.hash;
+            inv.status = 'RECEIVED';
+            posLog(`Opened/Received on ephemeral account: ${proc.hash.slice(0, 16)}...`);
+          } else {
+            posLog(`Receive process message: ${JSON.stringify(proc)}`);
+          }
+        }
+      }
+      savePosHistory();
+    }
+
+    // 2. Check current ephemeral account balance and sweep if >= expected or > 0
+    const accInfo = await rpcCall({ action: 'account_info', account: inv.account });
+    if (accInfo && accInfo.frontier && BigInt(accInfo.balance || '0') > 0n) {
+      const currentBal = BigInt(accInfo.balance);
+      const expectedBal = BigInt(inv.amountRaw || '0');
+
+      if (currentBal >= expectedBal || targetInvoice) {
+        if (inv.autoSweep && inv.merchantDest && inv.merchantDest.startsWith('nano_') && inv.merchantDest !== inv.account) {
+          posLog(`Sweeping ${rawToNanoStr(currentBal.toString())} NANO to merchant account ${inv.merchantDest.slice(0, 20)}...`);
+          const sweepWork = await computeWasmWorkForRoot(accInfo.frontier);
+          const sweepCreateArgs = {
+            action: 'block_create',
+            json_block: 'true',
+            type: 'state',
+            key: inv.privateKey,
+            account: inv.account,
+            previous: accInfo.frontier,
+            representative: inv.merchantDest,
+            balance: '0',
+            link: inv.merchantDest
+          };
+          if (sweepWork) sweepCreateArgs.work = sweepWork;
+
+          const sweepCreated = await rpcCall(sweepCreateArgs);
+          if (sweepCreated && sweepCreated.block) {
+            const sweepProc = await rpcCall({
+              action: 'process',
+              json_block: 'true',
+              subtype: 'send',
+              block: sweepCreated.block
+            });
+            if (sweepProc && sweepProc.hash) {
+              inv.sweepHash = sweepProc.hash;
+              inv.status = 'PAID & SWEPT';
+              posLog(`Sweep complete! Settlement Tx: ${sweepProc.hash}`);
+              // If the merchant account belongs to a local node wallet, auto-receive it too!
+              const wid = document.getElementById('w-select').value;
+              if (wid) {
+                rpcCall({ action: 'receive', wallet: wid, account: inv.merchantDest, block: sweepProc.hash }).catch(() => {});
+              }
+            } else {
+              posLog(`Sweep process response: ${JSON.stringify(sweepProc)}`);
+            }
+          }
+        } else {
+          inv.status = 'PAID';
+        }
+
+        savePosHistory();
+        if (inv === posActive) {
+          if (posPollTimer) {
+            clearInterval(posPollTimer);
+            posPollTimer = null;
+          }
+          const badge = document.getElementById('pos-state-badge');
+          badge.textContent = inv.status + ' ✓';
+          badge.className = 'badge ok';
+          document.getElementById('pos-progress').style.width = '100%';
+          document.getElementById('pos-cancel-btn').disabled = true;
+        }
+      }
+    }
+  } catch (e) {
+    posLog('Check error: ' + e.message);
+  } finally {
+    posBusy = false;
+  }
+}
+
+function sweepHistoryInvoice(id) {
+  const inv = posHistory.find(x => x.id === id);
+  if (!inv) return;
+  posLog(`Checking / sweeping invoice ${inv.memo} (${inv.account.slice(0, 16)}...)...`);
+  checkAndSweepPosNow(inv);
+}
+
+function showHistoryKey(id) {
+  const inv = posHistory.find(x => x.id === id);
+  if (!inv) return;
+  prompt(`Backup Private Key for ${inv.account}:`, inv.privateKey);
+}
+
+function clearPosHistory() {
+  posHistory = [];
+  savePosHistory();
+}
+
+function renderPosHistory() {
+  const tbody = document.getElementById('pos-history-tbody');
+  const countEl = document.getElementById('pos-hist-count');
+  if (!tbody || !countEl) return;
+  countEl.textContent = `${posHistory.length} Invoice${posHistory.length === 1 ? '' : 's'}`;
+  if (posHistory.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No PoS invoices generated yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = posHistory.map(inv => {
+    const stColor = inv.status.startsWith('PAID') ? 'var(--green)' : (inv.status === 'WAITING' ? 'var(--amber)' : 'var(--muted)');
+    return `<tr>
+      <td class="mono">${inv.createdAt}</td>
+      <td>${inv.memo}</td>
+      <td class="mono">${inv.amountNano}</td>
+      <td class="mono">${inv.account.slice(0, 18)}...</td>
+      <td><span class="pill" style="color:${stColor}">${inv.status}</span></td>
+      <td>
+        <div class="btn-row">
+          <button class="btn btn-sec" style="height:26px;padding:0 8px;font-size:11px" onclick="sweepHistoryInvoice('${inv.id}')">Sweep</button>
+          <button class="btn btn-sec" style="height:26px;padding:0 8px;font-size:11px" onclick="showHistoryKey('${inv.id}')">Key</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ==================== ZERO-DEPENDENCY ISO-18004 QR CODE GENERATOR ====================
+function drawPosPlaceholderQr() {
+  const canvas = document.getElementById('pos-qr');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#64748b';
+  ctx.font = '600 13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Generate an Ephemeral', canvas.width / 2, canvas.height / 2 - 8);
+  ctx.fillText('Address to Display QR', canvas.width / 2, canvas.height / 2 + 12);
+}
+
+function renderQrCodeToCanvas(text, canvas) {
+  if (!canvas) return;
+  const data = new TextEncoder().encode(text);
+  // Version table for ECC Level L (Byte Mode up to 134 bytes, covers all nano: URIs)
+  const VERSIONS = [
+    null,
+    { v: 1, size: 21, dataBytes: 19, ecPerBlock: 7, blocks: 1, align: [] },
+    { v: 2, size: 25, dataBytes: 34, ecPerBlock: 10, blocks: 1, align: [6, 18] },
+    { v: 3, size: 29, dataBytes: 55, ecPerBlock: 15, blocks: 1, align: [6, 22] },
+    { v: 4, size: 33, dataBytes: 80, ecPerBlock: 20, blocks: 1, align: [6, 26] },
+    { v: 5, size: 37, dataBytes: 108, ecPerBlock: 26, blocks: 1, align: [6, 30] },
+    { v: 6, size: 41, dataBytes: 136, ecPerBlock: 18, blocks: 2, align: [6, 34] }
+  ];
+  let ver = VERSIONS[6];
+  for (let v = 1; v <= 6; v++) {
+    if (data.length + 2 <= VERSIONS[v].dataBytes) {
+      ver = VERSIONS[v];
+      break;
+    }
+  }
+
+  // Build data bit stream: Byte mode (0100) + 8-bit length + bytes + terminator + pad
+  const bits = [];
+  const pushBits = (val, len) => {
+    for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1);
+  };
+  pushBits(0b0100, 4);
+  pushBits(data.length, 8);
+  for (let i = 0; i < data.length; i++) pushBits(data[i], 8);
+  const maxBits = ver.dataBytes * 8;
+  for (let i = 0; i < 4 && bits.length < maxBits; i++) bits.push(0);
+  while (bits.length % 8 !== 0) bits.push(0);
+  const codewords = [];
+  for (let i = 0; i < bits.length; i += 8) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) b = (b << 1) | bits[i + j];
+    codewords.push(b);
+  }
+  let padToggle = 0;
+  while (codewords.length < ver.dataBytes) {
+    codewords.push(padToggle ? 0x11 : 0xec);
+    padToggle ^= 1;
+  }
+
+  // GF(256) Reed-Solomon (primitive polynomial 0x11d)
+  const gfExp = new Uint8Array(512);
+  const gfLog = new Uint8Array(256);
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    gfExp[i] = x;
+    gfExp[i + 255] = x;
+    gfLog[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  const gfMul = (a, b) => (a === 0 || b === 0) ? 0 : gfExp[gfLog[a] + gfLog[b]];
+  const rsEncode = (msg, ecLen) => {
+    let gen = [1];
+    for (let i = 0; i < ecLen; i++) {
+      const next = new Array(gen.length + 1).fill(0);
+      for (let j = 0; j < gen.length; j++) {
+        next[j] ^= gen[j];
+        next[j + 1] ^= gfMul(gen[j], gfExp[i]);
+      }
+      gen = next;
+    }
+    const rem = new Uint8Array(ecLen);
+    for (let i = 0; i < msg.length; i++) {
+      const factor = msg[i] ^ rem[0];
+      for (let j = 0; j < ecLen - 1; j++) rem[j] = rem[j + 1];
+      rem[ecLen - 1] = 0;
+      for (let j = 0; j < ecLen; j++) rem[j] ^= gfMul(gen[j + 1], factor);
+    }
+    return rem;
+  };
+
+  const dataPerBlock = ver.dataBytes / ver.blocks;
+  const dataBlocks = [];
+  const ecBlocks = [];
+  for (let b = 0; b < ver.blocks; b++) {
+    const slice = codewords.slice(b * dataPerBlock, (b + 1) * dataPerBlock);
+    dataBlocks.push(slice);
+    ecBlocks.push(rsEncode(slice, ver.ecPerBlock));
+  }
+  const finalBytes = [];
+  for (let i = 0; i < dataPerBlock; i++) {
+    for (let b = 0; b < ver.blocks; b++) finalBytes.push(dataBlocks[b][i]);
+  }
+  for (let i = 0; i < ver.ecPerBlock; i++) {
+    for (let b = 0; b < ver.blocks; b++) finalBytes.push(ecBlocks[b][i]);
+  }
+
+  const N = ver.size;
+  const grid = Array.from({ length: N }, () => new Uint8Array(N));
+  const reserved = Array.from({ length: N }, () => new Uint8Array(N));
+
+  const setFinder = (r0, c0) => {
+    for (let r = -1; r <= 7; r++) {
+      for (let c = -1; c <= 7; c++) {
+        const rr = r0 + r, cc = c0 + c;
+        if (rr < 0 || rr >= N || cc < 0 || cc >= N) continue;
+        const inOuter = (r >= 0 && r <= 6 && (c === 0 || c === 6)) || (c >= 0 && c <= 6 && (r === 0 || r === 6));
+        const inInner = (r >= 2 && r <= 4 && c >= 2 && c <= 4);
+        grid[rr][cc] = (inOuter || inInner) ? 1 : 0;
+        reserved[rr][cc] = 1;
+      }
+    }
+  };
+  setFinder(0, 0);
+  setFinder(0, N - 7);
+  setFinder(N - 7, 0);
+
+  for (let i = 8; i < N - 8; i++) {
+    grid[6][i] = (i % 2 === 0) ? 1 : 0;
+    reserved[6][i] = 1;
+    grid[i][6] = (i % 2 === 0) ? 1 : 0;
+    reserved[i][6] = 1;
+  }
+
+  for (const ar of ver.align) {
+    for (const ac of ver.align) {
+      if (reserved[ar][ac]) continue;
+      for (let r = -2; r <= 2; r++) {
+        for (let c = -2; c <= 2; c++) {
+          const onEdge = Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0);
+          grid[ar + r][ac + c] = onEdge ? 1 : 0;
+          reserved[ar + r][ac + c] = 1;
+        }
+      }
+    }
+  }
+
+  // Reserve format info areas & dark module
+  for (let i = 0; i < 9; i++) {
+    if (i < N) { reserved[8][i] = 1; reserved[i][8] = 1; }
+  }
+  for (let i = 0; i < 8; i++) {
+    reserved[8][N - 1 - i] = 1;
+    reserved[N - 1 - i][8] = 1;
+  }
+  grid[N - 8][8] = 1;
+  reserved[N - 8][8] = 1;
+
+  // Place data bits upward/downward in 2-column zig-zag
+  let bitIdx = 0;
+  const totalBits = finalBytes.length * 8;
+  let upward = true;
+  for (let right = N - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < N; vert++) {
+      const r = upward ? (N - 1 - vert) : vert;
+      for (let j = 0; j < 2; j++) {
+        const c = right - j;
+        if (!reserved[r][c]) {
+          let bit = 0;
+          if (bitIdx < totalBits) {
+            bit = (finalBytes[bitIdx >>> 3] >>> (7 - (bitIdx & 7))) & 1;
+            bitIdx++;
+          }
+          // Mask 0: (r + c) % 2 === 0
+          if ((r + c) % 2 === 0) bit ^= 1;
+          grid[r][c] = bit;
+        }
+      }
+    }
+    upward = !upward;
+  }
+
+  // Format information for ECC Level L (01) + Mask 0 (000) -> 0x77c4 (bit 14 MSB .. bit 0 LSB)
+  const fmtBits = 0x77c4;
+  const fCoordsTL = [
+    [0,8],[1,8],[2,8],[3,8],[4,8],[5,8],[7,8],[8,8],
+    [8,7],[8,5],[8,4],[8,3],[8,2],[8,1],[8,0]
+  ];
+  for (let i = 0; i < 15; i++) {
+    const bit = (fmtBits >>> i) & 1;
+    const [r, c] = fCoordsTL[i];
+    grid[r][c] = bit;
+    if (i < 8) {
+      grid[8][N - 1 - i] = bit;
+    } else {
+      grid[N - 15 + i][8] = bit;
+    }
+  }
+
+  // Draw on canvas with 4-module quiet zone
+  const ctx = canvas.getContext('2d');
+  const quiet = 3;
+  const totalMods = N + quiet * 2;
+  const scale = Math.floor(canvas.width / totalMods);
+  const offset = Math.floor((canvas.width - totalMods * scale) / 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#0f172a';
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      if (grid[r][c]) {
+        ctx.fillRect(offset + (c + quiet) * scale, offset + (r + quiet) * scale, scale, scale);
+      }
+    }
+  }
+}
+
+// ==================== WASM STRESS TEST ====================
+function stressLog(msg) {
+  const el = document.getElementById('st-log');
+  el.textContent += msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearStressLog() {
+  document.getElementById('st-log').textContent = '';
+}
+
+async function initStressWasm() {
+  const stEl = document.getElementById('st-wasm-status');
+  try {
+    const resp = await fetch('/nano_stress.wasm');
+    const bytes = await resp.arrayBuffer();
+    const { instance } = await WebAssembly.instantiate(bytes, {});
+    wasmExports = instance.exports;
+    wasmMemory = wasmExports.memory;
+    wasmExports.wasm_init();
+    stEl.textContent = 'READY (WASM32)';
+    stEl.style.color = 'var(--green)';
+    document.getElementById('st-wasm-sub').textContent = `Module: ${(bytes.byteLength / 1024).toFixed(1)} KB • Ed25519 + Blake2b`;
+    await syncStressFrontier();
+  } catch (e) {
+    stEl.textContent = 'ERR: ' + e.message;
+    stEl.style.color = 'var(--red)';
+  }
+}
+
+async function syncStressFrontier() {
+  if (!wasmExports) return false;
+  const privHex = document.getElementById('st-privkey').value.trim();
+  if (privHex.length === 64) {
+    new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_privkey_ptr(), 32).set(hexToBytes(privHex));
+  }
+  const pubPtr = wasmExports.wasm_get_pubkey_ptr();
+  const pubHex = bytesToHex(new Uint8Array(wasmMemory.buffer, pubPtr, 32));
+
+  try {
+    const accRes = await rpcCall({ action: 'account_get', key: pubHex });
+    if (accRes && accRes.account) {
+      const info = await rpcCall({ action: 'account_info', account: accRes.account });
+      if (info && info.frontier && info.balance !== undefined) {
+        new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_frontier_ptr(), 32).set(hexToBytes(info.frontier));
+        const balBig = BigInt(info.balance);
+        const balHex = balBig.toString(16).padStart(32, '0');
+        new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_balance_ptr(), 16).set(hexToBytes(balHex));
+        document.getElementById('st-frontier-pill').textContent = `Frontier: ${info.frontier.slice(0, 14)}... (Height: ${info.block_count})`;
+        return true;
+      }
+    }
+  } catch (_) {}
+  document.getElementById('st-frontier-pill').textContent = `Frontier: Genesis Default (${pubHex.slice(0, 12)}...)`;
+  return false;
+}
+
+function stopWasmStressTest() {
+  stressAbort = true;
+}
+
+async function runWasmStressTest() {
+  if (!wasmExports || stressRunning) return;
+  stressRunning = true;
+  stressAbort = false;
+  document.getElementById('st-start-btn').disabled = true;
+  document.getElementById('st-stop-btn').disabled = false;
+  document.getElementById('st-progress').style.width = '0%';
+
+  const totalBlocks = Math.max(1, parseInt(document.getElementById('st-blocks').value) || 500);
+  const batchSize = Math.min(256, Math.max(1, parseInt(document.getElementById('st-batch').value) || 128));
+  const targetRate = Math.max(0, parseInt(document.getElementById('st-rate').value) || 0);
+  const numAccounts = Math.min(64, Math.max(1, parseInt(document.getElementById('st-accounts').value) || 1));
+  const strategy = parseInt(document.getElementById('st-strategy').value) || 0;
+  const isZeroPow = document.getElementById('st-pow').value === 'zero';
+  const autoConfirm = document.getElementById('st-autoconfirm').checked;
+  const dryRun = document.getElementById('st-dryrun').checked;
+
+  const threshHi = isZeroPow ? 0 : 0xffc00000;
+  const threshLo = 0;
+
+  clearStressLog();
+  stressLog(`============================================================`);
+  stressLog(`  NANO WEBASSEMBLY STRESS TESTING ENGINE (PORT 7080)`);
+  stressLog(`============================================================`);
+  stressLog(` Target Blocks:  ${totalBlocks} (Batch: ${batchSize}, Accounts: ${numAccounts})`);
+  stressLog(` Strategy:       ${strategy === 0 ? 'Chained (Send)' : 'Change (Rep)'}`);
+  stressLog(` PoW Mode:       ${isZeroPow ? '0x0 (Zero PoW)' : '0xffc0000000000000 (Dev Threshold)'}`);
+  stressLog(` Mode:           ${dryRun ? 'Browser Dry-Run Only' : 'Live WASM -> Node Pipeline'}`);
+  stressLog(`============================================================`);
+
+  document.getElementById('st-stage-pill').textContent = '1/4 SYNCING';
+  await pollMetrics();
+  const initStored = lastMetrics ? lastMetrics.blocks_stored : 0;
+  const initConfirmed = lastMetrics ? lastMetrics.blocks_confirmed : 0;
+
+  const synced = await syncStressFrontier();
+  stressLog(`[1/4] Synchronized account frontier (in-ledger=${synced}, initial_stored=${initStored}, cemented=${initConfirmed})`);
+  wasmExports.wasm_set_config(threshHi, threshLo, strategy, numAccounts, (Date.now() & 0xffffffff) >>> 0);
+
+  document.getElementById('st-stage-pill').textContent = '2/4 WASM GENERATING';
+  stressLog(`[2/4] Pre-generating & signing ${totalBlocks} state blocks in browser WebAssembly...`);
+
+  const batches = [];
+  let rem = totalBlocks;
+  let generated = 0;
+  const genStart = performance.now();
+
+  while (rem > 0 && !stressAbort) {
+    const chunk = Math.min(rem, batchSize);
+    const byteLen = wasmExports.wasm_generate_batch(chunk);
+    const actualCount = byteLen / 216;
+    const ptr = wasmExports.wasm_get_batch_ptr();
+    const copy = new Uint8Array(byteLen);
+    copy.set(new Uint8Array(wasmMemory.buffer, ptr, byteLen));
+    batches.push({ count: actualCount, bytes: copy });
+
+    generated += actualCount;
+    rem -= actualCount;
+    const elapsedSec = Math.max(0.001, (performance.now() - genStart) / 1000);
+    document.getElementById('st-gen-bps').textContent = fmtNum(Math.round(generated / elapsedSec));
+    document.getElementById('st-gen-count').textContent = fmtNum(generated);
+    document.getElementById('st-progress').style.width = `${Math.min(100, (generated / totalBlocks) * (dryRun ? 100 : 40))}%`;
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  const genDurSec = Math.max(0.001, (performance.now() - genStart) / 1000);
+  const genBps = Math.round(generated / genDurSec);
+  stressLog(`  -> Generated ${generated} signed 216-byte StateBlocks in ${(genDurSec * 1000).toFixed(1)} ms (${fmtNum(genBps)} blocks/sec in WASM)`);
+
+  if (dryRun || stressAbort) {
+    document.getElementById('st-stage-pill').textContent = 'DONE (DRY RUN)';
+    stressRunning = false;
+    document.getElementById('st-start-btn').disabled = false;
+    document.getElementById('st-stop-btn').disabled = true;
+    return;
+  }
+
+  document.getElementById('st-stage-pill').textContent = '3/4 STREAMING TO BOARD';
+  stressLog(`[3/4] Streaming ${batches.length} binary batches (${(generated * 216 / 1024).toFixed(1)} KB) to node...`);
+
+  const sendStart = performance.now();
+  let totalAccepted = 0;
+  let totalSent = 0;
+
+  for (let i = 0; i < batches.length && !stressAbort; i++) {
+    const b = batches[i];
+    const t0 = performance.now();
+    const url = `/api/stress_batch?zero_pow=${isZeroPow ? 1 : 0}&autoconfirm=${autoConfirm ? 1 : 0}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: b.bytes
+    });
+    const rep = await res.json();
+    const dtMs = performance.now() - t0;
+
+    totalSent += b.count;
+    totalAccepted += (rep.accepted || 0);
+    const sendElapsed = Math.max(0.001, (performance.now() - sendStart) / 1000);
+    const streamBps = Math.round(totalSent / sendElapsed);
+
+    document.getElementById('st-sent-bps').textContent = fmtNum(streamBps);
+    document.getElementById('st-accepted').textContent = fmtNum(totalAccepted);
+    document.getElementById('st-bpq').textContent = fmtNum(rep.bpq_len || 0);
+    document.getElementById('st-progress').style.width = `${40 + Math.min(40, (totalSent / generated) * 40)}%`;
+
+    if (i === 0 || (i + 1) % 5 === 0 || i + 1 === batches.length) {
+      stressLog(`  Batch ${i + 1}/${batches.length}: ${b.count} blks in ${dtMs.toFixed(1)} ms (board PoW=${rep.pow_us}us, enq=${rep.enq_us}us, BPQ=${rep.bpq_len})`);
+    }
+
+    if (targetRate > 0) {
+      const expectedSec = totalSent / targetRate;
+      const actualSec = (performance.now() - sendStart) / 1000;
+      if (expectedSec > actualSec) {
+        await new Promise(r => setTimeout(r, (expectedSec - actualSec) * 1000));
+      }
+    }
+  }
+
+  document.getElementById('st-stage-pill').textContent = '4/4 COMMITTING & CEMENTING';
+  stressLog(`[4/4] Waiting for Hart 6 single-writer B-Tree pipeline to drain...`);
+
+  const waitStart = performance.now();
+  while (!stressAbort && (performance.now() - waitStart) < 25000) {
+    await pollMetrics();
+    const curStored = lastMetrics ? lastMetrics.blocks_stored : initStored;
+    const curConfirmed = lastMetrics ? lastMetrics.blocks_confirmed : initConfirmed;
+    const growth = Math.max(0, curStored - initStored);
+    const cemGrowth = Math.max(0, curConfirmed - initConfirmed);
+    const e2eSec = Math.max(0.001, (performance.now() - sendStart) / 1000);
+    const commitBps = Math.round(growth / e2eSec);
+
+    document.getElementById('st-commit-bps').textContent = fmtNum(commitBps);
+    document.getElementById('st-growth').textContent = fmtNum(growth);
+    document.getElementById('st-cem-growth').textContent = fmtNum(cemGrowth);
+
+    if ((lastMetrics && lastMetrics.bpq_len === 0 && lastMetrics.confirming_set_len === 0) || growth >= totalAccepted) {
+      break;
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+
+  await pollMetrics();
+  const totalE2eSec = Math.max(0.001, (performance.now() - sendStart) / 1000);
+  const finalGrowth = Math.max(0, (lastMetrics ? lastMetrics.blocks_stored : initStored) - initStored);
+  const finalCem = Math.max(0, (lastMetrics ? lastMetrics.blocks_confirmed : initConfirmed) - initConfirmed);
+  const finalCommitBps = (finalGrowth / totalE2eSec).toFixed(1);
+
+  document.getElementById('st-progress').style.width = '100%';
+  document.getElementById('st-stage-pill').textContent = 'COMPLETED';
+  stressLog(`============================================================`);
+  stressLog(`  STRESS RUN COMPLETED`);
+  stressLog(`  WASM Generation Rate: ${fmtNum(genBps)} blocks/sec`);
+  stressLog(`  Blocks Accepted:      ${totalAccepted} / ${totalSent}`);
+  stressLog(`  Ledger Block Growth:  +${finalGrowth} blocks (Cemented: +${finalCem})`);
+  stressLog(`  End-to-End Time:      ${(totalE2eSec * 1000).toFixed(1)} ms (${finalCommitBps} committed bps)`);
+  stressLog(`============================================================`);
+
+  stressRunning = false;
+  document.getElementById('st-start-btn').disabled = false;
+  document.getElementById('st-stop-btn').disabled = true;
+}
+
+// ==================== INITIALIZATION ====================
+setInterval(pollMetrics, 1000);
+pollMetrics();
+refreshPeers();
+initStressWasm();
+</script>
+</body>
+</html>

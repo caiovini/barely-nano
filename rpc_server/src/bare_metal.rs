@@ -14,6 +14,12 @@ impl BareMetalRpcServer {
     }
 
     pub fn handle_request(&self, request: &str) -> Option<String> {
+        if request.starts_with("OPTIONS ") {
+            return Some(String::from(
+                "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+            ));
+        }
+
         let body_opt = if let Some(body_start) = request.find("\r\n\r\n") {
             Some(&request[body_start + 4..])
         } else if let Some(body_start) = request.find("\n\n") {
@@ -31,7 +37,7 @@ impl BareMetalRpcServer {
                     }
                     Err(e) => {
                         return Some(format!(
-                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{\"error\":\"Invalid JSON: {}\"}}",
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"error\":\"Invalid JSON: {}\"}}",
                             e
                         ));
                     }
@@ -71,7 +77,7 @@ impl BareMetalRpcServer {
     fn format_response(&self, result: serde_json::Value) -> String {
         let resp_body = serde_json::to_string(&result).unwrap_or_else(|_| String::from("{\"error\":\"Internal error\"}"));
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             resp_body.len(), resp_body
         )
     }

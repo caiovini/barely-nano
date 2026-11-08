@@ -1,0 +1,20 @@
+[workspace]
+
+[package]
+name = "nano_stress_wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nano_stress_wasm"
+path = "../src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rsnano_sha = { path = "../../../nullables/sha" }
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 3
+strip = true

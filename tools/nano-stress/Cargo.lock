@@ -288,6 +288,7 @@ dependencies = [
  "rsnano_core",
  "rsnano_ledger",
  "rsnano_messages",
+ "rsnano_sha",
  "rsnano_work",
  "serde",
  "serde_json",
