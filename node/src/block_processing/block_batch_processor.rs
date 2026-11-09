@@ -26,6 +26,90 @@ pub static PROF: [AtomicU64; 8] = [
     AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
 ];
 
+const FAST_HASH_SLOTS: usize = 1024;
+const FAST_HASH_MASK: usize = FAST_HASH_SLOTS - 1;
+const FAST_HASH_MAX_INDEXED: usize = 768;
+
+struct FastBlockHashMap<V> {
+    slots: [u16; FAST_HASH_SLOTS],
+    entries: Vec<(rsnano_core::BlockHash, V)>,
+}
+
+impl<V> FastBlockHashMap<V> {
+    #[inline]
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            slots: [0u16; FAST_HASH_SLOTS],
+            entries: Vec::with_capacity(cap),
+        }
+    }
+
+    #[inline(always)]
+    fn hash_idx(k: &rsnano_core::BlockHash) -> usize {
+        (u64::from_ne_bytes(k.as_bytes()[0..8].try_into().unwrap()) as usize) & FAST_HASH_MASK
+    }
+
+    #[inline]
+    fn find_index(&self, key: &rsnano_core::BlockHash) -> Option<usize> {
+        let mut h = Self::hash_idx(key);
+        loop {
+            let s = self.slots[h];
+            if s == 0 {
+                break;
+            }
+            let idx = (s - 1) as usize;
+            if &self.entries[idx].0 == key {
+                return Some(idx);
+            }
+            h = (h + 1) & FAST_HASH_MASK;
+        }
+        if self.entries.len() > FAST_HASH_MAX_INDEXED {
+            for idx in FAST_HASH_MAX_INDEXED..self.entries.len() {
+                if &self.entries[idx].0 == key {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn contains_key(&self, key: &rsnano_core::BlockHash) -> bool {
+        self.find_index(key).is_some()
+    }
+
+    #[inline]
+    fn get(&self, key: &rsnano_core::BlockHash) -> Option<&V> {
+        self.find_index(key).map(|idx| &self.entries[idx].1)
+    }
+
+    #[inline]
+    fn insert(&mut self, key: rsnano_core::BlockHash, val: V) {
+        if self.entries.len() < FAST_HASH_MAX_INDEXED {
+            let mut h = Self::hash_idx(&key);
+            loop {
+                let s = self.slots[h];
+                if s == 0 {
+                    let idx = self.entries.len();
+                    self.entries.push((key, val));
+                    self.slots[h] = (idx + 1) as u16;
+                    return;
+                }
+                let idx = (s - 1) as usize;
+                if self.entries[idx].0 == key {
+                    self.entries[idx].1 = val;
+                    return;
+                }
+                h = (h + 1) & FAST_HASH_MASK;
+            }
+        } else if let Some(idx) = self.find_index(&key) {
+            self.entries[idx].1 = val;
+        } else {
+            self.entries.push((key, val));
+        }
+    }
+}
+
 pub(crate) struct BlockBatchProcessor {
     pub ledger: Arc<Ledger>,
     pub unchecked: Arc<UncheckedMap>,
@@ -59,12 +143,10 @@ impl BlockBatchProcessor {
         self.roll_back_competitor_blocks(&batch);
 
         // Parallel signature verification across harts (skipping blocks guaranteed to fail as GapPrevious)
-        let mut playable_hashes: alloc::collections::BTreeMap<
-            rsnano_core::BlockHash,
-            Option<rsnano_core::Amount>,
-        > = alloc::collections::BTreeMap::new();
-        let mut to_verify = alloc::vec::Vec::new();
         let batch_len = batch.len();
+        let mut playable_hashes: FastBlockHashMap<Option<rsnano_core::Amount>> =
+            FastBlockHashMap::with_capacity(batch_len);
+        let mut to_verify = alloc::vec::Vec::with_capacity(batch_len);
         for (idx, ctx) in batch.iter().enumerate() {
             if idx + 4 < batch_len {
                 let ahead = &batch[idx + 4].block;
@@ -266,10 +348,8 @@ impl BlockBatchProcessor {
             .collect();
 
         let mut keep_in_unchecked = alloc::vec::Vec::with_capacity(result.len());
-        let mut in_batch_failed: alloc::collections::BTreeMap<
-            rsnano_core::BlockHash,
-            (usize, Option<rsnano_core::Amount>),
-        > = alloc::collections::BTreeMap::new();
+        let mut in_batch_failed: FastBlockHashMap<(usize, Option<rsnano_core::Amount>)> =
+            FastBlockHashMap::with_capacity(result.len());
 
         for (status, block_ctx) in &result {
             let b = &block_ctx.block;
@@ -483,6 +563,9 @@ impl BlockBatchProcessor {
     }
 
     fn roll_back_competitor_blocks(&self, batch: &VecDeque<Arc<BlockContext>>) {
+        if !batch.iter().any(|i| i.source == BlockSource::Forced) {
+            return;
+        }
         let fork_blocks = batch.iter().filter_map(|i| {
             if i.source == BlockSource::Forced {
                 Some(&i.block)

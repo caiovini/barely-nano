@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Barely-Nano • RISC-V Bare-Metal Node Dashboard</title>
 <style>
 :root {
@@ -440,12 +441,12 @@ canvas {
               <tr><th>Stage / Hart</th><th>Metric</th><th>Cumulative</th></tr>
             </thead>
             <tbody>
-              <tr><td>Harts 0, 2, 3 (SIMD Crypto)</td><td>Verified Sigs</td><td class="mono" id="p-verified">0</td></tr>
+              <tr><td>Harts 2, 3 (SIMD Crypto)</td><td>Verified Sigs</td><td class="mono" id="p-verified">0</td></tr>
               <tr><td>Hart 1 (Smoltcp + RPC)</td><td>Net / MsgProc</td><td class="mono" id="p-hart1">0 ms / 0 ms</td></tr>
               <tr><td>Hart 6 (Sig Wait)</td><td>Batch Sig Wait</td><td class="mono" id="p-sig-ms">0 ms</td></tr>
-              <tr><td>Hart 6 (B-Tree Insert)</td><td>Ledger Commit</td><td class="mono" id="p-ledger-ms">0 ms</td></tr>
-              <tr><td>Hart 6 (Post/Unchecked)</td><td>Trigger & Events</td><td class="mono" id="p-post-ms">0 ms</td></tr>
-              <tr><td>Hart 6 (WAL Checkpoint)</td><td>Pages / Time</td><td class="mono" id="p-wal">0 pgs / 0 ms</td></tr>
+              <tr><td>Harts 5, 6 (B-Tree Shards)</td><td>Ledger Commit</td><td class="mono" id="p-ledger-ms">0 ms</td></tr>
+              <tr><td>Harts 5, 6 (Post/Unchecked)</td><td>Trigger & Events</td><td class="mono" id="p-post-ms">0 ms</td></tr>
+              <tr><td>Harts 5, 6 (WAL Checkpoint)</td><td>Pages / Time</td><td class="mono" id="p-wal">0 pgs / 0 ms</td></tr>
             </tbody>
           </table>
         </div>
@@ -479,31 +480,33 @@ canvas {
   <section id="tab-wallet" class="tab-pane">
     <div class="card" style="margin-bottom:16px">
       <h2>
-        <span>Hardware-Encrypted Node Wallets (eFuse Key)</span>
+        <span>Host Browser Wallets (Client-Side WASM • Keys Never Leave Browser)</span>
         <div class="btn-row">
-          <button class="btn btn-sec" onclick="loadWallets()">Refresh Wallets</button>
-          <button class="btn" onclick="createWallet()">+ New Wallet</button>
+          <button class="btn btn-sec" onclick="loadWallets()">Refresh Balances</button>
+          <button class="btn" onclick="createWallet()">+ New Browser Wallet</button>
           <button class="btn btn-sec" onclick="createAccount()">+ New Account</button>
+          <button class="btn btn-sec" onclick="exportWalletSeed()">Backup Seed</button>
           <button class="btn btn-green" onclick="receiveAllPending()">Receive All Pending</button>
+          <button class="btn btn-danger" onclick="deleteBrowserWallet()">Delete Wallet</button>
         </div>
       </h2>
       <div class="form-grid-3">
         <div>
-          <label>Active Wallet ID</label>
+          <label>Active Browser Wallet</label>
           <select id="w-select" onchange="onWalletSelect()"></select>
         </div>
         <div>
-          <label>Custom Wallet ID / Seed Import</label>
+          <label>Import 64-Hex Seed (Client-Side Only)</label>
           <div class="input-group">
-            <input id="w-seed-input" type="password" placeholder="Optional 64-hex seed to import">
-            <button class="btn btn-sec" onclick="changeWalletSeed()">Set Seed</button>
+            <input id="w-seed-input" type="password" placeholder="Optional 64-hex seed to import in browser">
+            <button class="btn btn-sec" onclick="changeWalletSeed()">Import Seed</button>
           </div>
         </div>
         <div>
-          <label>Wallet Password (Optional)</label>
+          <label>Browser Passphrase Lock (Optional)</label>
           <div class="input-group">
-            <input id="w-pass-input" type="password" placeholder="Password">
-            <button class="btn btn-sec" onclick="unlockWallet()">Unlock</button>
+            <input id="w-pass-input" type="password" placeholder="Passphrase (local browser lock)">
+            <button class="btn btn-sec" onclick="unlockWallet()">Set / Unlock</button>
           </div>
         </div>
       </div>
@@ -513,7 +516,7 @@ canvas {
     <div class="row-2">
       <div class="card">
         <h2>
-          <span>Wallet Accounts & Balances</span>
+          <span>Browser Wallet Accounts & Balances</span>
           <span class="pill" id="w-acc-count">0 Accounts</span>
         </h2>
         <div class="table-wrap" style="max-height:320px;overflow-y:auto">
@@ -522,7 +525,7 @@ canvas {
               <tr><th>Account</th><th>Balance (NANO)</th><th>Receivable</th><th>Action</th></tr>
             </thead>
             <tbody id="w-accounts-tbody">
-              <tr><td colspan="4" style="color:var(--muted)">No wallet selected. Click "+ New Wallet" or "Refresh Wallets".</td></tr>
+              <tr><td colspan="4" style="color:var(--muted)">No browser wallet yet. Click "+ New Browser Wallet" to generate one in your browser.</td></tr>
             </tbody>
           </table>
         </div>
@@ -530,8 +533,8 @@ canvas {
 
       <div class="card">
         <h2>
-          <span>Send NANO</span>
-          <span class="pill">WASM PoW Assisted</span>
+          <span>Send NANO (Signed in Browser WASM)</span>
+          <span class="pill">Client-Side Ed25519 + PoW</span>
         </h2>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div>
@@ -547,10 +550,10 @@ canvas {
             <input id="w-send-amount" placeholder="0.1" value="0.001">
           </div>
           <div>
-            <label class="chk-label"><input type="checkbox" id="w-use-wasm-pow" checked>Precompute Proof-of-Work in Browser via WebAssembly (Zero Node CPU Load)</label>
+            <label class="chk-label"><input type="checkbox" id="w-use-wasm-pow" checked disabled>Sign StateBlock & Compute Proof-of-Work in Browser via WebAssembly (Zero Keys on Node)</label>
           </div>
           <div class="btn-row">
-            <button class="btn" id="w-send-btn" onclick="sendNano()">Send Transaction</button>
+            <button class="btn" id="w-send-btn" onclick="sendNano()">Sign in Browser & Broadcast</button>
           </div>
           <div id="w-send-result" class="mono" style="font-size:12px;color:var(--green);word-break:break-all"></div>
         </div>
@@ -617,7 +620,7 @@ canvas {
             </label>
             <label class="chk-label">
               <input type="checkbox" id="pos-wallet-backup" checked>
-              Import ephemeral key into active Node Wallet as backup
+              Save ephemeral key into active Host Browser Wallet as backup
             </label>
           </div>
 
@@ -805,6 +808,8 @@ let cpsHistory = [];
 let wsConn = null;
 let wasmExports = null;
 let wasmMemory = null;
+let wasmLoading = false;
+let metricsInFlight = false;
 let stressRunning = false;
 let stressAbort = false;
 
@@ -818,6 +823,9 @@ function switchTab(name, btn) {
   }
   if (name === 'pos') {
     initPosTab();
+  }
+  if (name === 'stress' && !wasmExports && !wasmLoading) {
+    initStressWasm();
   }
 }
 
@@ -881,6 +889,8 @@ async function rpcCall(payload) {
 
 // ==================== METRICS POLLING & CHART ====================
 async function pollMetrics() {
+  if (metricsInFlight || wasmLoading) return;
+  metricsInFlight = true;
   try {
     const res = await fetch('/api/metrics');
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -938,6 +948,8 @@ async function pollMetrics() {
     const stBadge = document.getElementById('hdr-status');
     stBadge.textContent = 'OFFLINE';
     stBadge.className = 'badge warn';
+  } finally {
+    metricsInFlight = false;
   }
 }
 
@@ -1028,26 +1040,289 @@ function toggleWs() {
   };
 }
 
-// ==================== WALLET TAB ====================
+// ==================== HOST BROWSER WALLET & CLIENT-SIDE CRYPTO (WASM) ====================
+const BROWSER_WALLETS_KEY = 'barely_nano_browser_wallets_v1';
+const NANO_ALPHABET = '13456789abcdefghijkmnopqrstuwxyz';
+let browserWallets = [];
+let unlockedPassphrases = {};
+
+function randomHex32() {
+  const buf = new Uint8Array(32);
+  window.crypto.getRandomValues(buf);
+  return bytesToHex(buf);
+}
+
+function xorHex32(hexA, hexB) {
+  const a = hexToBytes(hexA);
+  const b = hexToBytes(hexB);
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) out[i] = a[i] ^ b[i];
+  return bytesToHex(out);
+}
+
+async function derivePassphraseMaskHex(passphrase, saltHex) {
+  if (!passphrase) return '0'.repeat(64);
+  const enc = new TextEncoder();
+  const keyMat = await window.crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveBits']);
+  const bits = await window.crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: hexToBytes(saltHex), iterations: 10000, hash: 'SHA-256' },
+    keyMat,
+    256
+  );
+  return bytesToHex(new Uint8Array(bits));
+}
+
+function encodeNanoAccount(pubBytes, checksumBytes) {
+  const revCheck = new Uint8Array([
+    checksumBytes[4], checksumBytes[3], checksumBytes[2], checksumBytes[1], checksumBytes[0]
+  ]);
+  const pubBig = BigInt('0x' + bytesToHex(pubBytes));
+  const chkBig = BigInt('0x' + bytesToHex(revCheck));
+  let number = (pubBig << 40n) | chkBig;
+  const chars = [];
+  for (let i = 0; i < 60; i++) {
+    chars.push(NANO_ALPHABET[Number(number & 31n)]);
+    number >>= 5n;
+  }
+  return 'nano_' + chars.reverse().join('');
+}
+
+function encodeNanoAccountFromPubHex(pubHex) {
+  const pubBytes = hexToBytes(pubHex);
+  const pubPtr = wasmExports.wasm_get_wallet_pub_ptr();
+  new Uint8Array(wasmMemory.buffer, pubPtr, 32).set(pubBytes);
+  wasmExports.wasm_pubkey_checksum();
+  const chkPtr = wasmExports.wasm_get_wallet_checksum_ptr();
+  const chkBytes = new Uint8Array(wasmMemory.buffer, chkPtr, 5);
+  return encodeNanoAccount(pubBytes, chkBytes);
+}
+
+function decodeNanoAccountToPubHex(addrStr) {
+  addrStr = (addrStr || '').trim();
+  if (/^[0-9a-fA-F]{64}$/.test(addrStr)) return addrStr.toUpperCase();
+  let prefixLen = 0;
+  if (addrStr.startsWith('nano_') || addrStr.startsWith('nano-')) prefixLen = 5;
+  else if (addrStr.startsWith('xrb_') || addrStr.startsWith('xrb-')) prefixLen = 4;
+  else throw new Error('Invalid Nano address prefix: ' + addrStr);
+  const body = addrStr.slice(prefixLen);
+  if (body.length !== 60 || (body[0] !== '1' && body[0] !== '3')) {
+    throw new Error('Invalid Nano address length: ' + addrStr);
+  }
+  let number = 0n;
+  for (let i = 0; i < 60; i++) {
+    const idx = NANO_ALPHABET.indexOf(body[i]);
+    if (idx < 0) throw new Error('Invalid character in Nano address');
+    number = (number << 5n) | BigInt(idx);
+  }
+  const chkBig = number & 0xffffffffffn;
+  const pubBig = number >> 40n;
+  const pubHex = pubBig.toString(16).padStart(64, '0').toUpperCase();
+  if (wasmExports) {
+    const pubBytes = hexToBytes(pubHex);
+    const pubPtr = wasmExports.wasm_get_wallet_pub_ptr();
+    new Uint8Array(wasmMemory.buffer, pubPtr, 32).set(pubBytes);
+    wasmExports.wasm_pubkey_checksum();
+    const chkPtr = wasmExports.wasm_get_wallet_checksum_ptr();
+    const chkBytes = new Uint8Array(wasmMemory.buffer, chkPtr, 5);
+    const revCheck = new Uint8Array([chkBytes[4], chkBytes[3], chkBytes[2], chkBytes[1], chkBytes[0]]);
+    const expectedChkBig = BigInt('0x' + bytesToHex(revCheck));
+    if (chkBig !== expectedChkBig) {
+      throw new Error('Invalid Nano address checksum: ' + addrStr);
+    }
+  }
+  return pubHex;
+}
+
+async function deriveDeterministicKeypair(seedHex, index) {
+  if (!wasmExports) await initStressWasm();
+  const seedBytes = hexToBytes(seedHex);
+  new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_seed_ptr(), 32).set(seedBytes);
+  wasmExports.wasm_derive_deterministic_key(index >>> 0);
+  const privBytes = new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_priv_ptr(), 32);
+  const pubBytes = new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_pub_ptr(), 32);
+  const chkBytes = new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_checksum_ptr(), 5);
+  return {
+    index: index >>> 0,
+    privateKey: bytesToHex(privBytes),
+    publicKey: bytesToHex(pubBytes),
+    account: encodeNanoAccount(pubBytes, chkBytes)
+  };
+}
+
+async function deriveKeypairFromPrivateHex(privHex) {
+  if (!wasmExports) await initStressWasm();
+  const privBytes = hexToBytes(privHex);
+  new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_priv_ptr(), 32).set(privBytes);
+  wasmExports.wasm_derive_from_privkey();
+  const pubBytes = new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_pub_ptr(), 32);
+  const chkBytes = new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_checksum_ptr(), 5);
+  return {
+    privateKey: bytesToHex(privBytes),
+    publicKey: bytesToHex(pubBytes),
+    account: encodeNanoAccount(pubBytes, chkBytes)
+  };
+}
+
+async function computeWasmWorkForRoot(rootHex) {
+  if (!wasmExports) await initStressWasm();
+  if (!wasmExports || !rootHex || rootHex.length !== 64) return null;
+  const rootBytes = hexToBytes(rootHex);
+  const rootPtr = wasmExports.wasm_get_pow_root_ptr();
+  new Uint8Array(wasmMemory.buffer, rootPtr, 32).set(rootBytes);
+  const isDev = (lastMetrics && lastMetrics.network === 'dev');
+  const hi = isDev ? 0xffc00000 : 0xffffffc0;
+  const lo = 0x00000000;
+  for (let round = 0; round < 500; round++) {
+    const found = wasmExports.wasm_compute_pow_step(hi, lo, 16384);
+    if (found === 1) {
+      const outPtr = wasmExports.wasm_get_pow_out_ptr();
+      return bytesToHex(new Uint8Array(wasmMemory.buffer, outPtr, 8));
+    }
+    await new Promise(r => setTimeout(r, 0));
+  }
+  return null;
+}
+
+async function signStateBlockInBrowser({
+  privateKeyHex,
+  account,
+  previousHex,
+  representative,
+  balanceRawStr,
+  linkHex,
+  workHex
+}) {
+  if (!wasmExports) await initStressWasm();
+  const accPubHex = decodeNanoAccountToPubHex(account);
+  const repAccount = (representative && representative.startsWith('nano_')) ? representative : account;
+  const repPubHex = decodeNanoAccountToPubHex(repAccount);
+  const prevHex = (previousHex || '').padStart(64, '0').toUpperCase();
+  const lnkHex = (/^[0-9a-fA-F]{64}$/.test(linkHex) ? linkHex : decodeNanoAccountToPubHex(linkHex)).toUpperCase();
+  const balBig = BigInt(balanceRawStr || '0');
+  const balHex = balBig.toString(16).padStart(32, '0');
+
+  const inPtr = wasmExports.wasm_get_state_input_ptr();
+  const stateIn = new Uint8Array(wasmMemory.buffer, inPtr, 176);
+  stateIn.fill(0);
+  stateIn[31] = 6; // BlockType::State = 6
+  stateIn.set(hexToBytes(accPubHex), 32);
+  stateIn.set(hexToBytes(prevHex), 64);
+  stateIn.set(hexToBytes(repPubHex), 96);
+  stateIn.set(hexToBytes(balHex), 128);
+  stateIn.set(hexToBytes(lnkHex), 144);
+
+  new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_wallet_priv_ptr(), 32).set(hexToBytes(privateKeyHex));
+  wasmExports.wasm_sign_state_block();
+
+  const hashHex = bytesToHex(new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_signed_hash_ptr(), 32));
+  const sigHex = bytesToHex(new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_signed_sig_ptr(), 64));
+  const powRoot = prevHex === '0'.repeat(64) ? accPubHex : prevHex;
+  const finalWork = workHex || (await computeWasmWorkForRoot(powRoot)) || '0000000000000000';
+
+  return {
+    hash: hashHex,
+    block: {
+      type: 'state',
+      account,
+      previous: prevHex,
+      representative: repAccount,
+      balance: balBig.toString(),
+      link: lnkHex,
+      link_as_account: encodeNanoAccountFromPubHex(lnkHex),
+      signature: sigHex,
+      work: finalWork
+    }
+  };
+}
+
+function loadBrowserWalletsFromStorage() {
+  try {
+    const raw = localStorage.getItem(BROWSER_WALLETS_KEY);
+    browserWallets = raw ? (JSON.parse(raw) || []) : [];
+  } catch (_) {
+    browserWallets = [];
+  }
+}
+
+function saveBrowserWalletsToStorage() {
+  try {
+    localStorage.setItem(BROWSER_WALLETS_KEY, JSON.stringify(browserWallets));
+  } catch (_) {}
+}
+
+async function getUnsealedAccountPrivKey(wallet, accEntry) {
+  if (!wallet.encrypted) return accEntry.privateKey;
+  const pass = unlockedPassphrases[wallet.id];
+  if (!pass) throw new Error('Browser wallet is locked. Enter passphrase and click "Set / Unlock".');
+  const mask = await derivePassphraseMaskHex(pass, wallet.salt);
+  const privHex = xorHex32(accEntry.privateKey, mask);
+  const derived = await deriveKeypairFromPrivateHex(privHex);
+  if (derived.publicKey !== accEntry.publicKey) {
+    throw new Error('Incorrect browser wallet passphrase');
+  }
+  return privHex;
+}
+
+async function getUnsealedWalletSeed(wallet) {
+  if (!wallet.encrypted) return wallet.seed;
+  const pass = unlockedPassphrases[wallet.id];
+  if (!pass) throw new Error('Browser wallet is locked. Enter passphrase and click "Set / Unlock".');
+  const mask = await derivePassphraseMaskHex(pass, wallet.salt);
+  const seedHex = xorHex32(wallet.seed, mask);
+  if (wallet.accounts.length > 0 && wallet.accounts[0].index === 0) {
+    const kp0 = await deriveDeterministicKeypair(seedHex, 0);
+    if (kp0.publicKey !== wallet.accounts[0].publicKey) {
+      throw new Error('Incorrect browser wallet passphrase');
+    }
+  }
+  return seedHex;
+}
+
 async function loadWallets() {
   try {
-    const res = await fetch('/api/wallets');
-    const data = await res.json();
+    loadBrowserWalletsFromStorage();
     const sel = document.getElementById('w-select');
     const current = sel.value;
     sel.innerHTML = '';
-    (data.wallets || []).forEach(w => {
+    browserWallets.forEach((w, idx) => {
       const opt = document.createElement('option');
       opt.value = w.id;
-      opt.textContent = `${w.id.slice(0, 16)}... (${w.accounts.length} accts)`;
+      const lockTag = w.encrypted ? (unlockedPassphrases[w.id] ? '🔓' : '🔒') : '🌐';
+      opt.textContent = `${lockTag} Browser Wallet #${idx + 1} (${w.id.slice(0, 12)}... • ${w.accounts.length} accts)`;
       sel.appendChild(opt);
     });
     if (current && Array.from(sel.options).some(o => o.value === current)) {
       sel.value = current;
     }
-    renderSelectedWallet(data.wallets || []);
+
+    // Query live balances & receivable amounts from node using public read-only RPCs
+    const activeWallet = browserWallets.find(x => x.id === sel.value);
+    if (activeWallet && activeWallet.accounts.length > 0) {
+      await Promise.all(activeWallet.accounts.map(async (a) => {
+        try {
+          const [info, rec] = await Promise.all([
+            rpcCall({ action: 'account_info', account: a.account }),
+            rpcCall({ action: 'receivable', account: a.account, threshold: '1', count: '20' })
+          ]);
+          a.balance = (info && info.balance && !info.error) ? info.balance : '0';
+          let recSum = 0n;
+          if (rec && rec.blocks && typeof rec.blocks === 'object' && !Array.isArray(rec.blocks)) {
+            for (const h of Object.keys(rec.blocks)) {
+              recSum += BigInt(rec.blocks[h] || '0');
+            }
+          }
+          a.receivable = recSum.toString();
+        } catch (_) {
+          a.balance = a.balance || '0';
+          a.receivable = a.receivable || '0';
+        }
+      }));
+      saveBrowserWalletsToStorage();
+    }
+
+    renderSelectedWallet(browserWallets);
   } catch (e) {
-    document.getElementById('w-status').textContent = 'Error loading wallets: ' + e.message;
+    document.getElementById('w-status').textContent = 'Error loading browser wallets: ' + e.message;
   }
 }
 
@@ -1063,13 +1338,15 @@ function renderSelectedWallet(wallets) {
   sendSel.innerHTML = '';
   if (!w) {
     document.getElementById('w-acc-count').textContent = '0 Accounts';
-    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No wallet found. Click "+ New Wallet" to create one.</td></tr>';
+    document.getElementById('w-status').textContent = 'All wallets & keys are generated in your browser (localStorage + WASM) and never sent to the node.';
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No browser wallet found. Click "+ New Browser Wallet" to generate one locally in your browser.</td></tr>';
     return;
   }
-  document.getElementById('w-status').textContent = `Active Wallet: ${w.id}`;
+  const lockInfo = w.encrypted ? (unlockedPassphrases[w.id] ? 'Unlocked in Browser RAM' : 'Locked (Passphrase required to sign)') : 'Unencrypted in Browser Storage';
+  document.getElementById('w-status').textContent = `Active Browser Wallet: ${w.id} • ${lockInfo}`;
   document.getElementById('w-acc-count').textContent = `${w.accounts.length} Accounts`;
   if (w.accounts.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No accounts in wallet. Click "+ New Account".</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No accounts in browser wallet. Click "+ New Account".</td></tr>';
     return;
   }
   tbody.innerHTML = w.accounts.map(a => {
@@ -1089,59 +1366,211 @@ function renderSelectedWallet(wallets) {
 }
 
 async function createWallet() {
-  const res = await rpcCall({ action: 'wallet_create' });
-  if (res.wallet) {
-    await rpcCall({ action: 'account_create', wallet: res.wallet });
-    await loadWallets();
-    document.getElementById('w-select').value = res.wallet;
-    await loadWallets();
-  }
+  const seedHex = randomHex32();
+  const walletId = randomHex32();
+  const acc0 = await deriveDeterministicKeypair(seedHex, 0);
+  const newWallet = {
+    id: walletId,
+    seed: seedHex,
+    salt: randomHex32(),
+    encrypted: false,
+    nextIndex: 1,
+    accounts: [{
+      index: 0,
+      account: acc0.account,
+      publicKey: acc0.publicKey,
+      privateKey: acc0.privateKey,
+      balance: '0',
+      receivable: '0'
+    }]
+  };
+  loadBrowserWalletsFromStorage();
+  browserWallets.push(newWallet);
+  saveBrowserWalletsToStorage();
+  await loadWallets();
+  document.getElementById('w-select').value = walletId;
+  await loadWallets();
+  document.getElementById('w-status').textContent = `Created new Browser Wallet in host browser! Account #0: ${acc0.account}`;
 }
 
 async function createAccount() {
+  loadBrowserWalletsFromStorage();
   const wid = document.getElementById('w-select').value;
-  if (!wid) return alert('Create or select a wallet first');
-  await rpcCall({ action: 'account_create', wallet: wid });
-  await loadWallets();
+  const w = browserWallets.find(x => x.id === wid);
+  if (!w) return alert('Create or select a browser wallet first');
+  try {
+    const seedHex = await getUnsealedWalletSeed(w);
+    const idx = w.nextIndex || w.accounts.length;
+    const kp = await deriveDeterministicKeypair(seedHex, idx);
+    let storedPriv = kp.privateKey;
+    if (w.encrypted) {
+      const mask = await derivePassphraseMaskHex(unlockedPassphrases[w.id], w.salt);
+      storedPriv = xorHex32(kp.privateKey, mask);
+    }
+    w.nextIndex = idx + 1;
+    w.accounts.push({
+      index: idx,
+      account: kp.account,
+      publicKey: kp.publicKey,
+      privateKey: storedPriv,
+      balance: '0',
+      receivable: '0'
+    });
+    saveBrowserWalletsToStorage();
+    await loadWallets();
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 async function changeWalletSeed() {
+  const seed = document.getElementById('w-seed-input').value.trim().toUpperCase();
+  if (!/^[0-9A-F]{64}$/.test(seed)) {
+    return alert('Enter a valid 64-character hex seed to import into the browser wallet');
+  }
+  loadBrowserWalletsFromStorage();
   const wid = document.getElementById('w-select').value;
-  const seed = document.getElementById('w-seed-input').value.trim();
-  if (!wid || seed.length !== 64) return alert('Select a wallet and enter a 64-character hex seed');
-  const res = await rpcCall({ action: 'wallet_change_seed', wallet: wid, seed });
-  document.getElementById('w-status').textContent = JSON.stringify(res);
+  let w = browserWallets.find(x => x.id === wid);
+  const acc0 = await deriveDeterministicKeypair(seed, 0);
+  if (!w) {
+    w = {
+      id: randomHex32(),
+      seed,
+      salt: randomHex32(),
+      encrypted: false,
+      nextIndex: 1,
+      accounts: []
+    };
+    browserWallets.push(w);
+  } else {
+    w.seed = seed;
+    w.encrypted = false;
+    delete unlockedPassphrases[w.id];
+    w.nextIndex = 1;
+  }
+  w.accounts = [{
+    index: 0,
+    account: acc0.account,
+    publicKey: acc0.publicKey,
+    privateKey: acc0.privateKey,
+    balance: '0',
+    receivable: '0'
+  }];
+  document.getElementById('w-seed-input').value = '';
+  saveBrowserWalletsToStorage();
   await loadWallets();
+  document.getElementById('w-select').value = w.id;
+  await loadWallets();
+  document.getElementById('w-status').textContent = `Imported seed into host browser wallet. Account #0: ${acc0.account}`;
 }
 
 async function unlockWallet() {
+  loadBrowserWalletsFromStorage();
   const wid = document.getElementById('w-select').value;
+  const w = browserWallets.find(x => x.id === wid);
   const password = document.getElementById('w-pass-input').value;
-  if (!wid) return;
-  const res = await rpcCall({ action: 'password_enter', wallet: wid, password });
-  document.getElementById('w-status').textContent = `Password valid: ${res.valid}`;
+  if (!w) return alert('Create or select a browser wallet first');
+  if (!password) return alert('Enter a passphrase');
+
+  try {
+    if (!w.encrypted) {
+      const mask = await derivePassphraseMaskHex(password, w.salt);
+      w.seed = xorHex32(w.seed, mask);
+      for (const a of w.accounts) {
+        a.privateKey = xorHex32(a.privateKey, mask);
+      }
+      w.encrypted = true;
+      unlockedPassphrases[w.id] = password;
+      saveBrowserWalletsToStorage();
+      document.getElementById('w-pass-input').value = '';
+      await loadWallets();
+      document.getElementById('w-status').textContent = 'Encrypted browser wallet in localStorage with PBKDF2 passphrase.';
+    } else {
+      unlockedPassphrases[w.id] = password;
+      await getUnsealedWalletSeed(w);
+      document.getElementById('w-pass-input').value = '';
+      await loadWallets();
+      document.getElementById('w-status').textContent = 'Browser wallet unlocked in browser memory.';
+    }
+  } catch (e) {
+    delete unlockedPassphrases[w.id];
+    document.getElementById('w-status').textContent = 'Unlock failed: ' + e.message;
+  }
 }
 
-async function computeWasmWorkForRoot(rootHex) {
-  if (!wasmExports || rootHex.length !== 64) return null;
-  const rootBytes = hexToBytes(rootHex);
-  const rootPtr = wasmExports.wasm_get_pow_root_ptr();
-  new Uint8Array(wasmMemory.buffer, rootPtr, 32).set(rootBytes);
-  const isDev = (lastMetrics && lastMetrics.network === 'dev');
-  const hi = isDev ? 0xffc00000 : 0xffffffc0;
-  const lo = 0x00000000;
-  for (let round = 0; round < 500; round++) {
-    const found = wasmExports.wasm_compute_pow_step(hi, lo, 16384);
-    if (found === 1) {
-      const outPtr = wasmExports.wasm_get_pow_out_ptr();
-      return bytesToHex(new Uint8Array(wasmMemory.buffer, outPtr, 8));
-    }
-    await new Promise(r => setTimeout(r, 0));
+async function exportWalletSeed() {
+  loadBrowserWalletsFromStorage();
+  const wid = document.getElementById('w-select').value;
+  const w = browserWallets.find(x => x.id === wid);
+  if (!w) return alert('Select a browser wallet first');
+  try {
+    const seedHex = await getUnsealedWalletSeed(w);
+    prompt('Backup your 64-hex Browser Wallet Seed (keep secret):', seedHex);
+  } catch (e) {
+    alert(e.message);
   }
-  return null;
+}
+
+async function deleteBrowserWallet() {
+  loadBrowserWalletsFromStorage();
+  const wid = document.getElementById('w-select').value;
+  const w = browserWallets.find(x => x.id === wid);
+  if (!w) return;
+  if (!confirm(`Delete Browser Wallet ${w.id.slice(0, 12)}... from this browser? Make sure you backed up your seed!`)) return;
+  browserWallets = browserWallets.filter(x => x.id !== wid);
+  delete unlockedPassphrases[wid];
+  saveBrowserWalletsToStorage();
+  await loadWallets();
+}
+
+async function receiveAccountPendingInBrowser(wallet, accEntry) {
+  const privKeyHex = await getUnsealedAccountPrivKey(wallet, accEntry);
+  const rec = await rpcCall({
+    action: 'receivable',
+    account: accEntry.account,
+    threshold: '1',
+    include_only_confirmed: 'true',
+    count: '20'
+  });
+  const blocksObj = (rec && rec.blocks && typeof rec.blocks === 'object' && !Array.isArray(rec.blocks))
+    ? rec.blocks
+    : {};
+  const sendHashes = Object.keys(blocksObj);
+  let received = 0;
+
+  for (const sendHash of sendHashes) {
+    const amtRawStr = blocksObj[sendHash];
+    const info = await rpcCall({ action: 'account_info', account: accEntry.account });
+    const hasFrontier = info && info.frontier && !info.error;
+    const prevHash = hasFrontier ? info.frontier : '0'.repeat(64);
+    const curBal = hasFrontier ? BigInt(info.balance || '0') : 0n;
+    const newBal = (curBal + BigInt(amtRawStr)).toString();
+    const repAccount = (hasFrontier && info.representative) ? info.representative : accEntry.account;
+
+    const signed = await signStateBlockInBrowser({
+      privateKeyHex: privKeyHex,
+      account: accEntry.account,
+      previousHex: prevHash,
+      representative: repAccount,
+      balanceRawStr: newBal,
+      linkHex: sendHash
+    });
+
+    const proc = await rpcCall({
+      action: 'process',
+      json_block: 'true',
+      subtype: hasFrontier ? 'receive' : 'open',
+      block: signed.block
+    });
+    if (proc && proc.hash) {
+      received++;
+    }
+  }
+  return received;
 }
 
 async function sendNano() {
+  loadBrowserWalletsFromStorage();
   const wid = document.getElementById('w-select').value;
   const source = document.getElementById('w-send-source').value;
   const destination = document.getElementById('w-send-dest').value.trim();
@@ -1149,38 +1578,66 @@ async function sendNano() {
   const outEl = document.getElementById('w-send-result');
   if (!wid || !source || !destination) return alert('Fill in source and destination');
 
-  outEl.textContent = 'Preparing transaction...';
-  let workHex = undefined;
-  if (document.getElementById('w-use-wasm-pow').checked && wasmExports) {
+  const w = browserWallets.find(x => x.id === wid);
+  const accEntry = w ? w.accounts.find(a => a.account === source) : null;
+  if (!w || !accEntry) return alert('Source account not found in active browser wallet');
+
+  try {
+    decodeNanoAccountToPubHex(destination);
+    const privKeyHex = await getUnsealedAccountPrivKey(w, accEntry);
+    outEl.textContent = 'Querying account frontier...';
     const info = await rpcCall({ action: 'account_info', account: source });
-    if (info && info.frontier) {
-      outEl.textContent = 'Computing Proof-of-Work in browser via WebAssembly...';
-      workHex = await computeWasmWorkForRoot(info.frontier);
+    if (!info || !info.frontier || info.error) {
+      outEl.textContent = 'Error: Source account is not open or has 0 balance.';
+      return;
     }
+    const curBal = BigInt(info.balance || '0');
+    const sendAmt = BigInt(amountRaw);
+    if (sendAmt <= 0n || sendAmt > curBal) {
+      outEl.textContent = `Error: Insufficient balance (${rawToNanoStr(curBal.toString())} NANO).`;
+      return;
+    }
+    const newBal = (curBal - sendAmt).toString();
+    outEl.textContent = 'Computing Proof-of-Work & Ed25519 signature in Browser WASM...';
+    const signed = await signStateBlockInBrowser({
+      privateKeyHex: privKeyHex,
+      account: source,
+      previousHex: info.frontier,
+      representative: info.representative || source,
+      balanceRawStr: newBal,
+      linkHex: destination
+    });
+
+    const proc = await rpcCall({
+      action: 'process',
+      json_block: 'true',
+      subtype: 'send',
+      block: signed.block
+    });
+    outEl.textContent = JSON.stringify(proc);
+    await loadWallets();
+  } catch (e) {
+    outEl.textContent = 'Error: ' + e.message;
   }
-  const payload = { action: 'send', wallet: wid, source, destination, amount: amountRaw };
-  if (workHex) payload.work = workHex;
-  const res = await rpcCall(payload);
-  outEl.textContent = JSON.stringify(res);
-  await loadWallets();
 }
 
 async function receiveAllPending() {
+  loadBrowserWalletsFromStorage();
   const wid = document.getElementById('w-select').value;
-  if (!wid) return;
+  const w = browserWallets.find(x => x.id === wid);
+  if (!w) return;
   const outEl = document.getElementById('w-status');
-  const rec = await rpcCall({ action: 'wallet_receivable', wallet: wid, count: '20' });
-  const blocksMap = rec.blocks || {};
-  let received = 0;
-  for (const acc of Object.keys(blocksMap)) {
-    const hashes = Array.isArray(blocksMap[acc]) ? blocksMap[acc] : Object.keys(blocksMap[acc] || {});
-    for (const h of hashes) {
-      await rpcCall({ action: 'receive', wallet: wid, account: acc, block: h });
-      received++;
+  try {
+    outEl.textContent = 'Signing & receiving pending blocks in browser WASM...';
+    let received = 0;
+    for (const accEntry of w.accounts) {
+      received += await receiveAccountPendingInBrowser(w, accEntry);
     }
+    outEl.textContent = `Received ${received} pending block(s) (signed in browser).`;
+    await loadWallets();
+  } catch (e) {
+    outEl.textContent = 'Receive error: ' + e.message;
   }
-  outEl.textContent = `Received ${received} pending block(s).`;
-  await loadWallets();
 }
 
 async function inspectAccount(accArg) {
@@ -1277,15 +1734,11 @@ async function fillPosFromWallet() {
     savePosSettings();
     return;
   }
-  try {
-    const res = await fetch('/api/wallets');
-    const data = await res.json();
-    const wallets = data.wallets || [];
-    if (wallets.length > 0 && wallets[0].accounts && wallets[0].accounts.length > 0) {
-      document.getElementById('pos-merchant-dest').value = wallets[0].accounts[0].account;
-      savePosSettings();
-    }
-  } catch (_) {}
+  loadBrowserWalletsFromStorage();
+  if (browserWallets.length > 0 && browserWallets[0].accounts && browserWallets[0].accounts.length > 0) {
+    document.getElementById('pos-merchant-dest').value = browserWallets[0].accounts[0].account;
+    savePosSettings();
+  }
 }
 
 function copyPosField(kind) {
@@ -1302,7 +1755,7 @@ function togglePosPrivKey() {
   if (!posActive || !box) return;
   if (box.style.display === 'none') {
     box.style.display = 'block';
-    box.textContent = `Ephemeral Private Key: ${posActive.privateKey}`;
+    box.textContent = `Ephemeral Private Key (Browser Only): ${posActive.privateKey}`;
   } else {
     box.style.display = 'none';
   }
@@ -1328,12 +1781,9 @@ async function createPosPayment() {
   }
 
   document.getElementById('pos-log').textContent = '';
-  posLog('Generating fresh ephemeral keypair...');
-  const keyRes = await rpcCall({ action: 'key_create' });
-  if (!keyRes || !keyRes.account || !keyRes.private || !keyRes.public) {
-    posLog('ERROR: Failed to generate key via RPC key_create');
-    return;
-  }
+  posLog('Generating fresh ephemeral keypair in browser WASM (keys never leave browser)...');
+  const ephPrivHex = randomHex32();
+  const keyRes = await deriveKeypairFromPrivateHex(ephPrivHex);
 
   const memo = document.getElementById('pos-memo').value.trim() || `Invoice #${posHistory.length + 1}`;
   const uri = `nano:${keyRes.account}?amount=${amountRaw}`;
@@ -1345,8 +1795,8 @@ async function createPosPayment() {
     amountNano: rawToNanoStr(amountRaw),
     amountRaw,
     account: keyRes.account,
-    publicKey: keyRes.public,
-    privateKey: keyRes.private,
+    publicKey: keyRes.publicKey,
+    privateKey: keyRes.privateKey,
     merchantDest,
     autoSweep,
     uri,
@@ -1360,9 +1810,19 @@ async function createPosPayment() {
   savePosHistory();
 
   if (document.getElementById('pos-wallet-backup').checked) {
+    loadBrowserWalletsFromStorage();
     const wid = document.getElementById('w-select').value;
-    if (wid) {
-      rpcCall({ action: 'wallet_add', wallet: wid, key: keyRes.private, work: 'false' }).catch(() => {});
+    const w = browserWallets.find(x => x.id === wid) || browserWallets[0];
+    if (w && !w.encrypted && !w.accounts.some(a => a.account === keyRes.account)) {
+      w.accounts.push({
+        index: -1,
+        account: keyRes.account,
+        publicKey: keyRes.publicKey,
+        privateKey: keyRes.privateKey,
+        balance: '0',
+        receivable: '0'
+      });
+      saveBrowserWalletsToStorage();
     }
   }
 
@@ -1388,7 +1848,7 @@ async function createPosPayment() {
   // Precompute Open-Block PoW in browser WASM so receiving is instant when customer pays!
   document.getElementById('pos-pow-status').textContent = 'Precomputing Open PoW in WASM...';
   computeWasmWorkForRoot(posActive.publicKey).then(workHex => {
-    if (posActive && posActive.publicKey === keyRes.public && workHex) {
+    if (posActive && posActive.publicKey === keyRes.publicKey && workHex) {
       posActive.openWork = workHex;
       document.getElementById('pos-pow-status').textContent = `Open PoW Ready (${workHex}) ✓`;
       document.getElementById('pos-pow-status').style.color = 'var(--green)';
@@ -1461,35 +1921,29 @@ async function checkAndSweepPosNow(targetInvoice) {
           ? inv.merchantDest
           : inv.account;
 
-        let workHex = (!hasFrontier && inv.openWork) ? inv.openWork : await computeWasmWorkForRoot(powRoot);
-        const createArgs = {
-          action: 'block_create',
-          json_block: 'true',
-          type: 'state',
-          key: inv.privateKey,
+        const workHex = (!hasFrontier && inv.openWork) ? inv.openWork : await computeWasmWorkForRoot(powRoot);
+        const signedOpen = await signStateBlockInBrowser({
+          privateKeyHex: inv.privateKey,
           account: inv.account,
-          previous: prevHash,
+          previousHex: prevHash,
           representative: repAccount,
-          balance: newBal,
-          link: sendHash
-        };
-        if (workHex) createArgs.work = workHex;
+          balanceRawStr: newBal,
+          linkHex: sendHash,
+          workHex
+        });
 
-        const created = await rpcCall(createArgs);
-        if (created && created.block) {
-          const proc = await rpcCall({
-            action: 'process',
-            json_block: 'true',
-            subtype: hasFrontier ? 'receive' : 'open',
-            block: created.block
-          });
-          if (proc && proc.hash) {
-            inv.openHash = proc.hash;
-            inv.status = 'RECEIVED';
-            posLog(`Opened/Received on ephemeral account: ${proc.hash.slice(0, 16)}...`);
-          } else {
-            posLog(`Receive process message: ${JSON.stringify(proc)}`);
-          }
+        const proc = await rpcCall({
+          action: 'process',
+          json_block: 'true',
+          subtype: hasFrontier ? 'receive' : 'open',
+          block: signedOpen.block
+        });
+        if (proc && proc.hash) {
+          inv.openHash = proc.hash;
+          inv.status = 'RECEIVED';
+          posLog(`Opened/Received on ephemeral account (signed in browser): ${proc.hash.slice(0, 16)}...`);
+        } else {
+          posLog(`Receive process message: ${JSON.stringify(proc)}`);
         }
       }
       savePosHistory();
@@ -1505,39 +1959,36 @@ async function checkAndSweepPosNow(targetInvoice) {
         if (inv.autoSweep && inv.merchantDest && inv.merchantDest.startsWith('nano_') && inv.merchantDest !== inv.account) {
           posLog(`Sweeping ${rawToNanoStr(currentBal.toString())} NANO to merchant account ${inv.merchantDest.slice(0, 20)}...`);
           const sweepWork = await computeWasmWorkForRoot(accInfo.frontier);
-          const sweepCreateArgs = {
-            action: 'block_create',
-            json_block: 'true',
-            type: 'state',
-            key: inv.privateKey,
+          const signedSweep = await signStateBlockInBrowser({
+            privateKeyHex: inv.privateKey,
             account: inv.account,
-            previous: accInfo.frontier,
+            previousHex: accInfo.frontier,
             representative: inv.merchantDest,
-            balance: '0',
-            link: inv.merchantDest
-          };
-          if (sweepWork) sweepCreateArgs.work = sweepWork;
+            balanceRawStr: '0',
+            linkHex: inv.merchantDest,
+            workHex: sweepWork
+          });
 
-          const sweepCreated = await rpcCall(sweepCreateArgs);
-          if (sweepCreated && sweepCreated.block) {
-            const sweepProc = await rpcCall({
-              action: 'process',
-              json_block: 'true',
-              subtype: 'send',
-              block: sweepCreated.block
-            });
-            if (sweepProc && sweepProc.hash) {
-              inv.sweepHash = sweepProc.hash;
-              inv.status = 'PAID & SWEPT';
-              posLog(`Sweep complete! Settlement Tx: ${sweepProc.hash}`);
-              // If the merchant account belongs to a local node wallet, auto-receive it too!
-              const wid = document.getElementById('w-select').value;
-              if (wid) {
-                rpcCall({ action: 'receive', wallet: wid, account: inv.merchantDest, block: sweepProc.hash }).catch(() => {});
+          const sweepProc = await rpcCall({
+            action: 'process',
+            json_block: 'true',
+            subtype: 'send',
+            block: signedSweep.block
+          });
+          if (sweepProc && sweepProc.hash) {
+            inv.sweepHash = sweepProc.hash;
+            inv.status = 'PAID & SWEPT';
+            posLog(`Sweep complete! Settlement Tx: ${sweepProc.hash}`);
+            // If the merchant account belongs to a local Browser Wallet, auto-receive it in browser too!
+            loadBrowserWalletsFromStorage();
+            for (const bw of browserWallets) {
+              const destEntry = bw.accounts.find(a => a.account === inv.merchantDest);
+              if (destEntry && (!bw.encrypted || unlockedPassphrases[bw.id])) {
+                receiveAccountPendingInBrowser(bw, destEntry).catch(() => {});
               }
-            } else {
-              posLog(`Sweep process response: ${JSON.stringify(sweepProc)}`);
             }
+          } else {
+            posLog(`Sweep process response: ${JSON.stringify(sweepProc)}`);
           }
         } else {
           inv.status = 'PAID';
@@ -1838,21 +2289,40 @@ function clearStressLog() {
 }
 
 async function initStressWasm() {
+  if (wasmExports || wasmLoading) return !!wasmExports;
+  wasmLoading = true;
   const stEl = document.getElementById('st-wasm-status');
+  stEl.textContent = 'Loading...';
+  stEl.style.color = 'var(--amber)';
+  let lastErr = null;
   try {
-    const resp = await fetch('/nano_stress.wasm');
-    const bytes = await resp.arrayBuffer();
-    const { instance } = await WebAssembly.instantiate(bytes, {});
-    wasmExports = instance.exports;
-    wasmMemory = wasmExports.memory;
-    wasmExports.wasm_init();
-    stEl.textContent = 'READY (WASM32)';
-    stEl.style.color = 'var(--green)';
-    document.getElementById('st-wasm-sub').textContent = `Module: ${(bytes.byteLength / 1024).toFixed(1)} KB • Ed25519 + Blake2b`;
-    await syncStressFrontier();
-  } catch (e) {
-    stEl.textContent = 'ERR: ' + e.message;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const resp = await fetch('/nano_stress.wasm');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const bytes = await resp.arrayBuffer();
+        const { instance } = await WebAssembly.instantiate(bytes, {});
+        wasmExports = instance.exports;
+        wasmMemory = wasmExports.memory;
+        wasmExports.wasm_init();
+        stEl.textContent = 'READY (WASM32)';
+        stEl.style.color = 'var(--green)';
+        document.getElementById('st-wasm-sub').textContent = `Module: ${(bytes.byteLength / 1024).toFixed(1)} KB • Ed25519 + Blake2b`;
+        wasmLoading = false;
+        await syncStressFrontier();
+        return true;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < 4) {
+          await new Promise(r => setTimeout(r, 250 * attempt));
+        }
+      }
+    }
+    stEl.textContent = 'ERR: ' + (lastErr ? lastErr.message : 'Failed to load');
     stEl.style.color = 'var(--red)';
+    return false;
+  } finally {
+    wasmLoading = false;
   }
 }
 
@@ -1888,7 +2358,11 @@ function stopWasmStressTest() {
 }
 
 async function runWasmStressTest() {
-  if (!wasmExports || stressRunning) return;
+  if (stressRunning) return;
+  if (!wasmExports) {
+    const ok = await initStressWasm();
+    if (!ok) return;
+  }
   stressRunning = true;
   stressAbort = false;
   document.getElementById('st-start-btn').disabled = true;
@@ -2007,7 +2481,7 @@ async function runWasmStressTest() {
   }
 
   document.getElementById('st-stage-pill').textContent = '4/4 COMMITTING & CEMENTING';
-  stressLog(`[4/4] Waiting for Hart 6 single-writer B-Tree pipeline to drain...`);
+  stressLog(`[4/4] Waiting for Cluster 1 (Harts 5 & 6) sharded B-Tree pipeline to drain...`);
 
   const waitStart = performance.now();
   while (!stressAbort && (performance.now() - waitStart) < 25000) {
@@ -2051,10 +2525,12 @@ async function runWasmStressTest() {
 }
 
 // ==================== INITIALIZATION ====================
-setInterval(pollMetrics, 1000);
-pollMetrics();
-refreshPeers();
-initStressWasm();
+(async function bootDashboard() {
+  await pollMetrics();
+  await initStressWasm();
+  await refreshPeers();
+  setInterval(pollMetrics, 1000);
+})();
 </script>
 </body>
 </html>

@@ -22,11 +22,55 @@
 
 use super::{bpm::DirtyPage, AlignedBlock, StorageContext, StorageError, GLOBAL_STORAGE, SHARDS, SHARD_COUNT};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 static PRE_SNAPSHOT_HOOK: AtomicUsize = AtomicUsize::new(0);
 static PRE_COMMIT_HOOK: AtomicUsize = AtomicUsize::new(0);
+static WAL_B_ONLINE: AtomicBool = AtomicBool::new(false);
+static WAL_B_JOB_PTR: AtomicUsize = AtomicUsize::new(0);
+static WAL_B_JOB_DONE: AtomicBool = AtomicBool::new(false);
+
+struct WalBJob {
+    entries: *const [DirtyPage],
+}
+
+/// Marks Hart 5 (`Ledger-B`, WAL segments 8..15) as online so `checkpoint()` cleans
+/// Shards 8..15 in parallel with Hart 6 (`Ledger-A`, WAL segments 0..7).
+pub fn set_wal_b_online(online: bool) {
+    WAL_B_ONLINE.store(online, Ordering::Release);
+}
+
+#[inline]
+fn clean_shard_range(entries: &[DirtyPage], start_shard: usize, end_shard: usize) {
+    for i in start_shard..end_shard {
+        let mut guard = SHARDS[i].lock();
+        if let Some(db) = guard.as_mut() {
+            for e in entries.iter().filter(|e| e.shard as usize == i) {
+                db.bpm.mark_clean(e.page_id, e.gen);
+            }
+            db.bpm.trim_excess();
+        }
+    }
+}
+
+/// Polled by Hart 5 (`Ledger-B`) to mark clean and trim WAL segments 8..15 (`SHARDS[8..16]`)
+/// in parallel while Hart 6 (`Ledger-A`) cleans WAL segments 0..7 (`SHARDS[0..8]`).
+#[inline]
+pub fn try_run_wal_b_job() -> bool {
+    let job_addr = WAL_B_JOB_PTR.swap(0, Ordering::AcqRel);
+    if job_addr == 0 {
+        return false;
+    }
+    // SAFETY: `job_addr` was published on Hart 6's stack inside `checkpoint()` and Hart 6
+    // spins on `WAL_B_JOB_DONE` with `Acquire` ordering before returning from the scope.
+    unsafe {
+        let job = &*(job_addr as *const WalBJob);
+        clean_shard_range(&*job.entries, SHARD_COUNT / 2, SHARD_COUNT);
+    }
+    WAL_B_JOB_DONE.store(true, Ordering::Release);
+    true
+}
 
 /// Registers a callback invoked inside `checkpoint()` before snapshotting dirty shard pages.
 pub fn set_pre_snapshot_hook(hook: fn()) {
@@ -330,14 +374,30 @@ pub fn checkpoint() -> Result<usize, StorageError> {
         }
 
         // Mark pages clean only if they were not modified again after the snapshot.
-        for i in 0..SHARD_COUNT {
-            let mut guard = SHARDS[i].lock();
-            if let Some(db) = guard.as_mut() {
-                for e in entries.iter().filter(|e| e.shard as usize == i) {
-                    db.bpm.mark_clean(e.page_id, e.gen);
+        // Split across WAL segments 0..7 (Hart 6: Ledger-A) and 8..15 (Hart 5: Ledger-B).
+        let mid_shard = SHARD_COUNT / 2;
+        if WAL_B_ONLINE.load(Ordering::Relaxed) {
+            let job = WalBJob {
+                entries: entries.as_slice() as *const [DirtyPage],
+            };
+            let job_addr = &job as *const WalBJob as usize;
+            WAL_B_JOB_DONE.store(false, Ordering::Release);
+            WAL_B_JOB_PTR.store(job_addr, Ordering::Release);
+
+            clean_shard_range(&entries, 0, mid_shard);
+
+            if WAL_B_JOB_PTR
+                .compare_exchange(job_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                clean_shard_range(&entries, mid_shard, SHARD_COUNT);
+            } else {
+                while !WAL_B_JOB_DONE.load(Ordering::Acquire) {
+                    core::hint::spin_loop();
                 }
-                db.bpm.trim_excess();
             }
+        } else {
+            clean_shard_range(&entries, 0, SHARD_COUNT);
         }
 
         total_persisted += batch_pages;

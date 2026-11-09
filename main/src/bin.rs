@@ -891,7 +891,7 @@ fn boot_hart_main(hart_id: usize) {
 
         // Physical Hart 0 is the U-Boot boot hart (running as Logical Hart 1: Maint+Net).
         // Start Physical Harts 1..7 at `_start_secondary`, where Physical Hart 1 maps to
-        // Logical Hart 0 (Crypto-3) and Physical Harts 2..7 map to Logical Harts 2..7.
+        // Logical Hart 0 (VoteProc) and Physical Harts 2..7 map to Logical Harts 2..7.
         for phys_id in 1..8 {
             let logical_id = if phys_id == 1 { 0 } else { phys_id };
             let (initial_err, initial_status) = kernel_common::sbi::hart_get_status(phys_id);
@@ -997,13 +997,15 @@ fn dispatch_hart_task(
     exec: kernel_common::async_rt::Executor,
 ) -> ! {
     match hart_id {
-        0 => run_crypto_worker_3_loop(node_arc, exec, hart_id),
+        // CLUSTER 0 (Shared L2 - Ingress, Verification & Vote Ingestion)
+        0 => run_vote_processor_loop(node_arc, exec, hart_id),
         1 => run_maintenance_and_network_loop(node_arc, exec, hart_id),
         2 => run_crypto_worker_1_loop(node_arc, exec, hart_id),
         3 => run_crypto_worker_2_loop(node_arc, exec, hart_id),
+        // CLUSTER 1 (Shared L2 - Consensus & Sharded Ledger Storage)
         4 => run_consensus_and_elections_loop(node_arc, exec, hart_id),
-        5 => run_vote_processor_loop(node_arc, exec, hart_id),
-        6 => run_ledger_commit_and_bootstrap_loop(node_arc, exec, hart_id),
+        5 => run_ledger_b_loop(node_arc, exec, hart_id),
+        6 => run_ledger_a_loop(node_arc, exec, hart_id),
         7 => run_storage_flush_and_monitor_loop(node_arc, exec, hart_id),
         _ => {
             tracing::warn!(
@@ -1039,10 +1041,11 @@ fn run_consensus_and_elections_loop(
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 4: Consensus & Active Elections loop enter");
+    tracing::debug!("[boot] Hart 4: Consensus, AEC & Election Schedulers loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_aec_voter_tick = kernel_common::clint::mtime();
+    let mut last_scheduler_tick = kernel_common::clint::mtime();
     let mut iterations = 0;
     let mut idle_spins = 1u32;
     loop {
@@ -1073,6 +1076,21 @@ fn run_consensus_and_elections_loop(
         }
 
         let mut worked = false;
+
+        // 2. Drive priority & periodic election schedulers (co-located in Cluster 1 L2)
+        node_arc.election_schedulers.priority.run_one();
+        if mtime - last_scheduler_tick > millis(100) {
+            if node_arc.active.read().len() < 4096 && node_arc.ledger.backlog_count() > 0 {
+                if let Some(mut guard) = node_arc.backlog_scan.try_lock() {
+                    guard.run_once();
+                }
+            }
+            node_arc.election_schedulers.run_once();
+            last_scheduler_tick = mtime;
+            worked = true;
+        }
+
+        // 3. Drive request aggregator & vote generators
         if node_arc.vote_generators.voting_enabled() {
             if node_arc.request_aggregator.run_once() {
                 worked = true;
@@ -1104,7 +1122,7 @@ fn run_vote_processor_loop(
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 5: Vote Processor loop enter");
+    tracing::debug!("[boot] Hart 0: Vote Processor & Async Executor loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
@@ -1119,7 +1137,7 @@ fn run_vote_processor_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart 5 (VoteProc) | Iters: {}",
+                "[heartbeat] Hart 0 (VoteProc) | Iters: {}",
                 iterations
             );
             last_heartbeat = mtime;
@@ -1136,7 +1154,7 @@ fn run_vote_processor_loop(
         if node_arc.config.enable_vote_rebroadcast && node_arc.vote_rebroadcaster.run_once() {
             worked = true;
         }
-        for _ in 0..4 {
+        for _ in 0..8 {
             if exec.run_once(hart_id) {
                 worked = true;
             } else {
@@ -1299,16 +1317,18 @@ fn run_crypto_worker_2_loop(
     }
 }
 
-fn run_crypto_worker_3_loop(
+fn run_ledger_b_loop(
     node_arc: Arc<Node>,
-    exec: kernel_common::async_rt::Executor,
-    hart_id: usize,
+    _exec: kernel_common::async_rt::Executor,
+    _hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 0: Crypto Worker 3 (SIMD Verify) loop enter");
+    tracing::debug!("[boot] Hart 5: Ledger-B (Shards 8-15, WAL 8-15 & Unchecked Drain) loop enter");
+    rsnano_ledger::set_ledger_b_online(true);
+    kernel_common::storage::wal::set_wal_b_online(true);
+
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
-    let mut verified_count = 0usize;
     let mut idle_spins = 1u32;
     loop {
         let mtime = kernel_common::clint::mtime();
@@ -1319,55 +1339,60 @@ fn run_crypto_worker_3_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart 0 (Crypto-3) | Iters: {} | Verified: {}",
+                "[heartbeat] Hart 5 (Ledger-B) | Iters: {} | Shards8_15_Batches: {} | Unchecked: {}",
                 iterations,
-                verified_count
+                rsnano_ledger::LEDGER_B_JOBS_COMPLETED.load(Ordering::Relaxed),
+                node_arc.unchecked.len()
             );
             iterations = 0;
             last_heartbeat = mtime;
         }
 
         let mut worked = false;
-        // 1. High-priority synchronous signature batches waiting on Hart 6
-        while node_arc.signature_checker.has_sync_tasks() {
-            let n = node_arc.signature_checker.help_verify();
-            if n > 0 {
-                worked = true;
-                verified_count = verified_count.wrapping_add(n);
-            } else {
-                break;
-            }
+
+        // 1. Highest priority: execute Shards 8-15 B-Tree mutations & WAL segments 8-15 clean/trim
+        // in parallel with Hart 6 (Ledger-A, Shards 0-7) across Cluster 1's shared 512 KB L2.
+        while rsnano_ledger::try_run_ledger_b_job() {
+            worked = true;
+        }
+        if kernel_common::storage::wal::try_run_wal_b_job() {
+            worked = true;
         }
 
-        // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
-        if !node_arc.inbound_message_queue.is_empty_relaxed() {
-            let hp1 = kernel_common::clint::mtime();
-            for _ in 0..4 {
-                if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
-                    worked = true;
-                } else {
+        // 2. Drain satisfied unchecked block dependencies into BlockProcessorQueue
+        if node_arc.unchecked.buffer_count() > 0 && node_arc.confirming_set.len() < 16_384 {
+            node_arc.unchecked.run_once();
+            worked = true;
+            while rsnano_ledger::try_run_ledger_b_job() {}
+        }
+
+        // 3. Service bootstrap responder when ledger commit and unchecked queues are idle
+        if !worked
+            && node_arc.block_processor.total_queue_len() == 0
+            && node_arc.unchecked.buffer_count() == 0
+            && node_arc.bootstrap_server.run_once()
+        {
+            worked = true;
+        }
+
+        // Keep idle backoff short on Hart 5 so it wakes immediately when Hart 6 publishes a batch
+        kernel_common::uboot::eth_check_tx_stall();
+        if worked {
+            idle_spins = 1;
+        } else {
+            for _ in 0..idle_spins {
+                if rsnano_ledger::try_run_ledger_b_job()
+                    || kernel_common::storage::wal::try_run_wal_b_job()
+                {
+                    idle_spins = 1;
                     break;
                 }
+                core::hint::spin_loop();
             }
-            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
-        }
-
-        // 3. Background signature pre-verification (interleaved with sync & message checks)
-        if !node_arc.signature_checker.is_empty_relaxed() {
-            for _ in 0..4 {
-                let n = node_arc.signature_checker.help_verify();
-                if n > 0 {
-                    worked = true;
-                    verified_count = verified_count.wrapping_add(n);
-                } else {
-                    break;
-                }
+            if idle_spins < 16 {
+                idle_spins <<= 1;
             }
         }
-
-        let _ = (&exec, hart_id);
-
-        adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
 }
@@ -1470,9 +1495,24 @@ static DASHBOARD_HTML: &[u8] = include_bytes!("dashboard.html");
 static NANO_STRESS_WASM_GZ: &[u8] = include_bytes!(
     "../../tools/nano-stress/wasm/target/wasm32-unknown-unknown/release/nano_stress_wasm.wasm.gz"
 );
-static DASH_ACTIVE_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static DASH_RX_LEN: AtomicUsize = AtomicUsize::new(0);
-static mut DASH_RX_BUF: [u8; 65536] = [0u8; 65536];
+static DASH_ACTIVE_SINCE: [core::sync::atomic::AtomicU64; kernel_common::net::DASHBOARD_SOCKET_COUNT] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+static DASH_RX_LEN: [AtomicUsize; kernel_common::net::DASHBOARD_SOCKET_COUNT] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+static mut DASH_RX_BUF: [[u8; 65536]; kernel_common::net::DASHBOARD_SOCKET_COUNT] =
+    [[0u8; 65536]; kernel_common::net::DASHBOARD_SOCKET_COUNT];
 
 fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
     let mut i = 0;
@@ -1590,44 +1630,6 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
         h1_ms(2),
         h1_ms(3),
     );
-
-    alloc::format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    )
-}
-
-fn format_dashboard_wallets_json(node: &Arc<Node>) -> String {
-    use core::fmt::Write;
-    use rsnano_ledger::LedgerSet;
-    let wallet_ids = node.wallets.wallet_ids();
-    let any = node.ledger.any();
-    let mut body = String::from("{\"wallets\":[");
-    for (w_idx, wid) in wallet_ids.iter().enumerate() {
-        if w_idx > 0 {
-            body.push(',');
-        }
-        let _ = write!(body, "{{\"id\":\"{}\",\"accounts\":[", wid.encode_hex());
-        if let Ok(accounts) = node.wallets.get_accounts_of_wallet(wid) {
-            for (a_idx, acc) in accounts.iter().enumerate() {
-                if a_idx > 0 {
-                    body.push(',');
-                }
-                let bal = any.account_balance(acc);
-                let rec = any.account_receivable(acc);
-                let _ = write!(
-                    body,
-                    "{{\"account\":\"{}\",\"balance\":\"{}\",\"receivable\":\"{}\"}}",
-                    acc.encode_account(),
-                    bal.number(),
-                    rec.number()
-                );
-            }
-        }
-        body.push_str("]}");
-    }
-    body.push_str("]}");
 
     alloc::format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1754,160 +1756,173 @@ fn handle_dashboard_server(ctx: &mut kernel_common::net::NetworkContext, node: A
         return;
     }
     use smoltcp::socket::tcp::{Socket as SmolTcpSocket, State as SmolTcpState};
-    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.dashboard_handle);
     let now = kernel_common::clint::mtime();
-    match socket.state() {
-        SmolTcpState::Closed => {
-            DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-            DASH_RX_LEN.store(0, Ordering::Relaxed);
-            let _ = socket.listen(net_cfg.dashboard_port);
-        }
-        SmolTcpState::Listen => {
-            DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-            DASH_RX_LEN.store(0, Ordering::Relaxed);
-        }
-        SmolTcpState::TimeWait => {
-            DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-            DASH_RX_LEN.store(0, Ordering::Relaxed);
-            socket.abort();
-            let _ = socket.listen(net_cfg.dashboard_port);
-        }
-        SmolTcpState::FinWait1
-        | SmolTcpState::FinWait2
-        | SmolTcpState::Closing
-        | SmolTcpState::LastAck
-        | SmolTcpState::CloseWait => {
-            if socket.send_queue() == 0
-                && matches!(
-                    socket.state(),
-                    SmolTcpState::CloseWait | SmolTcpState::LastAck | SmolTcpState::Closing
-                )
-            {
-                DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                DASH_RX_LEN.store(0, Ordering::Relaxed);
+
+    for sock_idx in 0..kernel_common::net::DASHBOARD_SOCKET_COUNT {
+        let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.dashboard_handles[sock_idx]);
+        match socket.state() {
+            SmolTcpState::Closed => {
+                DASH_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
+                let _ = socket.listen(net_cfg.dashboard_port);
+            }
+            SmolTcpState::Listen => {
+                DASH_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
+            }
+            SmolTcpState::TimeWait => {
+                DASH_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
                 socket.abort();
                 let _ = socket.listen(net_cfg.dashboard_port);
-            } else {
-                let since = DASH_ACTIVE_SINCE.load(Ordering::Relaxed);
-                if since > 0 && now.wrapping_sub(since) > seconds(8) {
-                    DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                    DASH_RX_LEN.store(0, Ordering::Relaxed);
+            }
+            SmolTcpState::FinWait1
+            | SmolTcpState::FinWait2
+            | SmolTcpState::Closing
+            | SmolTcpState::LastAck
+            | SmolTcpState::CloseWait => {
+                if socket.send_queue() == 0
+                    && matches!(
+                        socket.state(),
+                        SmolTcpState::CloseWait
+                            | SmolTcpState::LastAck
+                            | SmolTcpState::Closing
+                            | SmolTcpState::FinWait2
+                    )
+                {
+                    DASH_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.dashboard_port);
+                } else {
+                    let since = DASH_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                    if since > 0 && now.wrapping_sub(since) > seconds(8) {
+                        DASH_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                        DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
+                        socket.abort();
+                        let _ = socket.listen(net_cfg.dashboard_port);
+                    }
+                }
+            }
+            SmolTcpState::SynReceived => {
+                let since = DASH_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                if since == 0 {
+                    DASH_ACTIVE_SINCE[sock_idx].store(now, Ordering::Relaxed);
+                } else if now.wrapping_sub(since) > seconds(5) {
+                    DASH_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
                     socket.abort();
                     let _ = socket.listen(net_cfg.dashboard_port);
                 }
             }
-        }
-        SmolTcpState::SynReceived => {
-            let since = DASH_ACTIVE_SINCE.load(Ordering::Relaxed);
-            if since == 0 {
-                DASH_ACTIVE_SINCE.store(now, Ordering::Relaxed);
-            } else if now.wrapping_sub(since) > seconds(5) {
-                DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                DASH_RX_LEN.store(0, Ordering::Relaxed);
-                socket.abort();
-                let _ = socket.listen(net_cfg.dashboard_port);
-            }
-        }
-        SmolTcpState::Established => {
-            let since = DASH_ACTIVE_SINCE.load(Ordering::Relaxed);
-            if since == 0 {
-                DASH_ACTIVE_SINCE.store(now, Ordering::Relaxed);
-            } else if now.wrapping_sub(since) > seconds(8) {
-                DASH_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                DASH_RX_LEN.store(0, Ordering::Relaxed);
-                socket.abort();
-                let _ = socket.listen(net_cfg.dashboard_port);
-                return;
-            }
+            SmolTcpState::Established => {
+                let since = DASH_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                if since == 0 {
+                    DASH_ACTIVE_SINCE[sock_idx].store(now, Ordering::Relaxed);
+                } else if now.wrapping_sub(since) > seconds(8) {
+                    DASH_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.dashboard_port);
+                    continue;
+                }
 
-            if socket.can_recv() {
-                // Drain incoming TCP segments into contiguous static buffer `DASH_RX_BUF`
-                // so multi-segment POST bodies (up to 64 KB) never wrap around smoltcp's ring buffer.
-                // SAFETY: Only Hart 1 accesses `DASH_RX_BUF` inside `handle_dashboard_server`.
-                let mut rx_len = DASH_RX_LEN.load(Ordering::Relaxed);
-                unsafe {
-                    let buf_ptr = core::ptr::addr_of_mut!(DASH_RX_BUF) as *mut u8;
-                    if rx_len < 65536 {
-                        let dst = core::slice::from_raw_parts_mut(buf_ptr.add(rx_len), 65536 - rx_len);
-                        if let Ok(read_n) = socket.recv_slice(dst) {
-                            rx_len += read_n;
-                            DASH_RX_LEN.store(rx_len, Ordering::Relaxed);
+                if socket.can_recv() {
+                    // Drain incoming TCP segments into contiguous static buffer `DASH_RX_BUF[sock_idx]`
+                    // so multi-segment POST bodies (up to 64 KB) never wrap around smoltcp's ring buffer.
+                    // SAFETY: Only Hart 1 accesses `DASH_RX_BUF` inside `handle_dashboard_server`.
+                    let mut rx_len = DASH_RX_LEN[sock_idx].load(Ordering::Relaxed);
+                    unsafe {
+                        let buf_ptr = core::ptr::addr_of_mut!(DASH_RX_BUF[sock_idx]) as *mut u8;
+                        if rx_len < 65536 {
+                            let dst =
+                                core::slice::from_raw_parts_mut(buf_ptr.add(rx_len), 65536 - rx_len);
+                            if let Ok(read_n) = socket.recv_slice(dst) {
+                                rx_len += read_n;
+                                DASH_RX_LEN[sock_idx].store(rx_len, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
-            }
 
-            let rx_len = DASH_RX_LEN.load(Ordering::Relaxed);
-            if rx_len == 0 {
-                return;
-            }
-            // SAFETY: Only Hart 1 reads `DASH_RX_BUF`.
-            let req_slice = unsafe {
-                let buf_ptr = core::ptr::addr_of!(DASH_RX_BUF) as *const u8;
-                core::slice::from_raw_parts(buf_ptr, rx_len)
-            };
-            let complete_opt = is_raw_http_complete(req_slice);
-            let Some((hdr_end, body_start)) = complete_opt else {
-                if rx_len < 65000 {
-                    return;
+                let rx_len = DASH_RX_LEN[sock_idx].load(Ordering::Relaxed);
+                if rx_len == 0 {
+                    continue;
                 }
-                DASH_RX_LEN.store(0, Ordering::Relaxed);
-                let _ = socket.send_slice(b"HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n");
-                socket.close();
-                return;
-            };
+                // SAFETY: Only Hart 1 reads `DASH_RX_BUF[sock_idx]`.
+                let req_slice = unsafe {
+                    let buf_ptr = core::ptr::addr_of!(DASH_RX_BUF[sock_idx]) as *const u8;
+                    core::slice::from_raw_parts(buf_ptr, rx_len)
+                };
+                let complete_opt = is_raw_http_complete(req_slice);
+                let Some((hdr_end, body_start)) = complete_opt else {
+                    if rx_len < 65000 {
+                        continue;
+                    }
+                    DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
+                    let _ = socket
+                        .send_slice(b"HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n");
+                    socket.close();
+                    continue;
+                };
 
-            let headers_str = core::str::from_utf8(&req_slice[..hdr_end]).unwrap_or("");
-            let first_line = headers_str.lines().next().unwrap_or("");
-            let content_len = parse_http_content_length(headers_str).unwrap_or(rx_len.saturating_sub(body_start));
-            let body_end = (body_start + content_len).min(rx_len);
-            let body_bytes = &req_slice[body_start..body_end];
+                let headers_str = core::str::from_utf8(&req_slice[..hdr_end]).unwrap_or("");
+                let first_line = headers_str.lines().next().unwrap_or("");
+                let content_len =
+                    parse_http_content_length(headers_str).unwrap_or(rx_len.saturating_sub(body_start));
+                let body_end = (body_start + content_len).min(rx_len);
+                let body_bytes = &req_slice[body_start..body_end];
 
-            if first_line.starts_with("OPTIONS ") {
-                let _ = socket.send_slice(
-                    b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
-                );
-            } else if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
-                let hdr = alloc::format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-                    DASHBOARD_HTML.len()
-                );
-                let _ = socket.send_slice(hdr.as_bytes());
-                let _ = socket.send_slice(DASHBOARD_HTML);
-            } else if first_line.starts_with("GET /nano_stress.wasm") {
-                let hdr = alloc::format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/wasm\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-                    NANO_STRESS_WASM_GZ.len()
-                );
-                let _ = socket.send_slice(hdr.as_bytes());
-                let _ = socket.send_slice(NANO_STRESS_WASM_GZ);
-            } else if first_line.starts_with("GET /api/metrics") {
-                let resp = format_dashboard_metrics_json(&node);
-                let _ = socket.send_slice(resp.as_bytes());
-            } else if first_line.starts_with("GET /api/wallets") {
-                let resp = format_dashboard_wallets_json(&node);
-                let _ = socket.send_slice(resp.as_bytes());
-            } else if first_line.starts_with("POST /api/stress_batch") {
-                let resp = handle_dashboard_stress_batch(&node, first_line, body_bytes);
-                let _ = socket.send_slice(resp.as_bytes());
-            } else if first_line.starts_with("POST /api/rpc") || first_line.starts_with("POST / ") {
-                let req_str = core::str::from_utf8(req_slice).unwrap_or("");
-                let handler = RpcCommandHandler::new(node.clone(), net_cfg.rpc_enable_control);
-                let server = BareMetalRpcServer::new(handler);
-                if let Some(resp_str) = server.handle_request(req_str) {
-                    let _ = socket.send_slice(resp_str.as_bytes());
+                if first_line.starts_with("OPTIONS ") {
+                    let _ = socket.send_slice(
+                        b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+                    );
+                } else if first_line.starts_with("GET /favicon.ico") {
+                    let _ = socket.send_slice(
+                        b"HTTP/1.1 204 No Content\r\nCache-Control: max-age=86400\r\nConnection: close\r\n\r\n",
+                    );
+                } else if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
+                    let hdr = alloc::format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                        DASHBOARD_HTML.len()
+                    );
+                    let _ = socket.send_slice(hdr.as_bytes());
+                    let _ = socket.send_slice(DASHBOARD_HTML);
+                } else if first_line.starts_with("GET /nano_stress.wasm") {
+                    let hdr = alloc::format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/wasm\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                        NANO_STRESS_WASM_GZ.len()
+                    );
+                    let _ = socket.send_slice(hdr.as_bytes());
+                    let _ = socket.send_slice(NANO_STRESS_WASM_GZ);
+                } else if first_line.starts_with("GET /api/metrics") {
+                    let resp = format_dashboard_metrics_json(&node);
+                    let _ = socket.send_slice(resp.as_bytes());
+                } else if first_line.starts_with("POST /api/stress_batch") {
+                    let resp = handle_dashboard_stress_batch(&node, first_line, body_bytes);
+                    let _ = socket.send_slice(resp.as_bytes());
+                } else if first_line.starts_with("POST /api/rpc") || first_line.starts_with("POST / ") {
+                    let req_str = core::str::from_utf8(req_slice).unwrap_or("");
+                    // Dashboard wallets are generated and signed 100% in the host web browser;
+                    // disable node-side wallet/control RPCs on port 7080 (only public queries + `process` allowed).
+                    let handler = RpcCommandHandler::new(node.clone(), false);
+                    let server = BareMetalRpcServer::new(handler);
+                    if let Some(resp_str) = server.handle_request(req_str) {
+                        let _ = socket.send_slice(resp_str.as_bytes());
+                    } else {
+                        let _ =
+                            socket.send_slice(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+                    }
                 } else {
-                    let _ = socket.send_slice(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+                    let _ = socket.send_slice(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
                 }
-            } else {
-                let _ = socket.send_slice(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-            }
 
-            DASH_RX_LEN.store(0, Ordering::Relaxed);
-            DASH_ACTIVE_SINCE.store(now, Ordering::Relaxed);
-            socket.close();
+                DASH_RX_LEN[sock_idx].store(0, Ordering::Relaxed);
+                DASH_ACTIVE_SINCE[sock_idx].store(now, Ordering::Relaxed);
+                socket.close();
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -2024,7 +2039,18 @@ fn run_storage_flush_and_monitor_loop(
             }
             last_online_weight_tick = mtime;
         }
-        let _ = &mut last_cleanup;
+
+        // Periodic non-blocking NVMe Free-List & Buffer Pool excess frame reclamation
+        if mtime - last_cleanup > seconds(2) {
+            for i in 0..kernel_common::storage::SHARD_COUNT {
+                if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
+                    if let Some(btree) = btree_guard.as_mut() {
+                        btree.bpm.trim_excess();
+                    }
+                }
+            }
+            last_cleanup = mtime;
+        }
 
         // 1. Persistence is owned by the ledger writer (Hart 6): it checkpoints all shards
         // atomically through the WAL at transaction boundaries. Nothing may flush shards directly.
@@ -2351,16 +2377,15 @@ fn log_block_prof_debug() {
     );
 }
 
-fn run_ledger_commit_and_bootstrap_loop(
+fn run_ledger_a_loop(
     node_arc: Arc<Node>,
     _exec: kernel_common::async_rt::Executor,
     _hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 6: Single-Writer Ledger Commit & Bootstrap loop enter");
+    tracing::debug!("[boot] Hart 6: Ledger-A (Shards 0-7, WAL 0-7 & ConfirmingSet) loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_node_tick = kernel_common::clint::mtime();
-    let mut last_scheduler_tick = kernel_common::clint::mtime();
     let mut last_checkpoint = kernel_common::clint::mtime();
     let mut iterations = 0;
     let mut idle_spins = 1u32;
@@ -2374,7 +2399,7 @@ fn run_ledger_commit_and_bootstrap_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart 6 (Ledger+Boot) | Iters: {} | Total Blocks: {} | BPQ: {}",
+                "[heartbeat] Hart 6 (Ledger-A) | Iters: {} | Total Blocks: {} | BPQ: {}",
                 iterations,
                 node_arc.ledger.block_count(),
                 node_arc.block_processor.total_queue_len()
@@ -2385,23 +2410,14 @@ fn run_ledger_commit_and_bootstrap_loop(
 
         let mut worked = false;
 
-        // 1. Single-writer block insertion & dependencies
-        // Throttle new block commits when ConfirmingSet has a deep queue (>= 16,384) so
-        // cementing can drain without starving on the single-writer B-Tree lock.
+        // 1. Block validation + Shards 0-7 B-Tree mutations (while Hart 5 executes Shards 8-15
+        // and drains UncheckedMap in parallel). Throttle new block commits when ConfirmingSet has
+        // a deep queue (>= 16,384) so cementing can drain without starving.
         if node_arc.confirming_set.len() < 16_384 {
-            if node_arc.unchecked.buffer_count() > 0 {
-                node_arc.unchecked.run_once();
-                worked = true;
-            }
             for _ in 0..8 {
                 let mut batch_worked = false;
                 if node_arc.block_processor.total_queue_len() > 0 {
                     node_arc.block_processor.run_once();
-                    worked = true;
-                    batch_worked = true;
-                }
-                if node_arc.unchecked.buffer_count() > 0 {
-                    node_arc.unchecked.run_once();
                     worked = true;
                     batch_worked = true;
                 }
@@ -2419,22 +2435,10 @@ fn run_ledger_commit_and_bootstrap_loop(
             node_arc.confirming_set.run_once();
             worked = true;
         }
-        node_arc.election_schedulers.priority.run_one();
 
-        if mtime - last_scheduler_tick > millis(100) {
-            if node_arc.active.read().len() < 4096 && node_arc.ledger.backlog_count() > 0 {
-                if let Some(mut guard) = node_arc.backlog_scan.try_lock() {
-                    guard.run_once();
-                }
-            }
-            node_arc.election_schedulers.run_once();
-            last_scheduler_tick = mtime;
-        }
-
-        // Atomic WAL checkpoint at a transaction boundary (this hart is the single ledger writer,
-        // so the cut across the 16 shards is consistent). Time based, or when a buffer pool had to
-        // grow because every frame was dirty. Defer periodic timer checkpoints up to 30s while
-        // the block processor queue is actively draining a burst to avoid redundant NVMe writes.
+        // 2. Atomic WAL checkpoint at a transaction boundary (cleaning WAL segments 0-7 on Hart 6
+        // in parallel with WAL segments 8-15 on Hart 5). Defer periodic timer checkpoints up to 30s
+        // while the block processor queue is actively draining a burst to avoid redundant NVMe writes.
         let bpq_busy = node_arc.block_processor.total_queue_len() > 0
             || !node_arc.inbound_message_queue.is_empty_relaxed();
         let checkpoint_interval = if bpq_busy { seconds(30) } else { seconds(10) };
@@ -2453,15 +2457,6 @@ fn run_ledger_commit_and_bootstrap_loop(
             worked = true;
         }
 
-        // 4. Only service bootstrap responder when single-writer ledger commit queues are idle
-        if !worked
-            && node_arc.block_processor.total_queue_len() == 0
-            && node_arc.unchecked.buffer_count() == 0
-            && node_arc.bootstrap_server.run_once()
-        {
-            worked = true;
-        }
-
         iterations += 1;
         adaptive_pause_backoff(worked, &mut idle_spins);
     }
@@ -2470,7 +2465,7 @@ fn run_ledger_commit_and_bootstrap_loop(
 #[cfg(feature = "block-test")]
 fn drain_async_events(exec: &kernel_common::async_rt::Executor) {
     for _ in 0..4 {
-        for h in 1..8 {
+        for h in 0..8 {
             let len = exec.local_queues[h].lock().len();
             for _ in 0..len {
                 exec.run_once(h);
@@ -2949,15 +2944,17 @@ fn run_maintenance_and_network_loop(
 
         iterations += 1;
 
-        // Release NET.lock() for a brief window (50 us when active, 200 us when idle)
-        // so Cluster 1 worker harts can acquire NET.lock() for socket reads/writes without starving.
-        if !net_active && !node_arc.signature_checker.is_empty_relaxed() {
+        // Release NET.lock() for a brief window so Cluster 1 worker harts can acquire NET.lock()
+        // for socket reads/writes without starving. If signature verification work is queued,
+        // verifying one batch (~20-25 us outside NET.lock()) provides that lock-free window
+        // while doing useful Ed25519 work instead of spinning idle.
+        if !node_arc.signature_checker.is_empty_relaxed() {
             let hs = kernel_common::clint::mtime();
             let _ = node_arc.signature_checker.help_verify();
             HART1_PROF[2].fetch_add(kernel_common::clint::mtime() - hs, Ordering::Relaxed);
         } else {
             let pause_ticks = if net_active {
-                CLINT_FREQ / 20_000
+                CLINT_FREQ / 64_000
             } else {
                 CLINT_FREQ / 5_000
             };

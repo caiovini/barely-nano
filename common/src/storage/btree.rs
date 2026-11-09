@@ -8,11 +8,13 @@
 //! - `data[1..3]`: `num_keys: u16` (LE)
 //! - `data[3..5]`: `free_end: u16` (LE, downward-growing cell heap start offset; `4096` when empty)
 //! - `data[5..7]`: `dead_bytes: u16` (LE, fragmented bytes inside `free_end..4096`)
-//! - `data[7]`: reserved (`0`)
+//! - `data[7]`: `flags: u8` (`0` = legacy slotted page, `1` = `PAGE_FLAG_SOA` with inline SoA `u32` key heads)
 //! - Directory starting at byte `8`:
-//!   - Leaf (`is_leaf == true`): `slot[i]: u16` at `8 + i * 2` (`free_start = 8 + num_keys * 2`).
+//!   - Leaf (`is_leaf == true`): `slot[i]: u16` at `8 + i * 2` (`0 <= i < num_keys`), followed by
+//!     4-byte-aligned `heads[i]: u32` at `((8 + num_keys * 2 + 3) & !3) + i * 4`.
 //!   - Internal (`is_leaf == false`): interleaved `child[i]: u32` at `8 + i * 6` (`0 <= i <= num_keys`)
-//!     and `slot[i]: u16` at `12 + i * 6` (`0 <= i < num_keys`), so `free_start = 12 + num_keys * 6`.
+//!     and `slot[i]: u16` at `12 + i * 6` (`0 <= i < num_keys`), followed by 4-byte-aligned
+//!     `heads[i]: u32` at `((12 + num_keys * 6 + 3) & !3) + i * 4`.
 //! - Cell at `cell_off` (`free_end <= cell_off < 4096`):
 //!   - `data[cell_off]`: `key_len: u8` (`33` when `key[33..65] == [0; 32]`, else `65`)
 //!   - `data[cell_off + 1..cell_off + 3]`: `val_len: u16` (LE, `0..=VALUE_SIZE`)
@@ -32,16 +34,27 @@ pub const KEY_SIZE: usize = 65;
 pub const VALUE_SIZE: usize = 272;
 
 /// Worst-case bytes required to insert one maximum-sized entry into a node:
-/// `6` bytes internal directory (`slot: u16` + `child: u32`) + `3` bytes cell header + `65`B key + `256`B value.
-const MAX_INSERT_BYTES: usize = 6 + 3 + KEY_SIZE + VALUE_SIZE; // 330 bytes
+/// `12` bytes max internal directory + alignment + `u32` head + `3` bytes cell header + `65`B key + `272`B value.
+const MAX_INSERT_BYTES: usize = 12 + 3 + KEY_SIZE + VALUE_SIZE; // 352 bytes
 
 const BTREE_META_MAGIC: u32 = 0xBEEFCB03;
+
+/// Flag stored in `data[7]` indicating that the 4-byte-aligned SoA `u32` key-head array
+/// (`heads[0..num_keys]`) immediately following the slot directory is populated.
+const PAGE_FLAG_SOA: u8 = 1;
 
 /// Extracts the first 8 bytes of a key as a big-endian `u64` (`ld` + `rev8` on RISC-V `Zbb`),
 /// preserving lexicographical byte ordering in a single 64-bit register.
 #[inline(always)]
 fn key_head(k: &[u8]) -> u64 {
     u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]])
+}
+
+/// Extracts the first 4 bytes of a key as a big-endian `u32` (`table_id: u8` + 24-bit key prefix),
+/// stored in the page's SoA `heads` directory for single-instruction RVV `e32` vector search.
+#[inline(always)]
+fn key_head32(k: &[u8]) -> u32 {
+    u32::from_be_bytes([k[0], k[1], k[2], k[3]])
 }
 
 /// Losslessly compacts a 65-byte key to 33 bytes when bytes `33..65` are all zero.
@@ -87,11 +100,11 @@ fn cmp_cell_key(cell_key: &[u8], target: &[u8; KEY_SIZE], target_head: u64) -> O
 
 #[inline(always)]
 fn page_init(data: &mut [u8; BLOCK_SIZE], is_leaf: bool) {
-    data.fill(0);
     data[0] = if is_leaf { 1 } else { 0 };
     data[1..3].copy_from_slice(&0u16.to_le_bytes());
     data[3..5].copy_from_slice(&(BLOCK_SIZE as u16).to_le_bytes());
-    data[5..7].copy_from_slice(&0u16.to_le_bytes());
+    data[5..16].fill(0);
+    data[7] = PAGE_FLAG_SOA;
 }
 
 #[inline(always)]
@@ -134,13 +147,21 @@ fn page_set_dead_bytes(data: &mut [u8; BLOCK_SIZE], dead: usize) {
     data[5..7].copy_from_slice(&(dead as u16).to_le_bytes());
 }
 
+/// Returns the 4-byte-aligned starting offset of the SoA `heads: [u32; num_keys]` array,
+/// located immediately after the slot/child directory.
 #[inline(always)]
-fn page_free_start(is_leaf: bool, num_keys: usize) -> usize {
-    if is_leaf {
+fn page_heads_base(is_leaf: bool, num_keys: usize) -> usize {
+    let raw = if is_leaf {
         8 + num_keys * 2
     } else {
         12 + num_keys * 6
-    }
+    };
+    (raw + 3) & !3
+}
+
+#[inline(always)]
+fn page_free_start(is_leaf: bool, num_keys: usize) -> usize {
+    page_heads_base(is_leaf, num_keys) + num_keys * 4
 }
 
 #[inline(always)]
@@ -199,7 +220,7 @@ fn page_usable_free(data: &[u8; BLOCK_SIZE]) -> usize {
     let fs = page_free_start(is_leaf, nk);
     let fe = page_free_end(data);
     let dead = page_dead_bytes(data);
-    fe.saturating_sub(fs) + dead
+    (fe + dead).saturating_sub(fs)
 }
 
 #[inline(always)]
@@ -207,15 +228,145 @@ fn page_is_full(data: &[u8; BLOCK_SIZE]) -> bool {
     page_num_keys(data) >= MAX_KEYS || page_usable_free(data) < MAX_INSERT_BYTES
 }
 
-/// Binary searches `data` (`0..num_keys`) for `key`. Returns `(lower_bound_idx, is_equal)`.
+/// Ensures that `data` has its inline SoA `u32` key-head directory (`PAGE_FLAG_SOA`) populated.
+/// Legacy pages (`data[7] == 0`) loaded from NVMe are upgraded in place in RAM on first access.
+#[inline]
+fn page_ensure_soa(data: &mut [u8; BLOCK_SIZE]) -> bool {
+    if data[7] == PAGE_FLAG_SOA {
+        return true;
+    }
+    let is_leaf = page_is_leaf(data);
+    let nk = page_num_keys(data);
+    let fs = page_free_start(is_leaf, nk);
+    if page_free_end(data) < fs {
+        if page_free_end(data) + page_dead_bytes(data) >= fs {
+            page_compact_skip(data, None);
+        }
+        if page_free_end(data) < fs {
+            return false;
+        }
+    }
+    let hb = page_heads_base(is_leaf, nk);
+    for i in 0..nk {
+        let cell_off = page_get_slot(data, is_leaf, i);
+        let h32 = key_head32(&data[cell_off + 3..cell_off + 7]);
+        let o = hb + i * 4;
+        data[o..o + 4].copy_from_slice(&h32.to_le_bytes());
+    }
+    data[7] = PAGE_FLAG_SOA;
+    true
+}
+
+/// RVV 1.0 SIMD key-head search across `heads[0..nk]` (`e32, m8`).
+/// Returns `(lo, hi)` where `lo` is the count of keys with `head32 < target_head32`
+/// and `hi` is the count of keys with `head32 <= target_head32`.
+///
+/// # Safety
+/// `heads_ptr` must be 4-byte aligned and valid for `nk * 4` bytes of read access (`1 <= nk <= MAX_KEYS`).
+#[cfg(target_arch = "riscv64")]
+#[inline(always)]
+unsafe fn rvv_search_heads32(
+    heads_ptr: *const u8,
+    nk: usize,
+    target_head32: u32,
+) -> (usize, usize) {
+    let mut lo = 0usize;
+    let mut hi = 0usize;
+    let th = target_head32 as usize;
+    core::arch::asm!(
+        "2:",
+        "vsetvli {vl}, {rem}, e32, m8, ta, ma",
+        "vle32.v v8, ({ptr})",
+        "vmsltu.vx v0, v8, {th}",
+        "vcpop.m {tmp}, v0",
+        "add {lo}, {lo}, {tmp}",
+        "vmsleu.vx v0, v8, {th}",
+        "vcpop.m {tmp}, v0",
+        "add {hi}, {hi}, {tmp}",
+        "sub {rem}, {rem}, {vl}",
+        "sh2add {ptr}, {vl}, {ptr}",
+        "bnez {rem}, 2b",
+        ptr = inout(reg) heads_ptr => _,
+        rem = inout(reg) nk => _,
+        lo = inout(reg) lo,
+        hi = inout(reg) hi,
+        th = in(reg) th,
+        vl = out(reg) _,
+        tmp = out(reg) _,
+        out("v0") _,
+        out("v8") _,
+        out("v9") _,
+        out("v10") _,
+        out("v11") _,
+        out("v12") _,
+        out("v13") _,
+        out("v14") _,
+        out("v15") _,
+        options(nostack, readonly),
+    );
+    (lo, hi)
+}
+
+/// Searches `data` (`0..num_keys`) for `key`. Returns `(lower_bound_idx, is_equal)`.
 #[inline]
 fn page_lower_bound(data: &[u8; BLOCK_SIZE], key: &[u8; KEY_SIZE], target_head: u64) -> (usize, bool) {
     let is_leaf = page_is_leaf(data);
     let nk = page_num_keys(data);
-    let (mut lo, mut hi) = (0usize, nk);
+    if nk == 0 {
+        return (0, false);
+    }
+    let (mut lo, mut hi) = if data[7] == PAGE_FLAG_SOA {
+        let hb = page_heads_base(is_leaf, nk);
+        let target_head32 = (target_head >> 32) as u32;
+        #[cfg(target_arch = "riscv64")]
+        // SAFETY: `hb` is 4-byte aligned and `hb + nk * 4 <= BLOCK_SIZE`.
+        let (l, h) = unsafe { rvv_search_heads32(data.as_ptr().add(hb), nk, target_head32) };
+        #[cfg(not(target_arch = "riscv64"))]
+        let (l, h) = {
+            let mut l = 0usize;
+            let mut h = 0usize;
+            for i in 0..nk {
+                let o = hb + i * 4;
+                let v = u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+                l += (v < target_head32) as usize;
+                h += (v <= target_head32) as usize;
+            }
+            (l, h)
+        };
+        if l == h {
+            return (l, false);
+        }
+        if l + 1 == h {
+            let cell_off = page_get_slot(data, is_leaf, l);
+            let (ck, _) = page_cell(data, cell_off);
+            return match cmp_cell_key(ck, key, target_head) {
+                Ordering::Less => (l + 1, false),
+                Ordering::Equal => (l, true),
+                Ordering::Greater => (l, false),
+            };
+        }
+        (l, h)
+    } else {
+        (0usize, nk)
+    };
+    let base = data.as_ptr();
     while lo < hi {
         let mid = (lo + hi) >> 1;
         let cell_off = page_get_slot(data, is_leaf, mid);
+        if hi - lo > 2 {
+            let left_mid = (lo + mid) >> 1;
+            let right_mid = (mid + 1 + hi) >> 1;
+            let left_off = page_get_slot(data, is_leaf, left_mid) & (BLOCK_SIZE - 1);
+            // SAFETY: `left_off` and `right_off` are masked to `< BLOCK_SIZE`, and `prefetch_read`
+            // is a pure hardware cache hint that never traps.
+            unsafe {
+                crate::storage::prefetch_read(base.add(left_off));
+                if right_mid < hi {
+                    let right_off = page_get_slot(data, is_leaf, right_mid) & (BLOCK_SIZE - 1);
+                    crate::storage::prefetch_read(base.add(right_off));
+                }
+            }
+        }
         let (ck, _) = page_cell(data, cell_off);
         match cmp_cell_key(ck, key, target_head) {
             Ordering::Less => lo = mid + 1,
@@ -230,7 +381,9 @@ fn page_lower_bound(data: &[u8; BLOCK_SIZE], key: &[u8; KEY_SIZE], target_head: 
 fn page_compact_skip(data: &mut [u8; BLOCK_SIZE], skip_idx: Option<usize>) {
     let is_leaf = page_is_leaf(data);
     let nk = page_num_keys(data);
-    let mut cell_buf = [0u8; BLOCK_SIZE];
+    let mut cell_buf = core::mem::MaybeUninit::<[u8; BLOCK_SIZE]>::uninit();
+    // SAFETY: Every byte in `buf[fe..BLOCK_SIZE]` is written before being copied back to `data[fe..BLOCK_SIZE]`.
+    let buf = unsafe { &mut *cell_buf.as_mut_ptr() };
     let mut fe = BLOCK_SIZE;
     for i in 0..nk {
         if Some(i) == skip_idx {
@@ -239,12 +392,10 @@ fn page_compact_skip(data: &mut [u8; BLOCK_SIZE], skip_idx: Option<usize>) {
         let old_off = page_get_slot(data, is_leaf, i);
         let clen = page_cell_len(data, old_off);
         fe -= clen;
-        cell_buf[fe..fe + clen].copy_from_slice(&data[old_off..old_off + clen]);
+        buf[fe..fe + clen].copy_from_slice(&data[old_off..old_off + clen]);
         page_set_slot(data, is_leaf, i, fe);
     }
-    let fs = page_free_start(is_leaf, nk);
-    data[fs..fe].fill(0);
-    data[fe..BLOCK_SIZE].copy_from_slice(&cell_buf[fe..BLOCK_SIZE]);
+    data[fe..BLOCK_SIZE].copy_from_slice(&buf[fe..BLOCK_SIZE]);
     page_set_free_end(data, fe);
     page_set_dead_bytes(data, 0);
 }
@@ -285,6 +436,7 @@ fn page_overwrite_slot(
     value: &[u8],
     preserve_tail_32: bool,
 ) {
+    let has_soa = page_ensure_soa(data);
     let old_off = page_get_slot(data, is_leaf, pos);
     let old_klen = data[old_off] as usize;
     let old_vlen = u16::from_le_bytes([data[old_off + 1], data[old_off + 2]]) as usize;
@@ -321,9 +473,44 @@ fn page_overwrite_slot(
         new_off
     };
 
+    if has_soa {
+        let hb = page_heads_base(is_leaf, page_num_keys(data));
+        let h32 = key_head32(key_slice);
+        let o = hb + pos * 4;
+        data[o..o + 4].copy_from_slice(&h32.to_le_bytes());
+    }
+
     if has_saved_tail && vlen >= 32 {
         let tail_off = cell_off + 3 + klen + vlen - 32;
         data[tail_off..tail_off + 32].copy_from_slice(&saved_tail);
+    }
+}
+
+/// Fast-path overwrite when `pos` already holds the identical key (`equal == true`).
+/// When the stored key and value lengths are unchanged, overwrites only the value bytes in place.
+#[inline]
+fn page_overwrite_same_key(
+    data: &mut [u8; BLOCK_SIZE],
+    is_leaf: bool,
+    pos: usize,
+    key_slice: &[u8],
+    value: &[u8],
+    preserve_tail_32: bool,
+) {
+    let old_off = page_get_slot(data, is_leaf, pos);
+    let old_klen = data[old_off] as usize;
+    let old_vlen = u16::from_le_bytes([data[old_off + 1], data[old_off + 2]]) as usize;
+    let vlen = value.len().min(VALUE_SIZE);
+    if key_slice.len() == old_klen && vlen == old_vlen {
+        let val_off = old_off + 3 + old_klen;
+        let copy_len = if preserve_tail_32 && vlen >= 32 {
+            vlen - 32
+        } else {
+            vlen
+        };
+        data[val_off..val_off + copy_len].copy_from_slice(&value[..copy_len]);
+    } else {
+        page_overwrite_slot(data, is_leaf, pos, key_slice, value, preserve_tail_32);
     }
 }
 
@@ -336,10 +523,25 @@ fn page_insert_at(
     value: &[u8],
     right_child: u32,
 ) {
+    let has_soa = page_ensure_soa(data);
     let is_leaf = page_is_leaf(data);
     let nk = page_num_keys(data);
     let new_fs = page_free_start(is_leaf, nk + 1);
     let cell_off = page_alloc_cell(data, new_fs, key_slice, value, None);
+
+    if has_soa {
+        let old_hb = page_heads_base(is_leaf, nk);
+        let new_hb = page_heads_base(is_leaf, nk + 1);
+        if pos < nk {
+            data.copy_within(old_hb + pos * 4..old_hb + nk * 4, new_hb + (pos + 1) * 4);
+        }
+        if new_hb != old_hb && pos > 0 {
+            data.copy_within(old_hb..old_hb + pos * 4, new_hb);
+        }
+        let h32 = key_head32(key_slice);
+        let o = new_hb + pos * 4;
+        data[o..o + 4].copy_from_slice(&h32.to_le_bytes());
+    }
 
     if is_leaf {
         if pos < nk {
@@ -359,6 +561,7 @@ fn page_insert_at(
 /// Removes the entry at index `pos` (`0 <= pos < num_keys`).
 /// For internal nodes, removes `slot[pos]` and `child[pos + 1]`.
 fn page_remove_at(data: &mut [u8; BLOCK_SIZE], pos: usize) {
+    let has_soa = page_ensure_soa(data);
     let is_leaf = page_is_leaf(data);
     let nk = page_num_keys(data);
     let old_off = page_get_slot(data, is_leaf, pos);
@@ -375,6 +578,9 @@ fn page_remove_at(data: &mut [u8; BLOCK_SIZE], pos: usize) {
         return;
     }
 
+    let old_hb = page_heads_base(is_leaf, nk);
+    let new_hb = page_heads_base(is_leaf, nk - 1);
+
     if is_leaf {
         if pos + 1 < nk {
             data.copy_within(8 + (pos + 1) * 2..8 + nk * 2, 8 + pos * 2);
@@ -386,6 +592,16 @@ fn page_remove_at(data: &mut [u8; BLOCK_SIZE], pos: usize) {
         }
         data[12 + (nk - 1) * 6..12 + nk * 6].fill(0);
     }
+
+    if has_soa {
+        if new_hb != old_hb && pos > 0 {
+            data.copy_within(old_hb..old_hb + pos * 4, new_hb);
+        }
+        if pos + 1 < nk {
+            data.copy_within(old_hb + (pos + 1) * 4..old_hb + nk * 4, new_hb + pos * 4);
+        }
+    }
+
     page_set_num_keys(data, nk - 1);
     let dead = page_dead_bytes(data) + clen;
     page_set_dead_bytes(data, dead);
@@ -398,7 +614,7 @@ fn page_choose_split_index(data: &[u8; BLOCK_SIZE]) -> usize {
     if nk <= 3 {
         return nk / 2;
     }
-    let dir_entry_size = if is_leaf { 2usize } else { 6usize };
+    let dir_entry_size = if is_leaf { 6usize } else { 10usize };
     let mut total_bytes = 0usize;
     for i in 0..nk {
         let off = page_get_slot(data, is_leaf, i);
@@ -426,6 +642,7 @@ fn split_pages(
     new_child_id: u32,
     new_child_data: &mut [u8; BLOCK_SIZE],
 ) -> [u8; KEY_SIZE] {
+    let child_has_soa = page_ensure_soa(child_data);
     let is_leaf = page_is_leaf(child_data);
     let nk = page_num_keys(child_data);
     let t = page_choose_split_index(child_data);
@@ -451,9 +668,19 @@ fn split_pages(
     mid_k_buf[..mid_klen].copy_from_slice(mid_ck);
     mid_v_buf[..mid_vlen].copy_from_slice(mid_cv);
 
-    // Truncate `child_data` to `0..t` and compact in place.
+    // Truncate `child_data` to `0..t`, shifting its SoA heads to `page_heads_base(is_leaf, t)` and compacting in place.
+    if child_has_soa {
+        let old_hb = page_heads_base(is_leaf, nk);
+        let new_hb = page_heads_base(is_leaf, t);
+        if new_hb != old_hb && t > 0 {
+            child_data.copy_within(old_hb..old_hb + t * 4, new_hb);
+        }
+    }
     page_set_num_keys(child_data, t);
     page_compact_skip(child_data, None);
+    if !child_has_soa {
+        let _ = page_ensure_soa(child_data);
+    }
 
     page_insert_at(
         parent_data,
@@ -499,7 +726,6 @@ impl MetaData {
     }
 
     pub fn to_bytes(&self, data: &mut [u8; BLOCK_SIZE]) {
-        data.fill(0);
         data[0..4].copy_from_slice(&BTREE_META_MAGIC.to_le_bytes());
         data[4..8].copy_from_slice(&self.root_page_id.to_le_bytes());
         data[8..12].copy_from_slice(&self.next_free_page.to_le_bytes());
@@ -521,6 +747,7 @@ impl BTree {
 
     pub fn new_with_max_pages(mut bpm: BufferPool, max_pages: usize) -> Self {
         crate::watchdog::kick();
+        crate::storage::STORAGE_GEN.fetch_add(1, core::sync::atomic::Ordering::Release);
 
         let meta = {
             let guard = bpm.fetch_page(0).unwrap();
@@ -569,6 +796,7 @@ impl BTree {
     }
 
     pub fn wipe(&mut self) {
+        crate::storage::STORAGE_GEN.fetch_add(1, core::sync::atomic::Ordering::Release);
         self.meta = MetaData {
             root_page_id: 0,
             next_free_page: 1,
@@ -616,7 +844,6 @@ impl BTree {
         let first_free = self.meta.first_free_page;
         {
             let mut guard = self.bpm.new_page(page_id as usize).unwrap();
-            guard.data_mut().fill(0);
             guard.data_mut()[0..4].copy_from_slice(&first_free.to_le_bytes());
         }
         self.meta.first_free_page = page_id;
@@ -625,6 +852,7 @@ impl BTree {
 
     pub fn read_page(&mut self, page_id: u32) -> [u8; BLOCK_SIZE] {
         let guard = self.bpm.fetch_page(page_id as usize).unwrap();
+        let _ = page_ensure_soa(guard.data_cache_mut());
         *guard.data()
     }
 
@@ -667,6 +895,7 @@ impl BTree {
                 .bpm
                 .fetch_page(current_id as usize)
                 .expect("Failed to fetch node");
+            let _ = page_ensure_soa(guard.data_cache_mut());
             let data = guard.data();
             let is_leaf = page_is_leaf(data);
             let (lo, equal) = page_lower_bound(data, key, target_head);
@@ -694,6 +923,7 @@ impl BTree {
                 Ok(g) => g,
                 Err(_) => return false,
             };
+            let _ = page_ensure_soa(guard.data_cache_mut());
             let (is_leaf, lo, equal, next_child) = {
                 let data = guard.data();
                 let is_leaf = page_is_leaf(data);
@@ -720,7 +950,34 @@ impl BTree {
             if is_leaf {
                 return false;
             }
+            drop(guard);
+            self.bpm.prefetch_page_write(next_child as usize);
             current_id = next_child;
+        }
+    }
+
+    /// Walks resident internal nodes from the root without pinning or I/O and issues a
+    /// `Zicbop` write-intent prefetch (`prefetch.w`) on the deepest resident child/leaf page.
+    #[inline]
+    pub fn prefetch_key_write(&self, key: &[u8; KEY_SIZE]) {
+        let target_head = key_head(key);
+        let mut cur = self.meta.root_page_id;
+        for _ in 0..4 {
+            let Some(data) = self.bpm.peek_resident_page(cur as usize) else {
+                break;
+            };
+            if page_is_leaf(data) {
+                self.bpm.prefetch_page_write(cur as usize);
+                break;
+            }
+            let (lb, equal) = page_lower_bound(data, key, target_head);
+            if equal {
+                self.bpm.prefetch_page_write(cur as usize);
+                break;
+            }
+            let child = page_get_child(data, lb);
+            self.bpm.prefetch_page_write(child as usize);
+            cur = child;
         }
     }
 
@@ -735,6 +992,7 @@ impl BTree {
                 .bpm
                 .fetch_page(current_id as usize)
                 .expect("Failed to fetch node");
+            let _ = page_ensure_soa(guard.data_cache_mut());
             let data = guard.data();
             let is_leaf = page_is_leaf(data);
             let nk = page_num_keys(data);
@@ -772,7 +1030,7 @@ impl BTree {
         is_new
     }
 
-    /// Fast in-place insert/update when no node along the search path is full (`page_is_full`).
+    /// Fast in-place insert/update when the target node has sufficient room without splitting.
     fn insert_fast(
         &mut self,
         key: &[u8; KEY_SIZE],
@@ -781,37 +1039,81 @@ impl BTree {
     ) -> Option<bool> {
         let target_head = key_head(key);
         let k_slice = key_compact_slice(key);
+        let klen = k_slice.len();
+        let vlen = value.len().min(VALUE_SIZE);
+        let new_clen = 3 + klen + vlen;
         let mut cur = self.meta.root_page_id;
         loop {
             let mut guard = match self.bpm.fetch_page(cur as usize) {
                 Ok(g) => g,
                 Err(_) => return None,
             };
+            let _ = page_ensure_soa(guard.data_cache_mut());
             let (is_leaf, lb, equal, child) = {
                 let d = guard.data();
-                if page_is_full(d) {
-                    return None;
-                }
                 let is_leaf = page_is_leaf(d);
                 let (lb, equal) = page_lower_bound(d, key, target_head);
-                let child = if !equal && !is_leaf {
-                    page_get_child(d, lb)
+                if equal {
+                    let old_off = page_get_slot(d, is_leaf, lb);
+                    let old_clen = page_cell_len(d, old_off);
+                    if new_clen > old_clen && page_usable_free(d) + old_clen < new_clen {
+                        return None;
+                    }
+                    (is_leaf, lb, true, 0)
+                } else if is_leaf {
+                    let nk = page_num_keys(d);
+                    let dir_grow = page_free_start(true, nk + 1) - page_free_start(true, nk);
+                    if nk >= MAX_KEYS || page_usable_free(d) < dir_grow + new_clen {
+                        return None;
+                    }
+                    (true, lb, false, 0)
                 } else {
-                    0
-                };
-                (is_leaf, lb, equal, child)
+                    (false, lb, false, page_get_child(d, lb))
+                }
             };
 
             if equal {
-                page_overwrite_slot(guard.data_mut(), is_leaf, lb, k_slice, value, preserve_tail_32);
+                page_overwrite_same_key(
+                    guard.data_mut(),
+                    is_leaf,
+                    lb,
+                    k_slice,
+                    value,
+                    preserve_tail_32,
+                );
                 return Some(false);
             }
             if is_leaf {
                 page_insert_at(guard.data_mut(), lb, k_slice, value, 0);
                 return Some(true);
             }
+            drop(guard);
+            self.bpm.prefetch_page_write(child as usize);
             cur = child;
         }
+    }
+
+    fn split_child_in_place(
+        &mut self,
+        parent_id: u32,
+        idx: usize,
+        child_id: u32,
+    ) -> ([u8; KEY_SIZE], u32) {
+        let new_child_id = self.allocate_page();
+        debug_assert!(
+            parent_id != child_id && parent_id != new_child_id && child_id != new_child_id
+        );
+        let mut parent_guard = self.bpm.fetch_page(parent_id as usize).unwrap();
+        let mut child_guard = self.bpm.fetch_page(child_id as usize).unwrap();
+        let mut new_child_guard = self.bpm.new_page(new_child_id as usize).unwrap();
+        let mid_key = split_pages(
+            parent_guard.data_mut(),
+            idx,
+            child_guard.data_mut(),
+            new_child_id,
+            new_child_guard.data_mut(),
+        );
+        (mid_key, new_child_id)
     }
 
     fn split_child_by_id(
@@ -838,79 +1140,97 @@ impl BTree {
 
         let root_id = self.meta.root_page_id;
         let mut cur_id = root_id;
-        let mut cur_data = self.read_page(root_id);
+        let root_full = {
+            let guard = self.bpm.fetch_page(root_id as usize).unwrap();
+            let _ = page_ensure_soa(guard.data_cache_mut());
+            page_is_full(guard.data())
+        };
 
-        if page_is_full(&cur_data) {
+        if root_full {
             let new_root_id = self.allocate_page();
-            let mut new_root_data = [0u8; BLOCK_SIZE];
-            page_init(&mut new_root_data, false);
-            page_set_child(&mut new_root_data, 0, root_id);
-
             let new_child_id = self.allocate_page();
-            let mut new_child_data = [0u8; BLOCK_SIZE];
-            let _ = split_pages(
-                &mut new_root_data,
-                0,
-                &mut cur_data,
-                new_child_id,
-                &mut new_child_data,
-            );
-            self.write_page(root_id, &cur_data);
-            self.write_new_page(new_child_id, &new_child_data);
-            self.write_new_page(new_root_id, &new_root_data);
-
+            {
+                let mut root_guard = self.bpm.fetch_page(root_id as usize).unwrap();
+                let mut new_root_guard = self.bpm.new_page(new_root_id as usize).unwrap();
+                let mut new_child_guard = self.bpm.new_page(new_child_id as usize).unwrap();
+                let new_root_data = new_root_guard.data_mut();
+                page_init(new_root_data, false);
+                page_set_child(new_root_data, 0, root_id);
+                let _ = split_pages(
+                    new_root_data,
+                    0,
+                    root_guard.data_mut(),
+                    new_child_id,
+                    new_child_guard.data_mut(),
+                );
+            }
             self.meta.root_page_id = new_root_id;
             self.save_meta();
-
             cur_id = new_root_id;
-            cur_data = new_root_data;
         }
 
         let target_head = key_head(&key);
         let k_slice = key_compact_slice(&key);
 
         loop {
-            let is_leaf = page_is_leaf(&cur_data);
-            let (lb, equal) = page_lower_bound(&cur_data, &key, target_head);
+            let mut cur_guard = self.bpm.fetch_page(cur_id as usize).unwrap();
+            let _ = page_ensure_soa(cur_guard.data_cache_mut());
+            let (is_leaf, lb, equal, child_id) = {
+                let d = cur_guard.data();
+                let is_leaf = page_is_leaf(d);
+                let (lb, equal) = page_lower_bound(d, &key, target_head);
+                let child_id = if !equal && !is_leaf {
+                    page_get_child(d, lb)
+                } else {
+                    0
+                };
+                (is_leaf, lb, equal, child_id)
+            };
             if equal {
-                page_overwrite_slot(&mut cur_data, is_leaf, lb, k_slice, value, preserve_tail_32);
-                self.write_page(cur_id, &cur_data);
+                page_overwrite_same_key(
+                    cur_guard.data_mut(),
+                    is_leaf,
+                    lb,
+                    k_slice,
+                    value,
+                    preserve_tail_32,
+                );
                 return false;
             }
             if is_leaf {
-                page_insert_at(&mut cur_data, lb, k_slice, value, 0);
-                self.write_page(cur_id, &cur_data);
+                page_insert_at(cur_guard.data_mut(), lb, k_slice, value, 0);
                 return true;
             }
+            drop(cur_guard);
 
-            let child_id = page_get_child(&cur_data, lb);
-            let mut child_data = self.read_page(child_id);
-            if page_is_full(&child_data) {
-                let (mid_key, new_child_id, new_child_data) =
-                    self.split_child_by_id(cur_id, &mut cur_data, lb, child_id, &mut child_data);
+            let child_full = {
+                let child_guard = self.bpm.fetch_page(child_id as usize).unwrap();
+                let _ = page_ensure_soa(child_guard.data_cache_mut());
+                page_is_full(child_guard.data())
+            };
+            if child_full {
+                let (mid_key, new_child_id) = self.split_child_in_place(cur_id, lb, child_id);
                 match key.cmp(&mid_key) {
                     Ordering::Equal => {
-                        page_overwrite_slot(
-                            &mut cur_data,
+                        let mut cur_guard = self.bpm.fetch_page(cur_id as usize).unwrap();
+                        page_overwrite_same_key(
+                            cur_guard.data_mut(),
                             false,
                             lb,
                             k_slice,
                             value,
                             preserve_tail_32,
                         );
-                        self.write_page(cur_id, &cur_data);
                         return false;
                     }
                     Ordering::Greater => {
                         cur_id = new_child_id;
-                        cur_data = new_child_data;
                         continue;
                     }
                     Ordering::Less => {}
                 }
             }
             cur_id = child_id;
-            cur_data = child_data;
         }
     }
 
@@ -924,6 +1244,7 @@ impl BTree {
                 Ok(g) => g,
                 Err(_) => return false,
             };
+            let _ = page_ensure_soa(guard.data_cache_mut());
             let (is_leaf, nk, lb, equal, child) = {
                 let d = guard.data();
                 let is_leaf = page_is_leaf(d);
@@ -1305,6 +1626,7 @@ impl BTree {
                     .bpm
                     .fetch_page(current_id as usize)
                     .expect("Failed to fetch node");
+                let _ = page_ensure_soa(guard.data_cache_mut());
                 let data = guard.data();
                 let is_leaf = page_is_leaf(data);
                 let (lo, equal) = page_lower_bound(data, &start_key, start_head);

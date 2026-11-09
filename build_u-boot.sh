@@ -43,7 +43,7 @@ cd "$UBOOT_DIR"
 
 # 1. Clean
 echo "Cleaning..."
-make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE clean
+make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE clean || true
 
 # 2. Initialize Config (includes CONFIG_API=y)
 echo "Initializing config: $BOARD_CONFIG..."

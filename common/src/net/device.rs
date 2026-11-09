@@ -30,7 +30,7 @@ impl UbootNetDevice {
             rx_head: 0,
             rx_tail: 0,
             rx_count: 0,
-            rx_budget: 64,
+            rx_budget: 256,
             tx_ring: alloc::vec![[0u8; PACKET_BUF_SIZE]; TX_RING_SIZE].into_boxed_slice(),
             tx_lens: alloc::vec![0u16; TX_RING_SIZE].into_boxed_slice(),
             tx_head: 0,

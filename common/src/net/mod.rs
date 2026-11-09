@@ -142,6 +142,8 @@ impl<'b> smoltcp::phy::TxToken for NetTxToken<'b> {
     }
 }
 
+pub const DASHBOARD_SOCKET_COUNT: usize = 6;
+
 pub struct NetworkContext<'a> {
     pub iface: Interface,
     pub device: NetDevice,
@@ -152,7 +154,7 @@ pub struct NetworkContext<'a> {
     pub peering_handle: smoltcp::iface::SocketHandle,
     pub udp_handle: smoltcp::iface::SocketHandle,
     pub rpc_handle: smoltcp::iface::SocketHandle,
-    pub dashboard_handle: smoltcp::iface::SocketHandle,
+    pub dashboard_handles: [smoltcp::iface::SocketHandle; DASHBOARD_SOCKET_COUNT],
     pub sockets_to_drop: alloc::vec::Vec<smoltcp::iface::SocketHandle>,
 }
 
@@ -168,7 +170,7 @@ impl<'a> NetworkContext<'a> {
             let established_socket = self.sockets.remove(self.peering_handle);
             let peering_port = NET_CONFIG.lock().peering_port;
             
-            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
+            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 131072]);
             let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
             let mut new_listener = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
             let _ = new_listener.listen(peering_port);
@@ -189,7 +191,7 @@ impl<'a> NetworkContext<'a> {
         let timestamp = Instant::from_micros((mtime as u128 * 1_000_000 / crate::clint::FREQ as u128) as i64);
 
         match &mut self.device {
-            NetDevice::Uboot(d) => d.begin_poll(64),
+            NetDevice::Uboot(d) => d.begin_poll(256),
         }
         let progress = !matches!(
             self.iface.poll(timestamp, &mut self.device, &mut self.sockets),
@@ -237,7 +239,7 @@ impl<'a> NetworkContext<'a> {
     }
 
     pub fn create_tcp_socket(&mut self) -> smoltcp::iface::SocketHandle {
-        let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
+        let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 131072]);
         let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
         let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
         self.sockets.add(tcp_socket)
@@ -433,7 +435,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
         let tcp_handle = sockets.add(tcp_socket);
 
-        let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 65535]);
+        let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 131072]);
         let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 65535]);
         let mut tcp_peering = TcpSocket::new(tcp_rx_buffer_2, tcp_tx_buffer_2);
         let _ = tcp_peering.listen(net_cfg.peering_port);
@@ -463,13 +465,15 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         }
         let rpc_handle = sockets.add(tcp_rpc);
 
-        let tcp_rx_buffer_4 = TcpSocketBuffer::new(vec![0; 131072]);
-        let tcp_tx_buffer_4 = TcpSocketBuffer::new(vec![0; 163840]);
-        let mut tcp_dashboard = TcpSocket::new(tcp_rx_buffer_4, tcp_tx_buffer_4);
-        if net_cfg.dashboard_enable {
-            let _ = tcp_dashboard.listen(net_cfg.dashboard_port);
-        }
-        let dashboard_handle = sockets.add(tcp_dashboard);
+        let dashboard_handles = core::array::from_fn(|_| {
+            let tcp_rx_buffer_4 = TcpSocketBuffer::new(vec![0; 131072]);
+            let tcp_tx_buffer_4 = TcpSocketBuffer::new(vec![0; 163840]);
+            let mut tcp_dashboard = TcpSocket::new(tcp_rx_buffer_4, tcp_tx_buffer_4);
+            if net_cfg.dashboard_enable {
+                let _ = tcp_dashboard.listen(net_cfg.dashboard_port);
+            }
+            sockets.add(tcp_dashboard)
+        });
 
         return Some(NetworkContext {
             iface,
@@ -481,7 +485,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
             peering_handle,
             udp_handle,
             rpc_handle,
-            dashboard_handle,
+            dashboard_handles,
             sockets_to_drop: alloc::vec::Vec::new(),
         });
     }

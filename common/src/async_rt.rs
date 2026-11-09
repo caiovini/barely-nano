@@ -136,10 +136,10 @@ impl Executor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        // Hart 1 is dedicated to Network/RPC polling, Harts 0, 2 & 3 are dedicated to lock-free
-        // Crypto (Ed25519) & MessageProcessor draining, and Hart 6 is dedicated to single-writer
-        // Ledger Commit, so schedule async tasks across worker harts [4, 5, 7].
-        const WORKER_HARTS: [u8; 3] = [4, 5, 7];
+        // Hart 1 is dedicated to Network/RPC polling, Harts 2 & 3 are dedicated to lock-free
+        // Crypto (Ed25519) & MessageProcessor draining, and Harts 5 & 6 are dedicated to
+        // Sharded Ledger Commit (Ledger-B / Ledger-A), so schedule async tasks across worker harts [0, 4, 7].
+        const WORKER_HARTS: [u8; 3] = [0, 4, 7];
         let idx = (self.next_spawn_hart.fetch_add(1, Ordering::Relaxed) as usize) % WORKER_HARTS.len();
         let hart_id = WORKER_HARTS[idx];
         
@@ -214,7 +214,7 @@ impl Executor {
         }
 
         // 3. Work Stealing: Try other worker queues
-        const WORKER_HARTS: [usize; 3] = [4, 5, 7];
+        const WORKER_HARTS: [usize; 3] = [0, 4, 7];
         for &victim_id in &WORKER_HARTS {
             if victim_id == hart_id {
                 continue;

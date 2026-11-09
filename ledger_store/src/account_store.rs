@@ -47,6 +47,61 @@ fn account_bloom_may_contain(bytes: &[u8; 32]) -> bool {
         && (ACCOUNT_BLOOM[base + 3].load(Ordering::Relaxed) & m3 == m3)
 }
 
+const HOT_ACCOUNT_SLOTS: usize = 32; // 16 shards * 32 slots = 512 hot accounts
+
+#[derive(Clone)]
+struct HotAccountEntry {
+    gen: u32,
+    account: Account,
+    info: AccountInfo,
+}
+
+static HOT_ACCOUNTS: [spin::Mutex<[Option<HotAccountEntry>; HOT_ACCOUNT_SLOTS]>; SHARD_COUNT] =
+    [const { spin::Mutex::new([const { None }; HOT_ACCOUNT_SLOTS]) }; SHARD_COUNT];
+
+#[inline]
+fn hot_account_slot(account: &Account) -> (usize, usize) {
+    let b = account.as_bytes();
+    let shard = (b[0] >> 4) as usize;
+    let slot = (u16::from_ne_bytes([b[1], b[2]]) as usize) & (HOT_ACCOUNT_SLOTS - 1);
+    (shard, slot)
+}
+
+#[inline]
+fn hot_account_get(account: &Account) -> Option<AccountInfo> {
+    let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
+    let (shard, slot) = hot_account_slot(account);
+    let guard = HOT_ACCOUNTS[shard].lock();
+    if let Some(entry) = &guard[slot] {
+        if entry.gen == gen && entry.account == *account {
+            return Some(entry.info.clone());
+        }
+    }
+    None
+}
+
+#[inline]
+fn hot_account_put(account: &Account, info: &AccountInfo) {
+    let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
+    let (shard, slot) = hot_account_slot(account);
+    HOT_ACCOUNTS[shard].lock()[slot] = Some(HotAccountEntry {
+        gen,
+        account: *account,
+        info: info.clone(),
+    });
+}
+
+#[inline]
+fn hot_account_del(account: &Account) {
+    let (shard, slot) = hot_account_slot(account);
+    let mut guard = HOT_ACCOUNTS[shard].lock();
+    if let Some(entry) = &guard[slot] {
+        if entry.account == *account {
+            guard[slot] = None;
+        }
+    }
+}
+
 pub struct BtreeAccountStore {
     #[allow(dead_code)]
     cache: Arc<LedgerCache>,
@@ -78,6 +133,10 @@ impl BtreeAccountStore {
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.insert(key, &buffer[0..len]);
+            drop(lock);
+            if !cfg!(test) {
+                hot_account_put(account, info);
+            }
         }
     }
 
@@ -88,6 +147,11 @@ impl BtreeAccountStore {
         {
             return None;
         }
+        if !cfg!(test) {
+            if let Some(cached) = hot_account_get(account) {
+                return Some(cached);
+            }
+        }
         let key = self.make_key(account);
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
@@ -96,6 +160,10 @@ impl BtreeAccountStore {
                 let mut stream = BufferReader::new(value);
                 AccountInfo::deserialize(&mut stream).ok()
             }) {
+                drop(lock);
+                if !cfg!(test) {
+                    hot_account_put(account, &info);
+                }
                 tracing::debug!("AccountStore: found account {}, head={}", account.encode_account(), info.head);
                 return Some(info);
             }
@@ -105,6 +173,7 @@ impl BtreeAccountStore {
     }
 
     pub fn clear_bloom(&self) {
+        kernel_common::storage::STORAGE_GEN.fetch_add(1, Ordering::Release);
         ACCOUNT_BLOOM_READY.store(false, Ordering::Release);
         for w in ACCOUNT_BLOOM.iter() {
             w.store(0, Ordering::Relaxed);
@@ -152,6 +221,7 @@ impl BtreeAccountStore {
     }
 
     pub fn del(&self, account: &Account) {
+        hot_account_del(account);
         let key = self.make_key(account);
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();

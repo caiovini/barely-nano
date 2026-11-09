@@ -26,12 +26,21 @@ impl BtreeSuccessorStore {
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             let _ = db.update_suffix_32(&key, successor.as_bytes());
+            drop(lock);
+            if !cfg!(test) {
+                crate::hot_block_set_successor(hash, *successor);
+            }
         }
     }
 
     pub fn get(&self, hash: &BlockHash) -> Option<BlockHash> {
         if !BtreeBlockStore::may_exist_global(hash) {
             return None;
+        }
+        if !cfg!(test) {
+            if let Some(cached) = crate::hot_block_get_successor(hash) {
+                return cached;
+            }
         }
         let key = self.make_key(hash);
         let shard_idx = get_shard_index(&key);
@@ -58,6 +67,10 @@ impl BtreeSuccessorStore {
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             let _ = db.update_suffix_32(&key, &[0u8; 32]);
+            drop(lock);
+            if !cfg!(test) {
+                crate::hot_block_set_successor(hash, BlockHash::zero());
+            }
         }
     }
 }

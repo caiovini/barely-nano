@@ -180,6 +180,15 @@ impl PageGuard {
         unsafe { &*self.data_ptr }
     }
 
+    /// Returns a mutable reference to the in-RAM cached frame without marking the page dirty.
+    /// Used for deterministic in-RAM cache enrichment (populating the derived `PAGE_FLAG_SOA`
+    /// key-head directory on a legacy slotted page loaded from NVMe).
+    #[inline]
+    pub fn data_cache_mut(&self) -> &mut [u8; BLOCK_SIZE] {
+        // SAFETY: Caller holds the shard's `ShardMutex`, granting exclusive access to the frame.
+        unsafe { &mut *self.data_ptr }
+    }
+
     #[inline]
     pub fn data_mut(&mut self) -> &mut [u8; BLOCK_SIZE] {
         self.is_dirty = true;
@@ -373,6 +382,18 @@ impl BufferPool {
     }
 
     #[inline]
+    pub fn peek_resident_page(&self, page_id: usize) -> Option<&[u8; BLOCK_SIZE]> {
+        let fid = self.get_page_frame(page_id);
+        if fid != u32::MAX {
+            // SAFETY: `fid` is a valid resident frame index `< self.max_frames`, and caller holds `&self`
+            // behind the shard's `ShardMutex`.
+            Some(unsafe { &(*self.data_ptr.add(fid as usize)).bytes })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
     pub fn prefetch_page(&self, page_id: usize) {
         let fid = self.get_page_frame(page_id);
         if fid != u32::MAX {
@@ -380,8 +401,26 @@ impl BufferPool {
             unsafe {
                 let base = (*self.data_ptr.add(fid as usize)).bytes.as_ptr();
                 crate::storage::prefetch_read(base);
-                crate::storage::prefetch_read(base.add(320));
+                crate::storage::prefetch_read(base.add(128));
                 crate::storage::prefetch_read(base.add(3840));
+            }
+        }
+    }
+
+    #[inline]
+    pub fn prefetch_page_write(&self, page_id: usize) {
+        let fid = self.get_page_frame(page_id);
+        if fid != u32::MAX {
+            // SAFETY: `fid` is a valid resident frame index `< self.max_frames`.
+            unsafe {
+                let bytes = &(*self.data_ptr.add(fid as usize)).bytes;
+                let base = bytes.as_ptr();
+                crate::storage::prefetch_write(base);
+                crate::storage::prefetch_write(base.add(128));
+                let fe = (u16::from_le_bytes([bytes[3], bytes[4]]) as usize)
+                    .saturating_sub(256)
+                    .min(BLOCK_SIZE - 64);
+                crate::storage::prefetch_write(base.add(fe));
             }
         }
     }

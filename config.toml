@@ -84,9 +84,9 @@ duplicate_filter_cutoff = 60
 [node.tcp]
 max_inbound_connections = 128
 max_outbound_connections = 192
-max_attempts = 16
+max_attempts = 32
 max_attempts_per_ip = 1
-connect_timeout = 60
+connect_timeout = 15
 
 [node.bootstrap]
 enable = true

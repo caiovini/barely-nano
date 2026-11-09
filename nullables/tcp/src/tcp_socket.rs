@@ -9,22 +9,14 @@ pub struct TcpSocket {
 
 impl TcpSocket {
     pub fn new_v6() -> anyhow::Result<Self> {
-        let handle = {
-            if let Some(ref mut ctx) = *lock_net_worker() {
-                ctx.create_tcp_socket()
-            } else {
-                return Err(anyhow::anyhow!("No network context"));
-            }
-        };
         Ok(Self {
-            strategy: Strategy::Real(Some(handle)),
+            strategy: Strategy::Real(None),
         })
     }
 
     pub async fn connect(mut self, addr: SocketAddr) -> anyhow::Result<TcpStream> {
         match &mut self.strategy {
             Strategy::Real(handle_opt) => {
-                let handle = handle_opt.take().ok_or_else(|| anyhow::anyhow!("Socket already used or dropped"))?;
                 let endpoint = match addr {
                     SocketAddr::V4(v4) => {
                         smoltcp::wire::IpEndpoint::new(
@@ -47,8 +39,18 @@ impl TcpSocket {
                                 v6.port()
                             )
                         } else {
-                            let ipv6 = smoltcp::wire::Ipv6Address::from_octets(v6.ip().octets());
-                            smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv6(ipv6), v6.port())
+                            return Err(anyhow::anyhow!("IPv6 not supported on IPv4-only interface"));
+                        }
+                    }
+                };
+
+                let handle = match handle_opt.take() {
+                    Some(h) => h,
+                    None => {
+                        if let Some(ref mut ctx) = *lock_net_worker() {
+                            ctx.create_tcp_socket()
+                        } else {
+                            return Err(anyhow::anyhow!("No network context"));
                         }
                     }
                 };

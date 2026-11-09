@@ -106,10 +106,11 @@ const STORAGE_MAGIC: u64 = 0x5348_4152_4453_4834; // "SHARDSH4"
 const WAL_MAX_PAGES: usize = 65_536; // 256 MB
 
 const BTREE_META_MAGIC: u32 = 0xBEEF_CB03;
+const PAGE_FLAG_SOA: u8 = 1;
 const MAX_KEYS: usize = 64;
 const KEY_SIZE: usize = 65;
 const VALUE_SIZE: usize = 272;
-const MAX_INSERT_BYTES: usize = 6 + 3 + KEY_SIZE + VALUE_SIZE; // 330 bytes
+const MAX_INSERT_BYTES: usize = 12 + 3 + KEY_SIZE + VALUE_SIZE; // 352 bytes
 
 const COUNTS_MAGIC: u64 = 0x4E41_4E4F_434E_5431; // "NANOCNT1"
 
@@ -150,6 +151,11 @@ fn key_head(k: &[u8]) -> u64 {
 }
 
 #[inline(always)]
+fn key_head32(k: &[u8]) -> u32 {
+    u32::from_be_bytes([k[0], k[1], k[2], k[3]])
+}
+
+#[inline(always)]
 fn key_compact_slice(key: &[u8; KEY_SIZE]) -> &[u8] {
     if key[33..KEY_SIZE] == [0u8; 32] {
         &key[..33]
@@ -184,6 +190,7 @@ fn page_init(data: &mut [u8; BLOCK_SIZE], is_leaf: bool) {
     data[1..3].copy_from_slice(&0u16.to_le_bytes());
     data[3..5].copy_from_slice(&(BLOCK_SIZE as u16).to_le_bytes());
     data[5..7].copy_from_slice(&0u16.to_le_bytes());
+    data[7] = PAGE_FLAG_SOA;
 }
 
 #[inline(always)]
@@ -217,12 +224,18 @@ fn page_set_free_end(data: &mut [u8; BLOCK_SIZE], fe: usize) {
 }
 
 #[inline(always)]
-fn page_free_start(is_leaf: bool, num_keys: usize) -> usize {
-    if is_leaf {
+fn page_heads_base(is_leaf: bool, num_keys: usize) -> usize {
+    let raw = if is_leaf {
         8 + num_keys * 2
     } else {
         12 + num_keys * 6
-    }
+    };
+    (raw + 3) & !3
+}
+
+#[inline(always)]
+fn page_free_start(is_leaf: bool, num_keys: usize) -> usize {
+    page_heads_base(is_leaf, num_keys) + num_keys * 4
 }
 
 #[inline(always)]
@@ -293,7 +306,7 @@ fn page_can_append_staying_nonfull(
     if nk + 1 >= MAX_KEYS {
         return false;
     }
-    let dir_bytes = if is_leaf { 2 } else { 6 };
+    let dir_bytes = page_free_start(is_leaf, nk + 1) - page_free_start(is_leaf, nk);
     let cell_bytes = 3 + key_slice.len() + val.len();
     let needed = dir_bytes + cell_bytes;
     let avail = page_usable_free(data);
@@ -317,6 +330,16 @@ fn page_append_slot(data: &mut [u8; BLOCK_SIZE], key_slice: &[u8], val: &[u8]) {
     data[new_fe + 3..new_fe + 3 + klen].copy_from_slice(key_slice);
     data[new_fe + 3 + klen..new_fe + clen].copy_from_slice(&val[..vlen]);
     page_set_free_end(data, new_fe);
+
+    let old_hb = page_heads_base(is_leaf, nk);
+    let new_hb = page_heads_base(is_leaf, nk + 1);
+    if new_hb != old_hb && nk > 0 {
+        data.copy_within(old_hb..old_hb + nk * 4, new_hb);
+    }
+    let h32 = key_head32(key_slice);
+    let ho = new_hb + nk * 4;
+    data[ho..ho + 4].copy_from_slice(&h32.to_le_bytes());
+
     page_set_slot(data, is_leaf, nk, new_fe);
     page_set_num_keys(data, nk + 1);
 }
@@ -345,9 +368,16 @@ fn page_pop_last_slot(
     data[off..off + clen].fill(0);
     page_set_free_end(data, off + clen);
 
+    let old_hb = page_heads_base(is_leaf, nk);
+    let new_hb = page_heads_base(is_leaf, last_idx);
+
     // Clear directory entry
     let slot_off = page_slot_off(is_leaf, last_idx);
     data[slot_off..slot_off + 2].fill(0);
+    if new_hb != old_hb && last_idx > 0 {
+        data.copy_within(old_hb..old_hb + last_idx * 4, new_hb);
+    }
+    data[new_hb + last_idx * 4..old_hb + nk * 4].fill(0);
     page_set_num_keys(data, last_idx);
     (klen, vlen)
 }

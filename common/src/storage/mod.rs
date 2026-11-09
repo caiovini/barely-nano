@@ -49,6 +49,27 @@ pub fn prefetch_read(ptr: *const u8) {
     }
 }
 
+/// Issues a RISC-V `Zicbop` `prefetch.w 0(ptr)` cache-line write-intent prefetch hint.
+#[inline(always)]
+pub fn prefetch_write(ptr: *const u8) {
+    #[cfg(target_arch = "riscv64")]
+    {
+        // SAFETY: `ori zero, rs1, 3` is the architectural RISC-V Zicbop `prefetch.w 0(rs1)`
+        // hint instruction; it writes to `x0`, has no architectural side effects, and never traps.
+        unsafe {
+            core::arch::asm!(
+                "ori zero, {0}, 3",
+                in(reg) ptr,
+                options(nostack, preserves_flags, readonly)
+            );
+        }
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let _ = ptr;
+    }
+}
+
 /// Per-hart shard-lock statistics (CLINT ticks): time waiting for, and holding, shard locks.
 pub static LOCK_WAIT: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::atomic::AtomicU64::new(0) }; 8];
 pub static LOCK_HOLD: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::atomic::AtomicU64::new(0) }; 8];
@@ -179,6 +200,9 @@ pub fn reset_prof() {
 }
 
 pub static SHARD_SIZE_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// Monotonic generation bumped whenever any B-Tree shard is initialized or wiped,
+/// allowing in-memory hot frontier caches to self-invalidate in O(1).
+pub static STORAGE_GEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 /// Helper for legacy code or single-shard access
 pub fn db_shard(index: usize) -> &'static ShardMutex {

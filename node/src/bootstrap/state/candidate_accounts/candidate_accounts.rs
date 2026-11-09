@@ -1036,6 +1036,7 @@ mod tests {
                 priority: CandidateAccounts::PRIORITY_INITIAL,
                 fails: 0,
                 pull_type: PullType::Optimistic,
+                target_hash: BlockHash::zero(),
             }
         )
     }
@@ -1073,6 +1074,7 @@ mod tests {
                 priority: Priority::new(1.0),
                 fails: 0,
                 pull_type: PullType::Optimistic,
+                target_hash: BlockHash::zero(),
             }
         );
     }
@@ -1099,6 +1101,7 @@ mod tests {
                 priority: CandidateAccounts::PRIORITY_INITIAL,
                 fails: 0,
                 pull_type: PullType::Optimistic,
+                target_hash: BlockHash::zero(),
             }
         );
     }

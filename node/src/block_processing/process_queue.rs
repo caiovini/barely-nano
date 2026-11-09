@@ -103,7 +103,8 @@ impl ProcessQueue {
     }
 
     pub fn next_batch(&mut self) -> VecDeque<Arc<BlockContext>> {
-        let mut results = VecDeque::new();
+        let cap = self.queue.len().min(self.batch_size);
+        let mut results = VecDeque::with_capacity(cap);
         while !self.is_empty() && results.len() < self.batch_size {
             results.push_back(self.next());
         }

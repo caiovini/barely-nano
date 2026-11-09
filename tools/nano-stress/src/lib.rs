@@ -58,6 +58,13 @@ struct WasmStressState {
     pow_root: [u8; 32],
     pow_out_be: [u8; 8],
     pow_nonce_cursor: u64,
+    wallet_seed: [u8; 32],
+    wallet_priv: [u8; 32],
+    wallet_pub: [u8; 32],
+    wallet_checksum: [u8; 5],
+    state_hash_input: [u8; 176],
+    signed_block_hash: [u8; 32],
+    signed_block_sig: [u8; 64],
 }
 
 struct SyncState(UnsafeCell<WasmStressState>);
@@ -81,6 +88,13 @@ static STATE: SyncState = SyncState(UnsafeCell::new(WasmStressState {
     pow_root: [0u8; 32],
     pow_out_be: [0u8; 8],
     pow_nonce_cursor: 1,
+    wallet_seed: [0u8; 32],
+    wallet_priv: [0u8; 32],
+    wallet_pub: [0u8; 32],
+    wallet_checksum: [0u8; 5],
+    state_hash_input: [0u8; 176],
+    signed_block_hash: [0u8; 32],
+    signed_block_sig: [0u8; 64],
 }));
 
 #[inline]
@@ -529,4 +543,98 @@ pub extern "C" fn wasm_compute_pow_step(
     }
     st.pow_nonce_cursor = nonce;
     0
+}
+
+#[inline]
+fn compute_account_checksum(pub_key: &[u8; 32]) -> [u8; 5] {
+    let mut hasher = blake2b::Blake2bHasher::new(5);
+    hasher.update(pub_key);
+    let full = hasher.finalize();
+    let mut out = [0u8; 5];
+    out.copy_from_slice(&full[..5]);
+    out
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_get_wallet_seed_ptr() -> *mut u8 {
+    // SAFETY: Returns pointer to static WASM buffer.
+    unsafe { state().wallet_seed.as_mut_ptr() }
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_get_wallet_priv_ptr() -> *mut u8 {
+    // SAFETY: Returns pointer to static WASM buffer.
+    unsafe { state().wallet_priv.as_mut_ptr() }
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_get_wallet_pub_ptr() -> *mut u8 {
+    // SAFETY: Returns pointer to static WASM buffer.
+    unsafe { state().wallet_pub.as_mut_ptr() }
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_get_wallet_checksum_ptr() -> *const u8 {
+    // SAFETY: Returns pointer to static WASM buffer.
+    unsafe { state().wallet_checksum.as_ptr() }
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_get_state_input_ptr() -> *mut u8 {
+    // SAFETY: Returns pointer to static WASM buffer.
+    unsafe { state().state_hash_input.as_mut_ptr() }
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_get_signed_hash_ptr() -> *const u8 {
+    // SAFETY: Returns pointer to static WASM buffer.
+    unsafe { state().signed_block_hash.as_ptr() }
+}
+
+#[no_mangle]
+pub extern "C" fn wasm_get_signed_sig_ptr() -> *const u8 {
+    // SAFETY: Returns pointer to static WASM buffer.
+    unsafe { state().signed_block_sig.as_ptr() }
+}
+
+/// Derives a Nano deterministic account key (`Blake2b-256(seed[32] || index_be[4])`),
+/// its 32-byte Ed25519 public key, and its 5-byte `Blake2b-40` address checksum in the browser.
+#[no_mangle]
+pub extern "C" fn wasm_derive_deterministic_key(index: u32) {
+    // SAFETY: Single-threaded WebAssembly helper.
+    let st = unsafe { state() };
+    let mut input = [0u8; 36];
+    input[0..32].copy_from_slice(&st.wallet_seed);
+    input[32..36].copy_from_slice(&index.to_be_bytes());
+    st.wallet_priv = blake2b::hash(&input);
+    st.wallet_pub = ed25519::derive_public_key(&st.wallet_priv);
+    st.wallet_checksum = compute_account_checksum(&st.wallet_pub);
+}
+
+/// Derives the 32-byte Ed25519 public key and 5-byte `Blake2b-40` address checksum
+/// from the 32-byte private key currently in `wallet_priv`.
+#[no_mangle]
+pub extern "C" fn wasm_derive_from_privkey() {
+    // SAFETY: Single-threaded WebAssembly helper.
+    let st = unsafe { state() };
+    st.wallet_pub = ed25519::derive_public_key(&st.wallet_priv);
+    st.wallet_checksum = compute_account_checksum(&st.wallet_pub);
+}
+
+/// Computes the 5-byte `Blake2b-40` Nano address checksum for the 32-byte public key in `wallet_pub`.
+#[no_mangle]
+pub extern "C" fn wasm_pubkey_checksum() {
+    // SAFETY: Single-threaded WebAssembly helper.
+    let st = unsafe { state() };
+    st.wallet_checksum = compute_account_checksum(&st.wallet_pub);
+}
+
+/// Hashes the 176-byte `state_hash_input` (`[0..31]=0, [31]=6, account[32], previous[32], rep[32], balance_be[16], link[32]`)
+/// with Blake2b-256 and signs it with `wallet_priv` using Ed25519 in the browser.
+#[no_mangle]
+pub extern "C" fn wasm_sign_state_block() {
+    // SAFETY: Single-threaded WebAssembly helper.
+    let st = unsafe { state() };
+    st.signed_block_hash = blake2b::hash(&st.state_hash_input);
+    st.signed_block_sig = ed25519::sign(&st.wallet_priv, &st.signed_block_hash);
 }
