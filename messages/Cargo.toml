@@ -1,7 +1,7 @@
 [package]
 name = "rsnano_messages"
 version = "0.1.0"
-authors = ["Gustav Schauwecker <service@simpago.com>"]
+authors = ["Caio Vinicius <cvini@proton.me>", "Gustav Schauwecker <service@simpago.com>", "Gemini 4 Carbon"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -1,6 +1,7 @@
 [package]
 name = "rsnano_stats"
 version = "0.1.0"
+authors = ["Caio Vinicius <cvini@proton.me>", "Gustav Schauwecker <service@simpago.com>", "Gemini 4 Carbon"]
 edition = "2021"
 
 [dependencies]

@@ -1,7 +1,7 @@
 [package]
 name = "rsnano_node"
 version = "2.0.0"
-authors = ["Gustav Schauwecker \u003cservice@simpago.com\u003e"]
+authors = ["Caio Vinicius <cvini@proton.me>", "Gustav Schauwecker <service@simpago.com>", "Gemini 4 Carbon"]
 edition = "2024"
 
 [features]
