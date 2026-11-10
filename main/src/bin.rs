@@ -1212,21 +1212,30 @@ fn run_crypto_worker_1_loop(
         }
 
         // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
-        if !node_arc.inbound_message_queue.is_empty_relaxed() {
+        if !node_arc.inbound_message_queue.is_empty_relaxed()
+            && !node_arc.signature_checker.has_sync_tasks()
+        {
             let hp1 = kernel_common::clint::mtime();
-            for _ in 0..4 {
-                if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
-                    worked = true;
-                } else {
-                    break;
-                }
+            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
+                worked = true;
             }
             HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
         }
 
-        // 3. Background signature pre-verification (interleaved with sync & message checks)
+        while node_arc.signature_checker.has_sync_tasks() {
+            let n = node_arc.signature_checker.help_verify();
+            if n > 0 {
+                worked = true;
+                verified_count = verified_count.wrapping_add(n);
+            } else {
+                break;
+            }
+        }
+
+        // 3. Background signature pre-verification (up to 64 blocks = 16x4 per batch so Harts 2 & 3
+        // keep pace with 256-block MessageProcessor batches before Hart 6 pops them).
         if !node_arc.signature_checker.is_empty_relaxed() {
-            for _ in 0..4 {
+            for _ in 0..16 {
                 let n = node_arc.signature_checker.help_verify();
                 if n > 0 {
                     worked = true;
@@ -1285,21 +1294,30 @@ fn run_crypto_worker_2_loop(
         }
 
         // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
-        if !node_arc.inbound_message_queue.is_empty_relaxed() {
+        if !node_arc.inbound_message_queue.is_empty_relaxed()
+            && !node_arc.signature_checker.has_sync_tasks()
+        {
             let hp1 = kernel_common::clint::mtime();
-            for _ in 0..4 {
-                if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
-                    worked = true;
-                } else {
-                    break;
-                }
+            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
+                worked = true;
             }
             HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
         }
 
-        // 3. Background signature pre-verification (interleaved with sync & message checks)
+        while node_arc.signature_checker.has_sync_tasks() {
+            let n = node_arc.signature_checker.help_verify();
+            if n > 0 {
+                worked = true;
+                verified_count = verified_count.wrapping_add(n);
+            } else {
+                break;
+            }
+        }
+
+        // 3. Background signature pre-verification (up to 64 blocks = 16x4 per batch so Harts 2 & 3
+        // keep pace with 256-block MessageProcessor batches before Hart 6 pops them).
         if !node_arc.signature_checker.is_empty_relaxed() {
-            for _ in 0..4 {
+            for _ in 0..16 {
                 let n = node_arc.signature_checker.help_verify();
                 if n > 0 {
                     worked = true;
@@ -1359,14 +1377,27 @@ fn run_ledger_b_loop(
             worked = true;
         }
 
-        // 2. Drain satisfied unchecked block dependencies into BlockProcessorQueue
-        if node_arc.unchecked.buffer_count() > 0 && node_arc.confirming_set.len() < 16_384 {
+        // 2. While Hart 6 is blocked in `sig_ms` waiting for synchronous batch signature checks,
+        // help verify `sync_tasks` in Cluster 1's shared L2 cache.
+        while node_arc.signature_checker.has_sync_tasks() {
+            if node_arc.signature_checker.help_verify_sync() > 0 {
+                worked = true;
+            } else {
+                break;
+            }
+        }
+
+        // 3. Drain satisfied unchecked block dependencies into BlockProcessorQueue
+        if !node_arc.unchecked.is_empty()
+            && node_arc.unchecked.buffer_count() > 0
+            && node_arc.confirming_set.len() < 16_384
+        {
             node_arc.unchecked.run_once();
             worked = true;
             while rsnano_ledger::try_run_ledger_b_job() {}
         }
 
-        // 3. Service bootstrap responder when ledger commit and unchecked queues are idle
+        // 4. Service bootstrap responder when ledger commit and unchecked queues are idle
         if !worked
             && node_arc.block_processor.total_queue_len() == 0
             && node_arc.unchecked.buffer_count() == 0
@@ -1383,6 +1414,7 @@ fn run_ledger_b_loop(
             for _ in 0..idle_spins {
                 if rsnano_ledger::try_run_ledger_b_job()
                     || kernel_common::storage::wal::try_run_wal_b_job()
+                    || node_arc.signature_checker.has_sync_tasks()
                 {
                     idle_spins = 1;
                     break;
@@ -1969,6 +2001,7 @@ fn run_storage_flush_and_monitor_loop(
     hart_id: usize,
 ) -> ! {
     tracing::debug!("[boot] Hart 7: Storage Flush & Monitor loop enter");
+    kernel_common::storage::wal::set_wal_bg_online(true);
     let mut last_tick = kernel_common::clint::mtime();
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
@@ -2052,8 +2085,13 @@ fn run_storage_flush_and_monitor_loop(
             last_cleanup = mtime;
         }
 
-        // 1. Persistence is owned by the ledger writer (Hart 6): it checkpoints all shards
-        // atomically through the WAL at transaction boundaries. Nothing may flush shards directly.
+        // 1. Background NVMe WAL + Home-Page DMA Flush:
+        // Harts 5 & 6 snapshot dirty pages at a transaction boundary and hand the batch to Hart 7
+        // so synchronous U-Boot NVMe DMA writes never stall the Cluster 1 ledger commit pipeline.
+        if kernel_common::storage::wal::try_run_wal_bg_flush() {
+            iterations += 1;
+            continue;
+        }
 
         // 2. Hardware OLED status refresh
         if mtime - last_oled > seconds(2) {
@@ -2281,6 +2319,9 @@ fn run_storage_flush_and_monitor_loop(
             }
             // Aggressive throttle when completely idle to free up system bus
             for _ in 0..2000 {
+                if kernel_common::storage::wal::is_wal_bg_pending() {
+                    break;
+                }
                 core::hint::spin_loop();
             }
         }
@@ -2436,18 +2477,20 @@ fn run_ledger_a_loop(
             worked = true;
         }
 
-        // 2. Atomic WAL checkpoint at a transaction boundary (cleaning WAL segments 0-7 on Hart 6
-        // in parallel with WAL segments 8-15 on Hart 5). Defer periodic timer checkpoints up to 30s
-        // while the block processor queue is actively draining a burst to avoid redundant NVMe writes.
+        // 2. Atomic WAL checkpoint at a transaction boundary (snapshotting Shards 0-7 on Hart 6
+        // in parallel with Shards 8-15 on Hart 5, then offloading synchronous NVMe DMA writes to
+        // Hart 7). Defer periodic timer checkpoints up to 30s while the block processor queue is
+        // actively draining a burst to avoid redundant NVMe writes.
         let bpq_busy = node_arc.block_processor.total_queue_len() > 0
             || !node_arc.inbound_message_queue.is_empty_relaxed();
         let checkpoint_interval = if bpq_busy { seconds(30) } else { seconds(10) };
         if mtime - last_checkpoint > checkpoint_interval
             || kernel_common::storage::bpm::NEED_CHECKPOINT.load(Ordering::Relaxed)
         {
-            let _ = kernel_common::storage::wal::checkpoint();
-            last_checkpoint = kernel_common::clint::mtime();
-            worked = true;
+            if kernel_common::storage::wal::checkpoint_nonblocking() {
+                last_checkpoint = kernel_common::clint::mtime();
+                worked = true;
+            }
         }
 
         // 3. Periodic node tick

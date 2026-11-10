@@ -544,7 +544,8 @@ impl BufferPool {
             if !m.in_dirty_list {
                 m.in_dirty_list = true;
                 self.dirty_frames.push(frame_id);
-                if !self.is_wallet && self.dirty_frames.len() >= 2048 {
+                let dirty_limit = (self.target_frames / 8).clamp(2048, 8192);
+                if !self.is_wallet && self.dirty_frames.len() >= dirty_limit {
                     NEED_CHECKPOINT.store(true, Ordering::Relaxed);
                 }
             }
@@ -597,6 +598,7 @@ impl BufferPool {
     }
 
     /// Marks a page clean after a checkpoint persisted it, unless it was modified again since.
+    #[inline]
     pub fn mark_clean(&mut self, page_id: usize, gen: u64) {
         let fid = self.get_page_frame(page_id);
         if fid != u32::MAX {
@@ -604,17 +606,6 @@ impl BufferPool {
             if m.is_dirty && m.gen == gen {
                 m.is_dirty = false;
             }
-        }
-        if self.dirty_frames.len() > 2048 {
-            let meta = &mut self.meta;
-            self.dirty_frames.retain(|&fid| {
-                if meta[fid].is_dirty {
-                    true
-                } else {
-                    meta[fid].in_dirty_list = false;
-                    false
-                }
-            });
         }
     }
 

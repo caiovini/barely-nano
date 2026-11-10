@@ -144,100 +144,135 @@ impl BlockBatchProcessor {
 
         // Parallel signature verification across harts (skipping blocks guaranteed to fail as GapPrevious)
         let batch_len = batch.len();
+        let any_unverified = batch
+            .iter()
+            .any(|ctx| !ctx.block.is_signature_verified() && ctx.source != BlockSource::Local);
         let mut playable_hashes: FastBlockHashMap<Option<rsnano_core::Amount>> =
-            FastBlockHashMap::with_capacity(batch_len);
-        let mut to_verify = alloc::vec::Vec::with_capacity(batch_len);
-        for (idx, ctx) in batch.iter().enumerate() {
-            if idx + 4 < batch_len {
-                let ahead = &batch[idx + 4].block;
-                self.ledger.store.block.prefetch_may_exist(&ahead.hash());
-                self.ledger.store.block.prefetch_may_exist(&ahead.previous());
-                self.ledger
-                    .store
-                    .block
-                    .prefetch_may_exist(&ahead.source_or_link());
-            }
-            let b = &ctx.block;
-            let hash = b.hash();
-            let prev = b.previous();
+            FastBlockHashMap::with_capacity(if any_unverified { batch_len } else { 0 });
+        let mut verification_tasks = alloc::vec::Vec::new();
 
-            if !cfg!(test)
-                && self.ledger.store.block.may_exist(&hash)
-                && self.ledger.store.block.exists(&hash)
-            {
-                playable_hashes.insert(hash, b.balance_field());
-                continue;
-            }
-
-            if !prev.is_zero()
-                && !playable_hashes.contains_key(&prev)
-                && !self.ledger.store.block.may_exist(&prev)
-            {
-                // Predecessor does not exist in the ledger or earlier in this batch;
-                // BlockValidator::validate() will reject as GapPrevious before checking signature.
-                continue;
-            }
-
-            let mut gap_source = false;
-            match b {
-                Block::LegacyReceive(_) | Block::LegacyOpen(_) => {
-                    let source = b.source_or_link();
-                    if !source.is_zero()
-                        && !playable_hashes.contains_key(&source)
-                        && !self.ledger.store.block.may_exist(&source)
-                    {
-                        gap_source = true;
-                    }
+        if any_unverified {
+            let mut to_verify = alloc::vec::Vec::with_capacity(batch_len.min(32));
+            for (idx, ctx) in batch.iter().enumerate() {
+                if idx + 4 < batch_len {
+                    let ahead = &batch[idx + 4].block;
+                    self.ledger.store.block.prefetch_may_exist(&ahead.hash());
+                    self.ledger.store.block.prefetch_may_exist(&ahead.previous());
+                    self.ledger
+                        .store
+                        .block
+                        .prefetch_may_exist(&ahead.source_or_link());
                 }
-                Block::State(s) => {
-                    if !s.link().is_zero()
-                        && !self.ledger.constants.epochs.is_epoch_link(&s.link())
-                    {
-                        let source: rsnano_core::BlockHash = s.link().into();
-                        if !playable_hashes.contains_key(&source)
+                let b = &ctx.block;
+                let hash = b.hash();
+                let prev = b.previous();
+                let already_verified = b.is_signature_verified()
+                    || ctx.sig_state.load(core::sync::atomic::Ordering::Acquire)
+                        == crate::block_processing::SIG_STATE_DONE
+                    || ctx.source == BlockSource::Local;
+
+                if !already_verified
+                    && !cfg!(test)
+                    && self.ledger.store.block.may_exist(&hash)
+                    && self.ledger.store.block.exists(&hash)
+                {
+                    playable_hashes.insert(hash, b.balance_field());
+                    continue;
+                }
+
+                if !prev.is_zero()
+                    && !playable_hashes.contains_key(&prev)
+                    && !self.ledger.store.block.may_exist(&prev)
+                {
+                    // Predecessor does not exist in the ledger or earlier in this batch;
+                    // BlockValidator::validate() will reject as GapPrevious before checking signature.
+                    continue;
+                }
+
+                let mut gap_source = false;
+                match b {
+                    Block::LegacyReceive(_) | Block::LegacyOpen(_) => {
+                        let source = b.source_or_link();
+                        if !source.is_zero()
+                            && !playable_hashes.contains_key(&source)
                             && !self.ledger.store.block.may_exist(&source)
                         {
-                            let is_receive = if prev.is_zero() {
-                                true
-                            } else if let Some(Some(prev_bal)) = playable_hashes.get(&prev) {
-                                s.balance() >= *prev_bal
-                            } else if !cfg!(test) {
-                                if let Some(prev_block) = self.ledger.store.block.get(&prev) {
-                                    s.balance() >= prev_block.balance()
-                                } else {
+                            gap_source = true;
+                        }
+                    }
+                    Block::State(s) => {
+                        if !s.link().is_zero()
+                            && !self.ledger.constants.epochs.is_epoch_link(&s.link())
+                        {
+                            let source: rsnano_core::BlockHash = s.link().into();
+                            if !playable_hashes.contains_key(&source)
+                                && !self.ledger.store.block.may_exist(&source)
+                            {
+                                let is_receive = if prev.is_zero() {
                                     true
+                                } else if let Some(Some(prev_bal)) = playable_hashes.get(&prev) {
+                                    s.balance() >= *prev_bal
+                                } else if !cfg!(test) {
+                                    if let Some(acc_info) =
+                                        self.ledger.store.account.get(&s.account())
+                                    {
+                                        if acc_info.head == prev {
+                                            s.balance() >= acc_info.balance
+                                        } else if let Some(prev_block) =
+                                            self.ledger.store.block.get(&prev)
+                                        {
+                                            s.balance() >= prev_block.balance()
+                                        } else {
+                                            true
+                                        }
+                                    } else if let Some(prev_block) =
+                                        self.ledger.store.block.get(&prev)
+                                    {
+                                        s.balance() >= prev_block.balance()
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    false
+                                };
+                                if is_receive {
+                                    gap_source = true;
                                 }
-                            } else {
-                                false
-                            };
-                            if is_receive {
-                                gap_source = true;
                             }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
-            }
 
-            if !b.is_signature_verified()
-                && ctx.source != BlockSource::Local
-                && (cfg!(test) || !gap_source)
-            {
-                let verify_account = b
-                    .link_field()
-                    .and_then(|link| self.ledger.constants.epochs.epoch_signer(&link))
-                    .or_else(|| b.account_field())
-                    .or(ctx.account)
-                    .filter(|a| !a.is_zero());
-                to_verify.push((ctx.clone(), verify_account));
-            }
+                if !b.is_signature_verified()
+                    && ctx.source != BlockSource::Local
+                    && (cfg!(test) || !gap_source)
+                {
+                    let verify_account = b
+                        .link_field()
+                        .and_then(|link| self.ledger.constants.epochs.epoch_signer(&link))
+                        .or_else(|| b.account_field())
+                        .or(ctx.account)
+                        .filter(|a| !a.is_zero());
+                    to_verify.push((ctx.clone(), verify_account));
+                    if to_verify.len() >= 16 {
+                        let chunk = self
+                            .signature_checker
+                            .push_batch_front(core::mem::take(&mut to_verify));
+                        verification_tasks.extend(chunk);
+                    }
+                }
 
-            if !gap_source {
-                playable_hashes.insert(hash, b.balance_field());
+                if !gap_source {
+                    playable_hashes.insert(hash, b.balance_field());
+                }
+            }
+            if !to_verify.is_empty() {
+                let chunk = self.signature_checker.push_batch_front(to_verify);
+                verification_tasks.extend(chunk);
             }
         }
 
-        let verification_tasks = self.signature_checker.push_batch_front(to_verify);
         let verification_count = verification_tasks.len();
         if !verification_tasks.is_empty() {
             while verification_tasks.iter().any(|ctx| {
@@ -334,81 +369,120 @@ impl BlockBatchProcessor {
         }
 
         assert_eq!(result.processed.len(), batch.len());
-        let result: Vec<(Result<(), BlockError>, Arc<BlockContext>)> = result
+        let mut has_gap_previous = false;
+        let mut has_unchecked_err = false;
+        let result: Vec<(
+            Result<(), BlockError>,
+            Option<rsnano_core::SavedBlock>,
+            Arc<BlockContext>,
+        )> = result
             .processed
             .drain(..)
             .zip(batch.drain(..))
             .map(|((status, saved_block), block_ctx)| {
-                if saved_block.is_some() {
-                    *block_ctx.saved_block.lock() = saved_block;
+                if saved_block.is_some() && (cfg!(test) || block_ctx.waiter.is_some()) {
+                    *block_ctx.saved_block.lock() = saved_block.clone();
+                }
+                match status {
+                    Err(BlockError::GapPrevious) => {
+                        if !cfg!(test) {
+                            has_gap_previous = true;
+                        }
+                        has_unchecked_err = true;
+                    }
+                    Err(BlockError::GapSource) | Err(BlockError::GapEpochOpenPending) => {
+                        has_unchecked_err = true;
+                    }
+                    _ => {}
                 }
 
-                (status, block_ctx)
+                (status, saved_block, block_ctx)
             })
             .collect();
 
-        let mut keep_in_unchecked = alloc::vec::Vec::with_capacity(result.len());
-        let mut in_batch_failed: FastBlockHashMap<(usize, Option<rsnano_core::Amount>)> =
-            FastBlockHashMap::with_capacity(result.len());
+        let keep_in_unchecked = if has_gap_previous {
+            if !any_unverified {
+                for (status, _, block_ctx) in &result {
+                    if status.is_ok() || matches!(status, Err(BlockError::Old)) {
+                        playable_hashes
+                            .insert(block_ctx.block.hash(), block_ctx.block.balance_field());
+                    }
+                }
+            }
+            let mut keep_vec = alloc::vec::Vec::with_capacity(result.len());
+            let mut in_batch_failed: FastBlockHashMap<(usize, Option<rsnano_core::Amount>)> =
+                FastBlockHashMap::with_capacity(result.len());
 
-        for (status, block_ctx) in &result {
-            let b = &block_ctx.block;
-            let hash = b.hash();
-            let prev = b.previous();
-            let keep = match status {
-                Ok(()) => true,
-                Err(BlockError::GapPrevious) if !cfg!(test) => {
-                    if let Some(&(prev_depth, prev_bal)) = in_batch_failed.get(&prev) {
-                        const MAX_TAIL_DEPTH: usize = 64;
-                        let missing_source = match b {
-                            Block::LegacyReceive(_) | Block::LegacyOpen(_) => {
-                                let source = b.source_or_link();
-                                !source.is_zero()
-                                    && !playable_hashes.contains_key(&source)
-                                    && !self.ledger.store.block.may_exist(&source)
-                            }
-                            Block::State(s) => {
-                                let is_receive = prev_bal.is_some_and(|pb| s.balance() >= pb);
-                                let source = s.link().into();
-                                is_receive
-                                    && !s.link().is_zero()
-                                    && !self.ledger.constants.epochs.is_epoch_link(&s.link())
-                                    && !playable_hashes.contains_key(&source)
-                                    && !self.ledger.store.block.may_exist(&source)
-                            }
-                            _ => false,
-                        };
-                        if prev_depth < MAX_TAIL_DEPTH {
-                            let next_depth = if missing_source {
-                                usize::MAX
-                            } else {
-                                prev_depth + 1
+            for (status, _, block_ctx) in &result {
+                let b = &block_ctx.block;
+                let hash = b.hash();
+                let prev = b.previous();
+                let keep = match status {
+                    Ok(()) => true,
+                    Err(BlockError::GapPrevious) if !cfg!(test) => {
+                        if let Some(&(prev_depth, prev_bal)) = in_batch_failed.get(&prev) {
+                            const MAX_TAIL_DEPTH: usize = 64;
+                            let missing_source = match b {
+                                Block::LegacyReceive(_) | Block::LegacyOpen(_) => {
+                                    let source = b.source_or_link();
+                                    !source.is_zero()
+                                        && !playable_hashes.contains_key(&source)
+                                        && !self.ledger.store.block.may_exist(&source)
+                                }
+                                Block::State(s) => {
+                                    let is_receive = prev_bal.is_some_and(|pb| s.balance() >= pb);
+                                    let source = s.link().into();
+                                    is_receive
+                                        && !s.link().is_zero()
+                                        && !self.ledger.constants.epochs.is_epoch_link(&s.link())
+                                        && !playable_hashes.contains_key(&source)
+                                        && !self.ledger.store.block.may_exist(&source)
+                                }
+                                _ => false,
                             };
-                            in_batch_failed.insert(hash, (next_depth, b.balance_field()));
-                            true
+                            if prev_depth < MAX_TAIL_DEPTH {
+                                let next_depth = if missing_source {
+                                    usize::MAX
+                                } else {
+                                    prev_depth + 1
+                                };
+                                in_batch_failed.insert(hash, (next_depth, b.balance_field()));
+                                true
+                            } else {
+                                in_batch_failed.insert(hash, (usize::MAX, b.balance_field()));
+                                false
+                            }
                         } else {
-                            in_batch_failed.insert(hash, (usize::MAX, b.balance_field()));
-                            false
+                            in_batch_failed.insert(hash, (0, b.balance_field()));
+                            true
                         }
-                    } else {
+                    }
+                    Err(_) => {
                         in_batch_failed.insert(hash, (0, b.balance_field()));
                         true
                     }
-                }
-                Err(_) => {
-                    in_batch_failed.insert(hash, (0, b.balance_field()));
-                    true
-                }
-            };
-            keep_in_unchecked.push(keep);
-        }
-
-        for ((status, block_ctx), &keep) in result.iter().zip(&keep_in_unchecked) {
-            if !keep {
-                continue;
+                };
+                keep_vec.push(keep);
             }
-            let hash = &block_ctx.block.hash();
-            let saved_block = block_ctx.saved_block.lock().clone();
+            Some(keep_vec)
+        } else {
+            None
+        };
+
+        let unchecked_empty = self.unchecked.is_empty();
+        let mut batch_triggers = if unchecked_empty {
+            alloc::vec::Vec::new()
+        } else {
+            alloc::vec::Vec::with_capacity(result.len() * 2)
+        };
+        let mut skipped_triggers = 0u64;
+
+        for (idx, (status, saved_block, block_ctx)) in result.iter().enumerate() {
+            if let Some(ref keep_vec) = keep_in_unchecked {
+                if !keep_vec[idx] {
+                    continue;
+                }
+            }
 
             match status {
                 Ok(()) => {
@@ -423,14 +497,19 @@ impl BlockBatchProcessor {
 
             match status {
                 Ok(()) => {
-                    self.unchecked.trigger(&hash.into());
+                    let hash = block_ctx.block.hash();
+                    if unchecked_empty && self.unchecked.is_empty() {
+                        skipped_triggers += 1;
+                    } else {
+                        batch_triggers.push(hash.into());
+                    }
 
                     /*
                      * For send blocks check epoch open unchecked (gap pending).
                      * For state blocks check only send subtype and only if block epoch is not last epoch.
                      * If epoch is last, then pending entry shouldn't trigger same epoch open block for destination account.
                      * */
-                    let block = if let Some(b) = saved_block {
+                    let block = if let Some(b) = saved_block.as_ref() {
                         b
                     } else {
                         warn!("Saved block was missing after Ok process result");
@@ -441,7 +520,11 @@ impl BlockBatchProcessor {
                             && block.is_send()
                             && block.epoch() < Epoch::MAX
                     {
-                        self.unchecked.trigger(&block.destination_or_link().into());
+                        if unchecked_empty && self.unchecked.is_empty() {
+                            skipped_triggers += 1;
+                        } else {
+                            batch_triggers.push(block.destination_or_link().into());
+                        }
                     }
                 }
                 Err(BlockError::GapPrevious)
@@ -451,70 +534,81 @@ impl BlockBatchProcessor {
                     // receive higher sequence numbers than chain tails (B_2..B_k) and are evicted last.
                 }
                 Err(BlockError::Old) => {
-                    debug!("Block is old: {}", hash)
+                    debug!("Block is old: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::Conflict) => {
-                    debug!("Block conflict: {}", hash)
+                    debug!("Block conflict: {}", block_ctx.block.hash())
                 }
                 // These are unexpected and indicate erroneous/malicious behavior, log debug info to highlight the issue
                 Err(BlockError::BadSignature) => {
-                    debug!("Block signature is invalid: {}", hash)
+                    debug!("Block signature is invalid: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::NegativeSpend) => {
-                    debug!("Block spends negative amount: {}", hash)
+                    debug!("Block spends negative amount: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::Unreceivable) => {
-                    debug!("Block is unreceivable: {}", hash)
+                    debug!("Block is unreceivable: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::Fork) => {
-                    debug!("Block is a fork: {}", hash)
+                    debug!("Block is a fork: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::OpenedBurnAccount) => {
-                    debug!("Block opens burn account: {}", hash)
+                    debug!("Block opens burn account: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::BalanceMismatch) => {
-                    debug!("Block balance mismatch: {}", hash)
+                    debug!("Block balance mismatch: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::RepresentativeMismatch) => {
-                    debug!("Block representative mismatch: {}", hash)
+                    debug!("Block representative mismatch: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::BlockPosition) => {
-                    debug!("Block is in incorrect position: {}", hash)
+                    debug!("Block is in incorrect position: {}", block_ctx.block.hash())
                 }
                 Err(BlockError::InsufficientWork) => {
-                    debug!("Block has insufficient work: {}", hash)
+                    debug!("Block has insufficient work: {}", block_ctx.block.hash())
                 }
             }
         }
 
+        if skipped_triggers > 0 {
+            self.unchecked.record_triggers(skipped_triggers);
+        }
+        if !batch_triggers.is_empty() {
+            self.unchecked.trigger_batch(&batch_triggers);
+        }
+
         // Insert unchecked blocks in reverse batch order so that if UncheckedMap ever overflows
         // and evicts via FIFO (pop_front), tail blocks (B_k..B_2) are evicted before the head block (B_1).
-        for ((status, block_ctx), &keep) in result.iter().zip(&keep_in_unchecked).rev() {
-            if !keep {
-                continue;
-            }
-            let block = &block_ctx.block;
-            match status {
-                Err(BlockError::GapPrevious) => {
-                    self.unchecked
-                        .put(block.previous().into(), UncheckedInfo::new(block.clone()));
+        if has_unchecked_err {
+            for (idx, (status, _, block_ctx)) in result.iter().enumerate().rev() {
+                if let Some(ref keep_vec) = keep_in_unchecked {
+                    if !keep_vec[idx] {
+                        continue;
+                    }
                 }
-                Err(BlockError::GapSource) => {
-                    self.unchecked.put(
-                        block
-                            .source_field()
-                            .unwrap_or(block.link_field().unwrap_or_default().into())
-                            .into(),
-                        UncheckedInfo::new(block.clone()),
-                    );
+                let block = &block_ctx.block;
+                match status {
+                    Err(BlockError::GapPrevious) => {
+                        self.unchecked
+                            .put(block.previous().into(), UncheckedInfo::new(block.clone()));
+                    }
+                    Err(BlockError::GapSource) => {
+                        self.unchecked.put(
+                            block
+                                .source_field()
+                                .unwrap_or(block.link_field().unwrap_or_default().into())
+                                .into(),
+                            UncheckedInfo::new(block.clone()),
+                        );
+                    }
+                    Err(BlockError::GapEpochOpenPending) => {
+                        self.unchecked.put(
+                            block.account_field().unwrap().into(),
+                            UncheckedInfo::new(block.clone()),
+                        );
+                    }
+                    _ => {}
                 }
-                Err(BlockError::GapEpochOpenPending) => {
-                    self.unchecked.put(
-                        block.account_field().unwrap().into(),
-                        UncheckedInfo::new(block.clone()),
-                    );
-                }
-                _ => {}
             }
         }
 
@@ -524,12 +618,12 @@ impl BlockBatchProcessor {
         for idx in 0..result.len() {
             let res = result[idx].0;
             let cb_res = if !cfg!(test)
-                && result[idx].1.callback.is_some()
-                && result[idx].1.source == BlockSource::Bootstrap
+                && result[idx].2.callback.is_some()
+                && result[idx].2.source == BlockSource::Bootstrap
             {
-                let acc = result[idx].1.account;
+                let acc = result[idx].2.account;
                 let has_source_gap = acc.is_some()
-                    && result.iter().any(|(s, c)| {
+                    && result.iter().any(|(s, _, c)| {
                         c.account == acc
                             && matches!(
                                 s,
@@ -537,12 +631,12 @@ impl BlockBatchProcessor {
                             )
                     });
                 let has_ok = acc.is_some()
-                    && result.iter().any(|(s, c)| c.account == acc && s.is_ok());
+                    && result.iter().any(|(s, _, c)| c.account == acc && s.is_ok());
                 let all_old = acc.is_some()
                     && result
                         .iter()
-                        .filter(|(_, c)| c.account == acc)
-                        .all(|(s, _)| matches!(s, Err(BlockError::Old)));
+                        .filter(|(_, _, c)| c.account == acc)
+                        .all(|(s, _, _)| matches!(s, Err(BlockError::Old)));
                 if has_source_gap {
                     Err(BlockError::GapSource)
                 } else if res.is_ok() || (has_ok && matches!(res, Err(BlockError::Old))) {
@@ -555,10 +649,10 @@ impl BlockBatchProcessor {
             } else {
                 res
             };
-            if let Some(cb) = &result[idx].1.callback {
+            if let Some(cb) = &result[idx].2.callback {
                 cb(cb_res);
             }
-            result[idx].1.set_result(res);
+            result[idx].2.set_result(res);
         }
     }
 

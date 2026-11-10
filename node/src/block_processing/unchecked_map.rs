@@ -6,6 +6,7 @@ use crate::utils::{Condvar, JoinHandle};
 use core::cmp::Ordering;
 use core::mem::size_of;
 use core::ops::DerefMut;
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use rsnano_core::{
     utils::{ContainerInfo, ContainerInfoProvider},
@@ -20,12 +21,16 @@ pub struct UncheckedMap {
     condition: Arc<Condvar>,
     stats: Arc<Stats>,
     max_unchecked_blocks: usize,
+    entries_count: Arc<AtomicUsize>,
+    buffer_count: Arc<AtomicUsize>,
 }
 
 impl UncheckedMap {
     pub fn new(max_unchecked_blocks: usize, stats: Arc<Stats>, disable_delete: bool) -> Self {
         let mutable = Arc::new(Mutex::new(ThreadMutableData::new()));
         let condition = Arc::new(Condvar::new());
+        let entries_count = Arc::new(AtomicUsize::new(0));
+        let buffer_count = Arc::new(AtomicUsize::new(0));
 
         let thread = Arc::new(UncheckedMapThread {
             disable_delete,
@@ -33,6 +38,7 @@ impl UncheckedMap {
             condition: condition.clone(),
             stats: stats.clone(),
             back_buffer: Mutex::new(VecDeque::new()),
+            entries_count: entries_count.clone(),
         });
 
         Self {
@@ -42,6 +48,8 @@ impl UncheckedMap {
             condition,
             stats,
             max_unchecked_blocks,
+            entries_count,
+            buffer_count,
         }
     }
 
@@ -80,6 +88,9 @@ impl UncheckedMap {
             lock.entries_container.pop_front();
             // tracing::debug!("UncheckedMap: limit reached ({}), evicted oldest block", self.max_unchecked_blocks);
         }
+        self.entries_count
+            .store(lock.entries_container.len(), AtomicOrdering::Release);
+        drop(lock);
         if inserted {
             self.stats.inc(StatType::Unchecked, DetailType::Put);
         }
@@ -101,39 +112,83 @@ impl UncheckedMap {
     pub fn clear(&self) {
         let mut lock = self.mutable.lock();
         lock.entries_container.clear();
+        self.entries_count.store(0, AtomicOrdering::Release);
     }
 
     pub fn trigger(&self, dependency: &HashOrAccount) {
+        if self.entries_count.load(AtomicOrdering::Acquire) == 0 {
+            self.stats.inc(StatType::Unchecked, DetailType::Trigger);
+            return;
+        }
         let mut lock = self.mutable.lock();
+        if lock.entries_container.is_empty() {
+            drop(lock);
+            self.stats.inc(StatType::Unchecked, DetailType::Trigger);
+            return;
+        }
         lock.buffer.push_back(*dependency);
+        self.buffer_count
+            .store(lock.buffer.len(), AtomicOrdering::Release);
         drop(lock);
         tracing::debug!("UncheckedMap: trigger for {}", dependency);
         self.stats.inc(StatType::Unchecked, DetailType::Trigger);
         self.condition.notify_all(); // Notify run ()
     }
 
+    pub fn trigger_batch(&self, dependencies: &[HashOrAccount]) {
+        if dependencies.is_empty() {
+            return;
+        }
+        let count = dependencies.len() as u64;
+        if self.entries_count.load(AtomicOrdering::Acquire) == 0 {
+            self.stats.add(StatType::Unchecked, DetailType::Trigger, count);
+            return;
+        }
+        let mut lock = self.mutable.lock();
+        if lock.entries_container.is_empty() {
+            drop(lock);
+            self.stats.add(StatType::Unchecked, DetailType::Trigger, count);
+            return;
+        }
+        lock.buffer.extend(dependencies.iter().copied());
+        self.buffer_count
+            .store(lock.buffer.len(), AtomicOrdering::Release);
+        drop(lock);
+        self.stats.add(StatType::Unchecked, DetailType::Trigger, count);
+        self.condition.notify_all();
+    }
+
+    #[inline]
+    pub fn record_triggers(&self, count: u64) {
+        if count > 0 {
+            self.stats.add(StatType::Unchecked, DetailType::Trigger, count);
+        }
+    }
+
     pub fn remove(&self, key: &UncheckedKey) {
         let mut lock = self.mutable.lock();
         lock.entries_container.remove(key);
+        self.entries_count
+            .store(lock.entries_container.len(), AtomicOrdering::Release);
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
-        let lock = self.mutable.lock();
-        lock.entries_container.len()
+        self.entries_count.load(AtomicOrdering::Acquire)
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        let lock = self.mutable.lock();
-        lock.entries_container.is_empty()
+        self.entries_count.load(AtomicOrdering::Acquire) == 0
     }
 
     pub fn entries_size() -> usize {
         EntriesContainer::entry_size()
     }
 
+    #[inline]
     pub fn buffer_count(&self) -> usize {
-        let lock = self.mutable.lock();
-        lock.buffer.len()
+        self.buffer_count.load(AtomicOrdering::Acquire)
     }
 
     pub fn buffer_entry_size() -> usize {
@@ -170,6 +225,7 @@ impl UncheckedMap {
             let len = lock.buffer.len();
             let mut back_buffer_lock = self.thread.back_buffer.lock();
             core::mem::swap(&mut lock.buffer, back_buffer_lock.deref_mut());
+            self.buffer_count.store(0, AtomicOrdering::Release);
             lock.writing_back_buffer = true;
             drop(lock);
             tracing::debug!("UncheckedMap: processing {} triggers", len);
@@ -178,6 +234,7 @@ impl UncheckedMap {
             lock.writing_back_buffer = false;
             back_buffer_lock.clear();
         } else {
+            self.buffer_count.store(0, AtomicOrdering::Release);
             // tracing::debug!("UncheckedMap: run_once (buffer empty)");
         }
     }
@@ -232,6 +289,7 @@ pub struct UncheckedMapThread {
     condition: Arc<Condvar>,
     stats: Arc<Stats>,
     back_buffer: Mutex<VecDeque<HashOrAccount>>,
+    entries_count: Arc<AtomicUsize>,
 }
 
 impl UncheckedMapThread {
@@ -264,7 +322,7 @@ impl UncheckedMapThread {
         let mut idx = 0;
         while idx < total {
             let end = (idx + 64).min(total);
-            self.query_batch(back_buffer.iter().skip(idx).take(end - idx));
+            self.query_batch(back_buffer.range(idx..end));
             idx = end;
         }
     }
@@ -277,6 +335,10 @@ impl UncheckedMapThread {
         let mut satisfied = Vec::new();
         let callback = {
             let mut lock = self.mutable.lock();
+            if lock.entries_container.is_empty() {
+                self.entries_count.store(0, AtomicOrdering::Release);
+                return;
+            }
             let mut transitive_queue = VecDeque::new();
 
             // 1. Always resolve all direct dependencies from `hashes` so no trigger in `back_buffer` is dropped.
@@ -329,6 +391,8 @@ impl UncheckedMapThread {
                     }
                 }
             }
+            self.entries_count
+                .store(lock.entries_container.len(), AtomicOrdering::Release);
             lock.satisfied_callback.as_ref().map(Arc::clone)
         };
 
