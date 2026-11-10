@@ -1,6 +1,6 @@
 # Bare-Metal RISC-V Nano Node (barely-nano)
 
-This project is a bare-metal `no_std` RISC-V Nano cryptocurrency node designed to run directly on the **Orange Pi RV2 (SpacemiT K1 / Ky X1 SoC)** with 8× X60 RISC-V harts, 8 GB RAM, and a 1 TB NVMe SSD.
+This project is a bare-metal `no_std` RISC-V fork of [RsNano (`rsnano-node/rsnano-node`)](https://github.com/rsnano-node/rsnano-node), designed to run a full Nano cryptocurrency node directly on the **Orange Pi RV2 (SpacemiT K1 / Ky X1 SoC)** with 8× X60 RISC-V harts, 8 GB RAM, and a 1 TB NVMe SSD.
 
 It establishes a self-contained operating environment on top of OpenSBI and U-Boot (`CONFIG_API=y`), complete with a heap allocator, multi-core exception handling, hardware-accelerated cryptography, a 16-shard B-Tree + 5 GB DRAM Bank 1 Buffer Pool + atomic Write-Ahead Log (WAL) storage engine on NVMe, a full TCP/IP networking stack, an HTTP JSON-RPC server, and a real-time WebSocket server.
 
@@ -46,6 +46,7 @@ It establishes a self-contained operating environment on top of OpenSBI and U-Bo
   - [3. Step-by-Step Usage (`tools/nvme_snapshot.sh`)](#3-step-by-step-usage-toolsnvme_snapshotsh)
 - [Network Stress Testing (`tools/nano-stress`)](#network-stress-testing-toolsnano-stress)
 - [Workspace Structure](#workspace-structure)
+- [Authors & Credits](#authors--credits)
 
 ## Features Implemented
 
@@ -844,3 +845,12 @@ make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
 - [`tools/`](file:///mnt/data/rust-workspace/barely-nano/tools) — Host-side utilities: [`lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) & [`lmdb_to_nvme.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb_to_nvme.sh) (direct `data.ldb` to raw NVMe B-Tree + Bloom migration tool), [`nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) & [`nvme_snapshot.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme_snapshot.sh) (direct NVMe to compact raw ledger snapshot dump & restore tool), [`nano-stress`](file:///mnt/data/rust-workspace/barely-nano/tools/nano-stress) (P2P block streamer), and [`ws_subscribe.py`](file:///mnt/data/rust-workspace/barely-nano/tools/ws_subscribe.py) (WebSocket topic subscriber).
 - [`u-boot-orangepi-k1/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-orangepi-k1) — Git submodule pointing to [`caiovini/u-boot-orangepi-k1`](https://github.com/caiovini/u-boot-orangepi-k1.git) (`CONFIG_API=y` U-Boot tree and `prebuilt/` bootloader images for Orange Pi RV2).
 - [`linker-smode.ld`](file:///mnt/data/rust-workspace/barely-nano/linker-smode.ld) — S-mode linker script mapping physical memory layout for the Orange Pi RV2.
+
+## Authors & Credits
+
+`barely-nano` is a bare-metal `no_std` RISC-V fork and hardware port of [RsNano (`rsnano-node/rsnano-node`)](https://github.com/rsnano-node/rsnano-node).
+
+- **Caio Vinicius** (`<cvini@proton.me>`) — Bare-metal `no_std` RISC-V architecture, SpacemiT K1 / Ky X1 SMP kernel, RVV 1.0 / Zbb hardware-accelerated cryptography, 16-shard NVMe B-Tree + 5 GB DRAM Buffer Pool + WAL storage engine, U-Boot `smoltcp` networking, and embedded RPC/WebSocket/PoS stack.
+- **Gustav Schauwecker** (`<service@simpago.com>`) — Creator and lead author of the original [RsNano](https://github.com/rsnano-node/rsnano-node) Rust implementation of the Nano node.
+- **Gemini 4 Carbon** — Co-author on the `no_std` migration, storage engine, and RISC-V systems engineering.
+
