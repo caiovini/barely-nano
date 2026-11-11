@@ -91,14 +91,14 @@ fn toml_to_json_value(input: &str) -> Result<Value, String> {
         let mut val_str = alloc::string::String::from(line[eq_pos + 1..].trim());
 
         // Handle multi-line arrays `[ ... ]`
-        if val_str.starts_with('[') && ! is_balanced_brackets(&val_str) {
+        if val_str.starts_with('[') && !is_balanced_brackets(&val_str) {
             while let Some((_, next_raw)) = lines.next() {
                 let next_clean = strip_toml_comment(next_raw).trim();
                 if !next_clean.is_empty() {
                     val_str.push(' ');
                     val_str.push_str(next_clean);
                 }
-                if is_balanced_brackets(&val_str) {
+                if next_clean.contains(']') && is_balanced_brackets(&val_str) {
                     break;
                 }
             }
@@ -996,5 +996,20 @@ mod tests {
         let mut config = DaemonConfig::new2(Networks::NanoBetaNetwork, 8);
         config.rpc.child_process.rpc_path = "/home/foo/nano_rpc".into();
         config
+    }
+
+    #[test]
+    fn deserialize_root_config_toml_compact_representatives() {
+        let toml_str = include_str!("../../../../config.toml");
+        let daemon_toml =
+            DaemonToml::from_toml_str(toml_str).expect("Failed to parse root config.toml");
+        let mut cfg = create_default_daemon_config();
+        cfg.merge_toml(&daemon_toml);
+        let reps = rsnano_core::compact_representatives();
+        assert_eq!(reps.len(), 256);
+        for (idx, rep) in reps.iter().enumerate() {
+            assert_eq!(rsnano_core::lookup_compact_rep_id(rep), Some(idx as u8));
+            assert_eq!(rsnano_core::get_compact_rep_bytes(idx as u8), Some(*rep));
+        }
     }
 }

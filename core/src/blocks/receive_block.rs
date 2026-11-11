@@ -62,6 +62,13 @@ impl ReceiveBlock {
     }
 
     pub fn deserialize(stream: &mut dyn Stream) -> Result<Self> {
+        Self::deserialize_with_hash(stream, None)
+    }
+
+    pub fn deserialize_with_hash(
+        stream: &mut dyn Stream,
+        known_hash: Option<BlockHash>,
+    ) -> Result<Self> {
         let previous = BlockHash::deserialize(stream)?;
         let source = BlockHash::deserialize(stream)?;
         let signature = Signature::deserialize(stream)?;
@@ -69,7 +76,14 @@ impl ReceiveBlock {
         stream.read_bytes(&mut work_bytes, 8)?;
         let work = u64::from_le_bytes(work_bytes).into();
         let hashables = ReceiveHashables { previous, source };
-        let hash = hashables.hash();
+        let hash = match known_hash {
+            Some(h) => {
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(h, hashables.hash());
+                h
+            }
+            None => hashables.hash(),
+        };
         Ok(Self {
             work,
             signature,

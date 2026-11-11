@@ -513,6 +513,8 @@ where
     None
 }
 
+const COUNTS_MAGIC: u64 = 0x4E41_4E4F_434E_5431; // "NANOCNT1"
+
 /// Reads `CACHCNTS` (`TABLE_VERSION = 11`, key `b"CACHCNTS"`) from Shard 4.
 fn read_cached_counts_from_shard4<F>(root_page: u32, read_page: F) -> (u64, u64, u64, u64)
 where
@@ -522,7 +524,15 @@ where
     key[0] = 11; // TABLE_VERSION
     key[1..9].copy_from_slice(b"CACHCNTS");
     if let Some(val) = btree_lookup(root_page, &key, read_page) {
-        if val.len() >= 32 {
+        if val.len() >= 32 && rd_u64(&val, 0) == COUNTS_MAGIC {
+            let pruned = if val.len() >= 40 { rd_u64(&val, 32) } else { 0 };
+            return (
+                rd_u64(&val, 8),
+                rd_u64(&val, 16),
+                rd_u64(&val, 24),
+                pruned,
+            );
+        } else if val.len() >= 32 {
             return (
                 rd_u64(&val, 0),
                 rd_u64(&val, 8),

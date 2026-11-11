@@ -426,38 +426,87 @@ fn page_alloc_cell(
     new_fe
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TailPreserveMode {
+    None,
+    Fixed32,
+    CompactBlock32,
+}
+
 /// Overwrites an existing slot `pos` with `(key_slice, value)`, optionally preserving the last 32 bytes
-/// of the previous value when `preserve_tail_32` is true.
+/// of the previous value according to `preserve_mode`.
 fn page_overwrite_slot(
     data: &mut [u8; BLOCK_SIZE],
     is_leaf: bool,
     pos: usize,
     key_slice: &[u8],
     value: &[u8],
-    preserve_tail_32: bool,
+    preserve_mode: TailPreserveMode,
 ) {
     let has_soa = page_ensure_soa(data);
     let old_off = page_get_slot(data, is_leaf, pos);
     let old_klen = data[old_off] as usize;
     let old_vlen = u16::from_le_bytes([data[old_off + 1], data[old_off + 2]]) as usize;
     let old_clen = 3 + old_klen + old_vlen;
+    let old_val_off = old_off + 3 + old_klen;
+
+    let old_is_compact = old_vlen >= 1 && (data[old_val_off] & 0x80) != 0;
+    let new_is_compact =
+        preserve_mode == TailPreserveMode::CompactBlock32 && !value.is_empty() && (value[0] & 0x80) != 0;
 
     let mut saved_tail = [0u8; 32];
-    let has_saved_tail = preserve_tail_32 && old_vlen >= 32;
-    if has_saved_tail {
-        let tail_off = old_off + 3 + old_klen + old_vlen - 32;
-        saved_tail.copy_from_slice(&data[tail_off..tail_off + 32]);
-    }
+    let has_saved_tail = match preserve_mode {
+        TailPreserveMode::None => false,
+        TailPreserveMode::Fixed32 => {
+            if old_vlen >= 32 {
+                let tail_off = old_val_off + old_vlen - 32;
+                saved_tail.copy_from_slice(&data[tail_off..tail_off + 32]);
+                true
+            } else {
+                false
+            }
+        }
+        TailPreserveMode::CompactBlock32 => {
+            if old_is_compact {
+                if (data[old_val_off] & 0x40) != 0 && old_vlen > 32 {
+                    let tail_off = old_val_off + old_vlen - 32;
+                    saved_tail.copy_from_slice(&data[tail_off..tail_off + 32]);
+                    saved_tail != [0u8; 32]
+                } else {
+                    false
+                }
+            } else if old_vlen >= 32 {
+                let tail_off = old_val_off + old_vlen - 32;
+                saved_tail.copy_from_slice(&data[tail_off..tail_off + 32]);
+                saved_tail != [0u8; 32]
+            } else {
+                false
+            }
+        }
+    };
+
+    // If the new value is a compact block without a successor (`(value[0] & 0xC0) == 0x80`)
+    // and the old cell had a non-zero 32-byte successor that must be preserved, append `saved_tail`.
+    let mut expanded_buf = [0u8; VALUE_SIZE];
+    let eff_val: &[u8] = if new_is_compact && has_saved_tail && (value[0] & 0x40) == 0 {
+        let base_len = value.len().min(VALUE_SIZE - 32);
+        expanded_buf[..base_len].copy_from_slice(&value[..base_len]);
+        expanded_buf[0] |= 0x40;
+        expanded_buf[base_len..base_len + 32].copy_from_slice(&saved_tail);
+        &expanded_buf[..base_len + 32]
+    } else {
+        value
+    };
 
     let klen = key_slice.len();
-    let vlen = value.len().min(VALUE_SIZE);
+    let vlen = eff_val.len().min(VALUE_SIZE);
     let new_clen = 3 + klen + vlen;
 
     let cell_off = if new_clen <= old_clen {
         data[old_off] = klen as u8;
         data[old_off + 1..old_off + 3].copy_from_slice(&(vlen as u16).to_le_bytes());
         data[old_off + 3..old_off + 3 + klen].copy_from_slice(key_slice);
-        data[old_off + 3 + klen..old_off + new_clen].copy_from_slice(&value[..vlen]);
+        data[old_off + 3 + klen..old_off + new_clen].copy_from_slice(&eff_val[..vlen]);
         if old_clen > new_clen {
             let dead = page_dead_bytes(data) + (old_clen - new_clen);
             page_set_dead_bytes(data, dead);
@@ -468,7 +517,7 @@ fn page_overwrite_slot(
         let fs = page_free_start(is_leaf, nk);
         let dead = page_dead_bytes(data) + old_clen;
         page_set_dead_bytes(data, dead);
-        let new_off = page_alloc_cell(data, fs, key_slice, value, Some(pos));
+        let new_off = page_alloc_cell(data, fs, key_slice, eff_val, Some(pos));
         page_set_slot(data, is_leaf, pos, new_off);
         new_off
     };
@@ -480,7 +529,7 @@ fn page_overwrite_slot(
         data[o..o + 4].copy_from_slice(&h32.to_le_bytes());
     }
 
-    if has_saved_tail && vlen >= 32 {
+    if has_saved_tail && (!new_is_compact || (value[0] & 0x40) != 0) && vlen >= 32 {
         let tail_off = cell_off + 3 + klen + vlen - 32;
         data[tail_off..tail_off + 32].copy_from_slice(&saved_tail);
     }
@@ -495,22 +544,25 @@ fn page_overwrite_same_key(
     pos: usize,
     key_slice: &[u8],
     value: &[u8],
-    preserve_tail_32: bool,
+    preserve_mode: TailPreserveMode,
 ) {
     let old_off = page_get_slot(data, is_leaf, pos);
     let old_klen = data[old_off] as usize;
     let old_vlen = u16::from_le_bytes([data[old_off + 1], data[old_off + 2]]) as usize;
     let vlen = value.len().min(VALUE_SIZE);
-    if key_slice.len() == old_klen && vlen == old_vlen {
+    if preserve_mode != TailPreserveMode::CompactBlock32
+        && key_slice.len() == old_klen
+        && vlen == old_vlen
+    {
         let val_off = old_off + 3 + old_klen;
-        let copy_len = if preserve_tail_32 && vlen >= 32 {
+        let copy_len = if preserve_mode == TailPreserveMode::Fixed32 && vlen >= 32 {
             vlen - 32
         } else {
             vlen
         };
         data[val_off..val_off + copy_len].copy_from_slice(&value[..copy_len]);
     } else {
-        page_overwrite_slot(data, is_leaf, pos, key_slice, value, preserve_tail_32);
+        page_overwrite_slot(data, is_leaf, pos, key_slice, value, preserve_mode);
     }
 }
 
@@ -913,9 +965,24 @@ impl BTree {
         }
     }
 
-    /// In-place overwrite of the last 32 bytes of `key`'s value (used for embedded block successors).
+    /// In-place overwrite of the last 32 bytes of `key`'s value (used for fixed-tail 32B suffixes).
     /// Returns `true` if `key` was found and updated.
     pub fn update_suffix_32(&mut self, key: &[u8; KEY_SIZE], suffix: &[u8; 32]) -> bool {
+        self.update_suffix_32_mode(key, suffix, false)
+    }
+
+    /// Updates the 32-byte block successor for a compact (`0x80` / `0x40`) or legacy block cell.
+    /// Returns `true` if `key` was found and updated.
+    pub fn update_compact_successor_32(&mut self, key: &[u8; KEY_SIZE], suffix: &[u8; 32]) -> bool {
+        self.update_suffix_32_mode(key, suffix, true)
+    }
+
+    fn update_suffix_32_mode(
+        &mut self,
+        key: &[u8; KEY_SIZE],
+        suffix: &[u8; 32],
+        compact_mode: bool,
+    ) -> bool {
         let target_head = key_head(key);
         let mut current_id = self.meta.root_page_id;
         loop {
@@ -940,8 +1007,61 @@ impl BTree {
                 let cell_off = page_get_slot(data, is_leaf, lo);
                 let klen = data[cell_off] as usize;
                 let vlen = u16::from_le_bytes([data[cell_off + 1], data[cell_off + 2]]) as usize;
+                let val_off = cell_off + 3 + klen;
+
+                if compact_mode && vlen >= 1 && (data[val_off] & 0x80) != 0 {
+                    let has_succ = (data[val_off] & 0x40) != 0 && vlen > 32;
+                    let suffix_nonzero = *suffix != [0u8; 32];
+                    match (has_succ, suffix_nonzero) {
+                        (true, true) => {
+                            let tail_off = val_off + vlen - 32;
+                            data[tail_off..tail_off + 32].copy_from_slice(suffix);
+                            return true;
+                        }
+                        (false, false) => {
+                            return true;
+                        }
+                        (true, false) => {
+                            data[val_off] &= !0x40;
+                            let new_vlen = vlen - 32;
+                            data[cell_off + 1..cell_off + 3]
+                                .copy_from_slice(&(new_vlen as u16).to_le_bytes());
+                            let dead = page_dead_bytes(data) + 32;
+                            page_set_dead_bytes(data, dead);
+                            return true;
+                        }
+                        (false, true) => {
+                            if vlen + 32 > VALUE_SIZE {
+                                return false;
+                            }
+                            let mut new_val = [0u8; VALUE_SIZE];
+                            new_val[..vlen].copy_from_slice(&data[val_off..val_off + vlen]);
+                            new_val[0] |= 0x40;
+                            new_val[vlen..vlen + 32].copy_from_slice(suffix);
+                            if page_usable_free(data) >= 32 {
+                                let mut k_buf = [0u8; KEY_SIZE];
+                                k_buf[..klen]
+                                    .copy_from_slice(&data[cell_off + 3..cell_off + 3 + klen]);
+                                page_overwrite_slot(
+                                    data,
+                                    is_leaf,
+                                    lo,
+                                    &k_buf[..klen],
+                                    &new_val[..vlen + 32],
+                                    TailPreserveMode::None,
+                                );
+                                return true;
+                            } else {
+                                drop(guard);
+                                self.insert(*key, &new_val[..vlen + 32]);
+                                return true;
+                            }
+                        }
+                    }
+                }
+
                 if vlen >= 32 {
-                    let tail_off = cell_off + 3 + klen + vlen - 32;
+                    let tail_off = val_off + vlen - 32;
                     data[tail_off..tail_off + 32].copy_from_slice(suffix);
                     return true;
                 }
@@ -1013,7 +1133,7 @@ impl BTree {
     }
 
     pub fn insert(&mut self, key: [u8; KEY_SIZE], value: &[u8]) -> bool {
-        self.insert_preserving_suffix_32(key, value, false)
+        self.insert_with_mode(key, value, TailPreserveMode::None)
     }
 
     pub fn insert_preserving_suffix_32(
@@ -1022,8 +1142,42 @@ impl BTree {
         value: &[u8],
         preserve_tail_32: bool,
     ) -> bool {
+        self.insert_with_mode(
+            key,
+            value,
+            if preserve_tail_32 {
+                TailPreserveMode::Fixed32
+            } else {
+                TailPreserveMode::None
+            },
+        )
+    }
+
+    pub fn insert_compact_block(
+        &mut self,
+        key: [u8; KEY_SIZE],
+        value: &[u8],
+        preserve_tail_32: bool,
+    ) -> bool {
+        self.insert_with_mode(
+            key,
+            value,
+            if preserve_tail_32 {
+                TailPreserveMode::CompactBlock32
+            } else {
+                TailPreserveMode::None
+            },
+        )
+    }
+
+    fn insert_with_mode(
+        &mut self,
+        key: [u8; KEY_SIZE],
+        value: &[u8],
+        preserve_mode: TailPreserveMode,
+    ) -> bool {
         let t0 = crate::clint::mtime();
-        let is_new = self.insert_impl(key, value, preserve_tail_32);
+        let is_new = self.insert_impl(key, value, preserve_mode);
         crate::storage::bpm::STORAGE_PROF[8].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         crate::storage::bpm::STORAGE_PROF[9]
             .fetch_add(crate::clint::mtime() - t0, core::sync::atomic::Ordering::Relaxed);
@@ -1035,7 +1189,7 @@ impl BTree {
         &mut self,
         key: &[u8; KEY_SIZE],
         value: &[u8],
-        preserve_tail_32: bool,
+        preserve_mode: TailPreserveMode,
     ) -> Option<bool> {
         let target_head = key_head(key);
         let k_slice = key_compact_slice(key);
@@ -1056,7 +1210,13 @@ impl BTree {
                 if equal {
                     let old_off = page_get_slot(d, is_leaf, lb);
                     let old_clen = page_cell_len(d, old_off);
-                    if new_clen > old_clen && page_usable_free(d) + old_clen < new_clen {
+                    let max_new_clen = new_clen
+                        + if preserve_mode == TailPreserveMode::CompactBlock32 {
+                            32
+                        } else {
+                            0
+                        };
+                    if max_new_clen > old_clen && page_usable_free(d) + old_clen < max_new_clen {
                         return None;
                     }
                     (is_leaf, lb, true, 0)
@@ -1079,7 +1239,7 @@ impl BTree {
                     lb,
                     k_slice,
                     value,
-                    preserve_tail_32,
+                    preserve_mode,
                 );
                 return Some(false);
             }
@@ -1133,8 +1293,13 @@ impl BTree {
         (mid_key, new_child_id, new_child_data)
     }
 
-    fn insert_impl(&mut self, key: [u8; KEY_SIZE], value: &[u8], preserve_tail_32: bool) -> bool {
-        if let Some(is_new) = self.insert_fast(&key, value, preserve_tail_32) {
+    fn insert_impl(
+        &mut self,
+        key: [u8; KEY_SIZE],
+        value: &[u8],
+        preserve_mode: TailPreserveMode,
+    ) -> bool {
+        if let Some(is_new) = self.insert_fast(&key, value, preserve_mode) {
             return is_new;
         }
 
@@ -1193,7 +1358,7 @@ impl BTree {
                     lb,
                     k_slice,
                     value,
-                    preserve_tail_32,
+                    preserve_mode,
                 );
                 return false;
             }
@@ -1219,7 +1384,7 @@ impl BTree {
                             lb,
                             k_slice,
                             value,
-                            preserve_tail_32,
+                            preserve_mode,
                         );
                         return false;
                     }
@@ -1424,7 +1589,7 @@ impl BTree {
                 internal_idx,
                 &pk_buf[..pk_len],
                 &pv_buf[..pv_len],
-                false,
+                TailPreserveMode::None,
             );
             self.write_page(internal_id, &latest_internal);
             let _ = &mut internal_id;
@@ -1502,7 +1667,7 @@ impl BTree {
                         sep,
                         &bk_buf[..bk_len],
                         &bv_buf[..bv_len],
-                        false,
+                        TailPreserveMode::None,
                     );
                     page_remove_at(&mut left_data, borrow_idx);
 
@@ -1583,7 +1748,7 @@ impl BTree {
                         0,
                         &bk_buf[..bk_len],
                         &bv_buf[..bv_len],
-                        false,
+                        TailPreserveMode::None,
                     );
                     if !child_is_leaf {
                         page_set_child(&mut right_data, 0, r_c1);

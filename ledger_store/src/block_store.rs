@@ -1,7 +1,4 @@
-use rsnano_core::{
-    utils::{BufferReader, Deserialize, MutStreamAdapter, Serialize},
-    BlockHash, SavedBlock,
-};
+use rsnano_core::{BlockHash, SavedBlock};
 use kernel_common::storage::{
     SHARDS, get_shard_index, SHARD_COUNT, BLOOM_HEADER_LBA, BLOOM_DATA_LBA, StorageContext, StorageError,
 };
@@ -535,12 +532,8 @@ impl BtreeBlockStore {
         let hash = block.hash();
         get_block_bloom().insert(hash.as_bytes());
         let key = self.make_key(&hash);
-        let mut buffer = [0u8; 512];
-        let mut adapter = MutStreamAdapter::new(&mut buffer);
-        block.serialize(&mut adapter);
-        let len = adapter.bytes_written();
-        buffer[len..len + 32].copy_from_slice(successor.as_bytes());
-        let total_len = len + 32;
+        let mut buffer = [0u8; 272];
+        let total_len = block.serialize_compact(successor, &mut buffer);
 
         let shard_idx = get_shard_index(&key);
         tracing::debug!("BlockStore: putting block {} into shard {}", hash, shard_idx);
@@ -549,7 +542,7 @@ impl BtreeBlockStore {
             if let Some(db) = lock.as_mut() {
                 (
                     true,
-                    db.insert_preserving_suffix_32(key, &buffer[0..total_len], successor.is_zero()),
+                    db.insert_compact_block(key, &buffer[0..total_len], successor.is_zero()),
                 )
             } else {
                 (false, false)
@@ -577,7 +570,7 @@ impl BtreeBlockStore {
         }
         let bloom = get_block_bloom();
         let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-        let mut buffer = [0u8; 512];
+        let mut buffer = [0u8; 272];
         let mut i = 0;
         let n = items.len();
         while i < n {
@@ -600,12 +593,8 @@ impl BtreeBlockStore {
                         }
                         bloom.insert(hash.as_bytes());
                         let key = self.make_key(hash);
-                        let mut adapter = MutStreamAdapter::new(&mut buffer);
-                        block.serialize(&mut adapter);
-                        let len = adapter.bytes_written();
-                        buffer[len..len + 32].copy_from_slice(successor.as_bytes());
-                        let total_len = len + 32;
-                        if db.insert_preserving_suffix_32(
+                        let total_len = block.serialize_compact(successor, &mut buffer);
+                        if db.insert_compact_block(
                             key,
                             &buffer[0..total_len],
                             successor.is_zero(),
@@ -674,14 +663,7 @@ impl BtreeBlockStore {
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             if let Some(Some((block, succ))) = db.get_with(&key, |value| {
-                let mut stream = BufferReader::new(value);
-                let block = SavedBlock::deserialize(&mut stream).ok()?;
-                let succ = if value.len() >= 32 {
-                    BlockHash::from_bytes(value[value.len() - 32..].try_into().unwrap())
-                } else {
-                    BlockHash::zero()
-                };
-                Some((block, succ))
+                SavedBlock::deserialize_compact(value, Some(*hash)).ok()
             }) {
                 drop(lock);
                 if !cfg!(test) {
@@ -812,8 +794,12 @@ impl BtreeBlockStore {
                     if key[0] != Self::TABLE_ID {
                         return Err(());
                     }
-                    let mut stream = BufferReader::new(value);
-                    Ok(SavedBlock::deserialize(&mut stream).ok())
+                    let mut hash_bytes = [0u8; 32];
+                    hash_bytes.copy_from_slice(&key[1..33]);
+                    let known_hash = BlockHash::from_bytes(hash_bytes);
+                    Ok(SavedBlock::deserialize_compact(value, Some(known_hash))
+                        .ok()
+                        .map(|(b, _)| b))
                 }) {
                     match step {
                         Ok(Some(block)) => f(block),
@@ -858,8 +844,12 @@ impl BtreeBlockStore {
                     if key[0] != Self::TABLE_ID {
                         return Err(());
                     }
-                    let mut stream = BufferReader::new(value);
-                    Ok(SavedBlock::deserialize(&mut stream).ok())
+                    let mut hash_bytes = [0u8; 32];
+                    hash_bytes.copy_from_slice(&key[1..33]);
+                    let known_hash = BlockHash::from_bytes(hash_bytes);
+                    Ok(SavedBlock::deserialize_compact(value, Some(known_hash))
+                        .ok()
+                        .map(|(b, _)| b))
                 }) {
                     match step {
                         Ok(Some(block)) => {

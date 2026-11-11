@@ -103,6 +103,7 @@ impl BtreeStore {
         self.cache.reset();
         *ACTIVE_CACHE.lock() = Some(self.cache.clone());
         kernel_common::storage::wal::set_pre_snapshot_hook(flush_cache_counts_pre_snapshot);
+        self.version.sync_compact_rep_table();
 
         // Load the persistent 64 MB block bloom filter from NVMe (~150 ms). If not yet persisted
         // on NVMe (first boot after upgrade), build it once from the B-Tree before scanning

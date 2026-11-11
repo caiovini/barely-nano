@@ -1,4 +1,4 @@
-use rsnano_core::BlockHash;
+use rsnano_core::{BlockHash, SavedBlock};
 use kernel_common::storage::{SHARDS, get_shard_index};
 use kernel_common::storage::btree::KEY_SIZE;
 use crate::BtreeBlockStore;
@@ -25,7 +25,7 @@ impl BtreeSuccessorStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            let _ = db.update_suffix_32(&key, successor.as_bytes());
+            let _ = db.update_compact_successor_32(&key, successor.as_bytes());
             drop(lock);
             if !cfg!(test) {
                 crate::hot_block_set_successor(hash, *successor);
@@ -47,13 +47,12 @@ impl BtreeSuccessorStore {
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             if let Some(res) = db.get_with(&key, |value| {
-                if value.len() >= 32 {
-                    let tail = &value[value.len() - 32..];
-                    if tail != [0u8; 32] {
-                        return Some(BlockHash::from_bytes(tail.try_into().unwrap()));
-                    }
+                let succ = SavedBlock::extract_compact_successor(value)?;
+                if succ.is_zero() {
+                    None
+                } else {
+                    Some(succ)
                 }
-                None
             }) {
                 return res;
             }
@@ -66,7 +65,7 @@ impl BtreeSuccessorStore {
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
-            let _ = db.update_suffix_32(&key, &[0u8; 32]);
+            let _ = db.update_compact_successor_32(&key, &[0u8; 32]);
             drop(lock);
             if !cfg!(test) {
                 crate::hot_block_set_successor(hash, BlockHash::zero());

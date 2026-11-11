@@ -113,6 +113,7 @@ const VALUE_SIZE: usize = 272;
 const MAX_INSERT_BYTES: usize = 12 + 3 + KEY_SIZE + VALUE_SIZE; // 352 bytes
 
 const COUNTS_MAGIC: u64 = 0x4E41_4E4F_434E_5431; // "NANOCNT1"
+const REPTBL_MAGIC: u64 = 0x4E41_4E4F_5245_5031; // "NANOREP1"
 
 // ── Table Identifiers in Barely-Nano ─────────────────────────────────────────
 const TABLE_ACCOUNTS: u8 = 1;
@@ -583,6 +584,56 @@ fn verify_btree_builder_self_test() -> Result<(), String> {
             return Err(format!("Self-test lookup failed at key {}", i));
         }
     }
+
+    // Verify compact bit-packed LMDB block value conversion (`convert_lmdb_block_value`)
+    let mut raw_state = [0u8; 267];
+    raw_state[0] = 6; // State
+    raw_state[1..33].fill(0xAA); // account
+    // previous = 0 (open block)
+    raw_state[65..97].fill(0xAA); // representative == account
+    raw_state[97..113].copy_from_slice(&(RAW_BALANCE_SCALE * 1000).to_be_bytes()); // 1000 * 10^24 raw
+    raw_state[113..145].fill(0xBB); // link
+    raw_state[145..209].fill(0xCC); // sig
+    raw_state[209..217].copy_from_slice(&0x1122_3344_5566_7788u64.to_be_bytes()); // work
+    // successor = 0 (frontier block)
+    raw_state[249..257].copy_from_slice(&1u64.to_be_bytes()); // height = 1
+    raw_state[257..265].copy_from_slice(&1_700_000_000_000u64.to_be_bytes()); // 6B timestamp
+    raw_state[265] = 0x44; // is_receive = true, Epoch2 = 4
+    raw_state[266] = 2; // source_epoch = Epoch0
+    let mut out_buf = [0u8; VALUE_SIZE];
+    let c_len = convert_lmdb_block_value(&raw_state, &mut out_buf)
+        .ok_or_else(|| String::from("convert_lmdb_block_value failed on frontier open state"))?;
+    if c_len != 147 || (out_buf[0] & 0xC0) != 0x80 {
+        return Err(format!(
+            "Unexpected compact frontier open state size {} (hdr0=0x{:02X})",
+            c_len, out_buf[0]
+        ));
+    }
+    raw_state[217..249].fill(0xDD); // non-zero successor
+    let c_len_succ = convert_lmdb_block_value(&raw_state, &mut out_buf)
+        .ok_or_else(|| String::from("convert_lmdb_block_value failed on historical open state"))?;
+    if c_len_succ != 179 || (out_buf[0] & 0xC0) != 0xC0 || out_buf[179 - 32..179] != [0xDD; 32] {
+        return Err(format!(
+            "Unexpected compact historical open state size {} (hdr0=0x{:02X})",
+            c_len_succ, out_buf[0]
+        ));
+    }
+
+    // Verify 1-byte Top-256 Representative table index encoding (`rl_code = 6` / `7`)
+    let active_reps = get_active_compact_reps();
+    if !active_reps.is_empty() {
+        raw_state[65..97].copy_from_slice(&active_reps[0]);
+        let c_len_rep_id = convert_lmdb_block_value(&raw_state, &mut out_buf)
+            .ok_or_else(|| String::from("convert_lmdb_block_value failed on table rep state"))?;
+        // 179 (rep == acc, 0B) + 1B (rep_id = 0) = 180 bytes (saving 31B vs 211B inline 32B rep)
+        if c_len_rep_id != 180 || ((out_buf[0] >> 1) & 0x07) != 6 || out_buf[35] != 0 {
+            return Err(format!(
+                "Unexpected compact table-rep state size {} (hdr0=0x{:02X}, id={})",
+                c_len_rep_id, out_buf[0], out_buf[35]
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -819,10 +870,155 @@ struct EntryRef64 {
     val_len: u16,
 }
 
-/// Rotates the 32-byte `successor` inside a C++ Nano / RSNano LMDB block value
-/// from `raw[block_end .. block_end + 32]` to the end (`out[len - 32 .. len]`),
-/// matching `barely-nano`'s `BlockStore::put_raw` format (`SavedBlock` + 32B `successor`).
-#[inline(always)]
+const COMPACT_BLOCK_TAG: u8 = 0x80;
+const COMPACT_HAS_SUCCESSOR: u8 = 0x40;
+const COMPACT_IS_LEGACY: u8 = 0x20;
+const COMPACT_STATE_HAS_PREV: u8 = 0x10;
+const COMPACT_STATE_BAL_SCALED: u8 = 0x01;
+const RAW_BALANCE_SCALE: u128 = 1_000_000_000_000_000_000_000_000; // 10^24 raw (10^-6 NANO)
+
+const EPOCH_V1_LINK_BYTES: [u8; 32] = *b"epoch v1 block\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+const EPOCH_V2_LINK_BYTES: [u8; 32] = *b"epoch v2 block\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+struct CompactRepLookup {
+    by_id: Vec<[u8; 32]>,
+    sorted_keys: Vec<[u8; 32]>,
+    sorted_ids: Vec<u8>,
+}
+
+static COMPACT_REP_LOOKUP: std::sync::OnceLock<CompactRepLookup> = std::sync::OnceLock::new();
+
+fn decode_nano_account_bytes(s: &str) -> Option<[u8; 32]> {
+    let body = if let Some(rest) = s.strip_prefix("nano_").or_else(|| s.strip_prefix("nano-")) {
+        rest
+    } else if let Some(rest) = s.strip_prefix("xrb_").or_else(|| s.strip_prefix("xrb-")) {
+        rest
+    } else {
+        return None;
+    };
+    if body.len() != 60 {
+        return None;
+    }
+    let bytes = body.as_bytes();
+    if bytes[0] != b'1' && bytes[0] != b'3' {
+        return None;
+    }
+    let mut vals = [0u8; 60];
+    for (i, &ch) in bytes.iter().enumerate() {
+        vals[i] = match ch {
+            b'1' => 0,
+            b'3' => 1,
+            b'4' => 2,
+            b'5' => 3,
+            b'6' => 4,
+            b'7' => 5,
+            b'8' => 6,
+            b'9' => 7,
+            b'a'..=b'h' => ch - b'a' + 8,
+            b'i'..=b'k' => ch - b'i' + 16,
+            b'm'..=b'u' => ch - b'm' + 19,
+            b'w'..=b'z' => ch - b'w' + 28,
+            _ => return None,
+        };
+    }
+    let mut out = [0u8; 32];
+    for byte_idx in 0..32 {
+        let mut acc_byte = 0u8;
+        for bit in 0..8 {
+            let bit_pos = 4 + byte_idx * 8 + bit;
+            let char_idx = bit_pos / 5;
+            let shift = 4 - (bit_pos % 5);
+            let b = (vals[char_idx] >> shift) & 1;
+            acc_byte = (acc_byte << 1) | b;
+        }
+        out[byte_idx] = acc_byte;
+    }
+    Some(out)
+}
+
+fn load_compact_rep_lookup() -> &'static CompactRepLookup {
+    COMPACT_REP_LOOKUP.get_or_init(|| {
+        let toml_str = std::fs::read_to_string("config.toml")
+            .unwrap_or_else(|_| String::from(include_str!("../../../config.toml")));
+        let mut by_id: Vec<[u8; 32]> = Vec::new();
+        let mut in_array = false;
+        for raw_line in toml_str.lines() {
+            let line = match raw_line.find('#') {
+                Some(idx) => &raw_line[..idx],
+                None => raw_line,
+            }
+            .trim();
+            if line.is_empty() {
+                continue;
+            }
+            if !in_array {
+                if let Some(rest) = line.strip_prefix("compact_representatives") {
+                    let rest = rest.trim_start();
+                    if let Some(after_eq) = rest.strip_prefix('=') {
+                        in_array = true;
+                        for part in after_eq.split('"') {
+                            let s = part.trim();
+                            if s.starts_with("nano_") || s.starts_with("xrb_") {
+                                if let Some(k) = decode_nano_account_bytes(s) {
+                                    if by_id.len() < 256 {
+                                        by_id.push(k);
+                                    }
+                                }
+                            }
+                        }
+                        if after_eq.contains(']') {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for part in line.split('"') {
+                    let s = part.trim();
+                    if s.starts_with("nano_") || s.starts_with("xrb_") {
+                        if let Some(k) = decode_nano_account_bytes(s) {
+                            if by_id.len() < 256 {
+                                by_id.push(k);
+                            }
+                        }
+                    }
+                }
+                if line.contains(']') {
+                    break;
+                }
+            }
+        }
+        let mut pairs: Vec<([u8; 32], u8)> = by_id
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i as u8))
+            .collect();
+        pairs.sort_by_key(|p| p.0);
+        pairs.dedup_by_key(|p| p.0);
+        let sorted_keys = pairs.iter().map(|p| p.0).collect();
+        let sorted_ids = pairs.iter().map(|p| p.1).collect();
+        CompactRepLookup {
+            by_id,
+            sorted_keys,
+            sorted_ids,
+        }
+    })
+}
+
+#[inline]
+fn lookup_compact_rep_id(rep: &[u8]) -> Option<u8> {
+    let key: &[u8; 32] = rep.try_into().ok()?;
+    let tbl = load_compact_rep_lookup();
+    let idx = tbl.sorted_keys.binary_search(key).ok()?;
+    Some(tbl.sorted_ids[idx])
+}
+
+fn get_active_compact_reps() -> &'static [[u8; 32]] {
+    &load_compact_rep_lookup().by_id
+}
+
+/// Converts a C++ Nano / RSNano LMDB block value into `barely-nano`'s self-contained
+/// bit-packed compact `TABLE_BLOCKS` format (`SavedBlock::serialize_compact`).
+#[inline]
 fn convert_lmdb_block_value(raw: &[u8], out: &mut [u8; VALUE_SIZE]) -> Option<usize> {
     let len = raw.len();
     if len < 169 || len > VALUE_SIZE {
@@ -836,12 +1032,157 @@ fn convert_lmdb_block_value(raw: &[u8], out: &mut [u8; VALUE_SIZE]) -> Option<us
         (6, 267) => 217, // State
         _ => return None,
     };
-    let sideband_rest = len - (block_end + 32);
-    out[..block_end].copy_from_slice(&raw[..block_end]);
-    out[block_end..block_end + sideband_rest]
-        .copy_from_slice(&raw[block_end + 32..len]);
-    out[len - 32..len].copy_from_slice(&raw[block_end..block_end + 32]);
-    Some(len)
+    let succ_bytes = &raw[block_end..block_end + 32];
+    let has_succ = *succ_bytes != [0u8; 32];
+
+    if raw[0] != 6 {
+        let sideband_rest = len - (block_end + 32);
+        let body_without_type = block_end - 1;
+        out[0] = COMPACT_BLOCK_TAG
+            | COMPACT_IS_LEGACY
+            | (if has_succ { COMPACT_HAS_SUCCESSOR } else { 0 })
+            | (raw[0] & 0x1F);
+        out[1..1 + body_without_type].copy_from_slice(&raw[1..block_end]);
+        let mut pos = 1 + body_without_type;
+        out[pos..pos + sideband_rest].copy_from_slice(&raw[block_end + 32..len]);
+        pos += sideband_rest;
+        if has_succ {
+            out[pos..pos + 32].copy_from_slice(succ_bytes);
+            pos += 32;
+        }
+        return Some(pos);
+    }
+
+    // StateBlock (raw[0] == 6, len == 267)
+    let acc_bytes = &raw[1..33];
+    let prev_bytes = &raw[33..65];
+    let rep_bytes = &raw[65..97];
+    let bal_bytes: [u8; 16] = raw[97..113].try_into().unwrap();
+    let link_bytes = &raw[113..145];
+    let sig_bytes = &raw[145..209];
+    let work_bytes = &raw[209..217];
+    let height_be: [u8; 8] = raw[249..257].try_into().unwrap();
+    let ts_be: [u8; 8] = raw[257..265].try_into().unwrap();
+    let details_byte = raw[265];
+    let source_epoch = raw[266];
+    if (details_byte & 0x1F) > 4 || source_epoch > 4 {
+        return None;
+    }
+
+    let has_prev = *prev_bytes != [0u8; 32];
+    let link_is_zero = *link_bytes == [0u8; 32];
+    let (rl_code, rep_id_opt): (u8, Option<u8>) = if rep_bytes == acc_bytes {
+        if link_is_zero {
+            (5, None)
+        } else {
+            (4, None)
+        }
+    } else if *link_bytes == EPOCH_V1_LINK_BYTES {
+        (2, None)
+    } else if *link_bytes == EPOCH_V2_LINK_BYTES {
+        (3, None)
+    } else if let Some(rep_id) = lookup_compact_rep_id(rep_bytes) {
+        if link_is_zero {
+            (7, Some(rep_id))
+        } else {
+            (6, Some(rep_id))
+        }
+    } else if link_is_zero {
+        (1, None)
+    } else {
+        (0, None)
+    };
+
+    let bal = u128::from_be_bytes(bal_bytes);
+    let bal_buf: [u8; 16];
+    let (bal_scaled, bal_nibble, bal_slice): (bool, u8, &[u8]) = if bal == 0 {
+        (false, 0, &[])
+    } else if bal % RAW_BALANCE_SCALE == 0 {
+        let q = bal / RAW_BALANCE_SCALE;
+        let blen = 16 - (q.leading_zeros() as usize / 8);
+        bal_buf = q.to_be_bytes();
+        (true, blen as u8, &bal_buf[16 - blen..16])
+    } else {
+        let blen = 16 - (bal.leading_zeros() as usize / 8);
+        bal_buf = bal_bytes;
+        if blen == 16 {
+            (true, 0, &bal_buf[0..16])
+        } else {
+            (false, blen as u8, &bal_buf[16 - blen..16])
+        }
+    };
+
+    let height = u64::from_be_bytes(height_be);
+    let (h_idx, height_slice): (u8, &[u8]) = if height == 1 {
+        (0, &[])
+    } else if height <= 0xFF {
+        (1, &height_be[7..8])
+    } else if height <= 0xFFFF {
+        (2, &height_be[6..8])
+    } else if height <= 0xFFFF_FFFF {
+        (3, &height_be[4..8])
+    } else {
+        (4, &height_be[0..8])
+    };
+
+    let ts = u64::from_be_bytes(ts_be);
+    let (ts_idx, ts_slice): (u8, &[u8]) = if ts == 0 {
+        (0, &[])
+    } else if ts <= 0xFFFF_FFFF_FFFF {
+        (1, &ts_be[2..8])
+    } else {
+        (2, &ts_be[0..8])
+    };
+
+    let epoch_combo = (details_byte & 0x1F) * 5 + source_epoch;
+
+    out[0] = COMPACT_BLOCK_TAG
+        | (if has_succ { COMPACT_HAS_SUCCESSOR } else { 0 })
+        | (if has_prev { COMPACT_STATE_HAS_PREV } else { 0 })
+        | (rl_code << 1)
+        | (if bal_scaled { COMPACT_STATE_BAL_SCALED } else { 0 });
+    out[1] = (details_byte & 0xE0) | (epoch_combo & 0x1F);
+    out[2] = (bal_nibble << 4) | (h_idx * 3 + ts_idx);
+
+    let mut pos = 3usize;
+    out[pos..pos + 32].copy_from_slice(acc_bytes);
+    pos += 32;
+    if has_prev {
+        out[pos..pos + 32].copy_from_slice(prev_bytes);
+        pos += 32;
+    }
+    if let Some(rep_id) = rep_id_opt {
+        out[pos] = rep_id;
+        pos += 1;
+    } else if rl_code <= 3 {
+        out[pos..pos + 32].copy_from_slice(rep_bytes);
+        pos += 32;
+    }
+    if matches!(rl_code, 0 | 4 | 6) {
+        out[pos..pos + 32].copy_from_slice(link_bytes);
+        pos += 32;
+    }
+    if !bal_slice.is_empty() {
+        out[pos..pos + bal_slice.len()].copy_from_slice(bal_slice);
+        pos += bal_slice.len();
+    }
+    if !height_slice.is_empty() {
+        out[pos..pos + height_slice.len()].copy_from_slice(height_slice);
+        pos += height_slice.len();
+    }
+    if !ts_slice.is_empty() {
+        out[pos..pos + ts_slice.len()].copy_from_slice(ts_slice);
+        pos += ts_slice.len();
+    }
+    out[pos..pos + 64].copy_from_slice(sig_bytes);
+    pos += 64;
+    out[pos..pos + 8].copy_from_slice(work_bytes);
+    pos += 8;
+    if has_succ {
+        out[pos..pos + 32].copy_from_slice(succ_bytes);
+        pos += 32;
+    }
+    Some(pos)
 }
 
 /// Compares two duplicate `EntryRef32` records for the same key across COW leaf pages,
@@ -1933,7 +2274,7 @@ fn run() -> Result<(), String> {
         )?;
         shard_table_pages[shard_idx][ORD_ONLINE_WEIGHT] = Vec::new();
 
-        // 8. TABLE_VERSION (11) - only in Shard 4 (since b'C' >> 4 == 4), which runs last!
+        // 8. TABLE_VERSION (11) - CACHCNTS in Shard 4 (b'C' >> 4 == 4), REPTBL in Shard 5 (b'R' >> 4 == 5)
         if shard_idx == 4 {
             let mut counts_key = [0u8; KEY_SIZE];
             counts_key[0] = TABLE_VERSION;
@@ -1949,6 +2290,32 @@ fn run() -> Result<(), String> {
             counts_val[24..32].copy_from_slice(&global_confirmed_count.to_le_bytes());
             counts_val[32..40].copy_from_slice(&global_pruned_count.to_le_bytes());
             builder.push(&counts_key, &counts_val)?;
+        } else if shard_idx == 5 {
+            let active_reps = get_active_compact_reps();
+            let count = active_reps.len().min(256);
+            if count > 0 {
+                // Push `REPTBLC` chunks first (`'C' < 'H'`) so keys are strictly ascending
+                let num_chunks = (count + 7) / 8;
+                for c in 0..num_chunks {
+                    let mut ckey = [0u8; KEY_SIZE];
+                    ckey[0] = TABLE_VERSION;
+                    ckey[1..8].copy_from_slice(b"REPTBLC");
+                    ckey[8] = c as u8;
+                    let n = (count - c * 8).min(8);
+                    let mut cval = [0u8; 256];
+                    for i in 0..n {
+                        cval[i * 32..(i + 1) * 32].copy_from_slice(&active_reps[c * 8 + i]);
+                    }
+                    builder.push(&ckey, &cval[..n * 32])?;
+                }
+                let mut hdr_key = [0u8; KEY_SIZE];
+                hdr_key[0] = TABLE_VERSION;
+                hdr_key[1..9].copy_from_slice(b"REPTBLHD");
+                let mut hdr_val = [0u8; 16];
+                hdr_val[0..8].copy_from_slice(&REPTBL_MAGIC.to_le_bytes());
+                hdr_val[8..12].copy_from_slice(&(count as u32).to_le_bytes());
+                builder.push(&hdr_key, &hdr_val)?;
+            }
         }
 
         // 9. TABLE_REP_WEIGHTS (12)

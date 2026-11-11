@@ -67,6 +67,13 @@ impl OpenBlock {
     }
 
     pub fn deserialize(stream: &mut dyn Stream) -> Result<Self> {
+        Self::deserialize_with_hash(stream, None)
+    }
+
+    pub fn deserialize_with_hash(
+        stream: &mut dyn Stream,
+        known_hash: Option<BlockHash>,
+    ) -> Result<Self> {
         let hashables = OpenHashables {
             source: BlockHash::deserialize(stream)?,
             representative: PublicKey::deserialize(stream)?,
@@ -76,7 +83,14 @@ impl OpenBlock {
         let mut work_bytes = [0u8; 8];
         stream.read_bytes(&mut work_bytes, 8)?;
         let work = u64::from_le_bytes(work_bytes).into();
-        let hash = hashables.hash();
+        let hash = match known_hash {
+            Some(h) => {
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(h, hashables.hash());
+                h
+            }
+            None => hashables.hash(),
+        };
         Ok(OpenBlock {
             work,
             signature,

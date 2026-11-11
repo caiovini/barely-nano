@@ -53,13 +53,27 @@ impl SendBlock {
     }
 
     pub fn deserialize(stream: &mut dyn Stream) -> Result<Self> {
+        Self::deserialize_with_hash(stream, None)
+    }
+
+    pub fn deserialize_with_hash(
+        stream: &mut dyn Stream,
+        known_hash: Option<BlockHash>,
+    ) -> Result<Self> {
         let hashables = SendHashables::deserialize(stream)?;
         let signature = Signature::deserialize(stream)?;
 
         let mut buffer = [0u8; 8];
         stream.read_bytes(&mut buffer, 8)?;
         let work = u64::from_le_bytes(buffer).into();
-        let hash = hashables.hash();
+        let hash = match known_hash {
+            Some(h) => {
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(h, hashables.hash());
+                h
+            }
+            None => hashables.hash(),
+        };
         Ok(SendBlock {
             hashables,
             signature,

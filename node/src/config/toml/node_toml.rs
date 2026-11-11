@@ -31,6 +31,7 @@ pub struct NodeToml {
     pub pow_sleep_interval: Option<i64>,
     pub preconfigured_peers: Option<Vec<String>>,
     pub preconfigured_representatives: Option<Vec<String>>,
+    pub compact_representatives: Option<Vec<String>>,
     pub receive_minimum: Option<String>,
     pub rep_crawler_weight_minimum: Option<String>,
     pub representative_vote_weight_minimum: Option<String>,
@@ -125,6 +126,15 @@ impl NodeConfig {
                         .into()
                 })
                 .collect();
+        }
+        if let Some(compact_representatives) = &toml.compact_representatives {
+            let mut reps: Vec<[u8; 32]> = Vec::with_capacity(compact_representatives.len().min(256));
+            for string in compact_representatives.iter().take(256) {
+                if let Ok(acc) = Account::decode_account(string) {
+                    reps.push(*acc.as_bytes());
+                }
+            }
+            rsnano_core::set_compact_representatives(&reps);
         }
         if let Some(receive_minimum) = &toml.receive_minimum {
             self.receive_minimum =
@@ -405,6 +415,7 @@ impl From<&NodeConfig> for NodeToml {
                     .map(|pk| Account::from(pk).encode_account())
                     .collect(),
             ),
+            compact_representatives: None,
             receive_minimum: Some(config.receive_minimum.to_string_dec()),
             rep_crawler_weight_minimum: Some(config.rep_crawler_weight_minimum.to_string_dec()),
             representative_vote_weight_minimum: Some(

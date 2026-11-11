@@ -123,7 +123,50 @@ impl StateBlock {
             + core::mem::size_of::<u64>() // Work
     }
 
+    #[inline]
+    pub fn from_parts_with_hash(
+        account: Account,
+        previous: BlockHash,
+        representative: PublicKey,
+        balance: Amount,
+        link: Link,
+        signature: Signature,
+        work: WorkNonce,
+        known_hash: Option<BlockHash>,
+    ) -> Self {
+        let hashables = StateHashables {
+            account,
+            previous,
+            representative,
+            balance,
+            link,
+        };
+        let hash = match known_hash {
+            Some(h) => {
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(h, hashables.hash());
+                h
+            }
+            None => hashables.hash(),
+        };
+        Self {
+            work,
+            signature,
+            hashables,
+            hash,
+            signature_verified: AtomicBool::new(false),
+            pow_base_verified: AtomicBool::new(false),
+        }
+    }
+
     pub fn deserialize(stream: &mut dyn Stream) -> Result<Self> {
+        Self::deserialize_with_hash(stream, None)
+    }
+
+    pub fn deserialize_with_hash(
+        stream: &mut dyn Stream,
+        known_hash: Option<BlockHash>,
+    ) -> Result<Self> {
         let account = Account::deserialize(stream)?;
         let previous = BlockHash::deserialize(stream)?;
         let representative = PublicKey::deserialize(stream)?;
@@ -133,22 +176,16 @@ impl StateBlock {
         let mut work_bytes = [0u8; 8];
         stream.read_bytes(&mut work_bytes, 8)?;
         let work = u64::from_be_bytes(work_bytes).into();
-        let hashables = StateHashables {
+        Ok(Self::from_parts_with_hash(
             account,
             previous,
             representative,
             balance,
             link,
-        };
-        let hash = hashables.hash();
-        Ok(Self {
-            work,
             signature,
-            hashables,
-            hash,
-            signature_verified: AtomicBool::new(false),
-            pow_base_verified: AtomicBool::new(false),
-        })
+            work,
+            known_hash,
+        ))
     }
 }
 
