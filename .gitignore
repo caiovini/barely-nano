@@ -27,9 +27,12 @@ env
 
 # Tools
 tools/nano-stress/target/
+tools/nano-stress/wasm/target/
+tools/*/target/
 
 # bin
 boot.scr
 
-
-
+# database & submodules from hardware branches
+database/
+u-boot-orangepi-k1/
