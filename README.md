@@ -314,26 +314,26 @@ rustup component add llvm-tools-preview
 
 ---
 
-### 2. Build Custom SpacemiT K3 U-Boot (`/mnt/data/rust-workspace/u-boot`) & Flash via Fastboot / FDL
+### 2. Build Custom SpacemiT K3 U-Boot ([`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3)) & Flash via Fastboot / FDL
 
-The custom U-Boot tree for the SpacemiT K3 Pico-ITX (`spacemit_k3_defconfig`) is located in `/mnt/data/rust-workspace/u-boot` and includes:
+The custom U-Boot submodule for the SpacemiT K3 Pico-ITX (`spacemit_k3_defconfig`) is located in [`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3) (`https://github.com/caiovini/u-boot-pico-itx-k3.git`) and includes:
 - **Extended 59-Entry Standalone Jump Table (`gd->jt` at `gp + 0x20`)** (`include/_exports.h`, `common/exports.c`) — Exports Ethernet (`eth_init`..`eth_set_current` at indices `42..48`), HDMI Video (`video_get_fb`..`bmp_display` at indices `49..55`), and primary NVMe Block I/O (`blk_get_capacity`, `blk_read_lba`, `blk_write_lba` at indices `56..58`).
 - **A100 Cluster 2 & 3 Clock Ungating & 16-Hart DTB (`hart 0..15`)** (`drivers/clk/spacemit/clk-k3.c`, `board/spacemit/k3/board.c`, `k3.dtsi`) — Ungates `cpu_c2_core_clk`, `cpu_c3_core_clk`, `c2_tcm_pipe_clk`, and `c3_tcm_pipe_clk`, enables `sstatus.VS`, and registers all 16 harts (`8× X100` + `8× A100`) with OpenSBI HSM.
 - **High-Throughput 64-Bit NVMe Driver (`NVME_Q_DEPTH = 64`, `MAX_PRP_POOL = 4096`)** (`drivers/nvme/nvme.c`) — Zero-copy 64-bit PRP DMA directly from High DRAM (`0x1_E000_0000+`) with `256 KB` (`512`-sector) transfers.
 - **Realtek RTL8127 10GbE SFP+ Fiber Driver (`64 TX / 512 RX` 64-Bit DMA Rings)** (`drivers/net/rtl8169.c`) — Full 64-bit PCIe DMA descriptor addressing (`>= 0x1_0000_0000`), SFP+ SerDes calibration, batched 4-descriptor cache-line RX re-arming, and zero-`udelay` TX polling.
 - **Waveshare HDMI LCD SimpleFB (`CONFIG_VIDEO_DT_SIMPLEFB=y`)** — Initializes the HDMI framebuffer before jumping to `barely-nano.bin`.
 
-1. Build U-Boot using [`build_u-boot.sh`](file:///mnt/data/rust-workspace/barely-nano/build_u-boot.sh) (which invokes `/mnt/data/rust-workspace/u-boot/build.sh`):
+1. Build U-Boot using [`build_u-boot.sh`](file:///mnt/data/rust-workspace/barely-nano/build_u-boot.sh) (which invokes `u-boot-pico-itx-k3/build.sh`):
    ```bash
    ./build_u-boot.sh
    ```
 2. Put the SpacemiT K3 Pico-ITX into **USB Download / FDL mode** (hold the **FDL / Boot** button while powering on or resetting with the USB Type-C cable connected to your host PC) and flash the bootloader stages via `fastboot`:
    ```bash
    # Stage FDL1 / FSBL and U-Boot via SpacemiT fastboot protocol:
-   fastboot stage /mnt/data/rust-workspace/u-boot/FSBL.bin
+   fastboot stage u-boot-pico-itx-k3/FSBL.bin
    fastboot continue
    # Once in U-Boot fastboot mode, flash U-Boot + OpenSBI to onboard storage (eMMC / SPI NOR):
-   fastboot flash uboot /mnt/data/rust-workspace/u-boot/u-boot.bin
+   fastboot flash uboot u-boot-pico-itx-k3/u-boot.bin
    fastboot reboot
    ```
 
@@ -781,7 +781,7 @@ make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
 - [`nullables/`](file:///mnt/data/rust-workspace/barely-nano/nullables) — Hardware/OS abstraction crates (`sha` RVA23 / `Zvkb` `VLEN=256` & `VLEN=1024` crypto, `clock`, `random`, `tcp`, `http_client`, `output_tracker`) with nullable test doubles.
 - [`stats/`](file:///mnt/data/rust-workspace/barely-nano/stats) & [`work/`](file:///mnt/data/rust-workspace/barely-nano/work) — Node statistics collector and PoW work generation/validation.
 - [`tools/`](file:///mnt/data/rust-workspace/barely-nano/tools) — Host-side utilities: [`lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) & [`lmdb_to_nvme.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb_to_nvme.sh) (direct `data.ldb` to raw 64-shard NVMe B-Tree + Bloom migration tool), [`nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) & [`nvme_snapshot.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme_snapshot.sh) (direct NVMe to compact raw 64-shard ledger snapshot dump & restore tool), [`nano-stress`](file:///mnt/data/rust-workspace/barely-nano/tools/nano-stress) (P2P block streamer), and [`ws_subscribe.py`](file:///mnt/data/rust-workspace/barely-nano/tools/ws_subscribe.py) (WebSocket topic subscriber).
-- [`/mnt/data/rust-workspace/u-boot`](file:///mnt/data/rust-workspace/u-boot) — Custom SpacemiT K3 Pico-ITX (`spacemit_k3_defconfig`) U-Boot tree with 59-entry Standalone Jump Table (`eth_*`, `video_*`, `blk_*`), RTL8127 10GbE SFP+ driver, 64-bit NVMe PRP DMA, and A100 Cluster 2/3 clock ungating.
+- [`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3) — Custom SpacemiT K3 Pico-ITX (`spacemit_k3_defconfig`) U-Boot git submodule (`https://github.com/caiovini/u-boot-pico-itx-k3.git`) with 59-entry Standalone Jump Table (`eth_*`, `video_*`, `blk_*`), RTL8127 10GbE SFP+ driver, 64-bit NVMe PRP DMA, and A100 Cluster 2/3 clock ungating.
 - [`linker-smode.ld`](file:///mnt/data/rust-workspace/barely-nano/linker-smode.ld) — S-mode linker script mapping the `0x1_0400_0000` physical memory layout for the SpacemiT K3 Pico-ITX (`16 GB LPDDR5`).
 
 ## Authors & Credits

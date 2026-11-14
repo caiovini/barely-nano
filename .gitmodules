@@ -1,0 +1,3 @@
+[submodule "u-boot-pico-itx-k3"]
+	path = u-boot-pico-itx-k3
+	url = https://github.com/caiovini/u-boot-pico-itx-k3.git
