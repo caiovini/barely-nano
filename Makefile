@@ -2,7 +2,7 @@ CARGO ?= cargo
 OBJCOPY ?= $(or $(shell which llvm-objcopy 2>/dev/null),$(shell find $(HOME)/.rustup -name llvm-objcopy 2>/dev/null | head -n1),riscv64-linux-gnu-objcopy)
 MKIMAGE ?= mkimage
 
-.PHONY: build build-smode build-k1 build-k3 build-block-test build-spammer boot-scr run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests run-websocket-messages-tests run-websocket-client-tests run-websocket-server-tests run-picocom run-stress build-stress build-stress-wasm build-lmdb-to-nvme build-nvme-snapshot stress clean
+.PHONY: build build-smode build-k1 build-block-test build-spammer boot-scr run-crypto-tests run-core-tests run-ledger-tests run-messages-tests run-node-tests run-rpc-messages-tests run-rpc-handler-tests run-websocket-messages-tests run-websocket-client-tests run-websocket-server-tests run-picocom run-stress build-stress build-stress-wasm build-lmdb-to-nvme build-nvme-snapshot stress clean
 
 boot.scr: boot.cmd
 	$(MKIMAGE) -C none -A riscv -T script -d boot.cmd boot.scr
@@ -34,21 +34,6 @@ build-smode: boot.scr build-stress-wasm
 	done
 
 build-k1: build-smode
-
-# ── S-mode: SpacemiT K3 (32 GB LPDDR5, 25.00 GB DRAM Bank 1 Buffer Pool) ─────
-build-k3: boot.scr build-stress-wasm
-	RUSTFLAGS="-C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zihintpause" \
-	$(CARGO) build -p barely-nano --release --target riscv64gc-unknown-none-elf --no-default-features --features smode,simd,k3
-	$(OBJCOPY) -O binary target/riscv64gc-unknown-none-elf/release/barely-nano barely-nano.bin
-	@for dir in "/media/cvini/NANO_NODE" "/run/media/cvini/NANO_NODE"; do \
-		if [ -d "$$dir" ]; then \
-			rm -f "$$dir/barely-nano.bin" "$$dir/config.toml" "$$dir/boot.scr"; \
-			sync; \
-			cp barely-nano.bin config.toml boot.scr "$$dir/"; \
-			sync; \
-			echo "Successfully deployed K3 barely-nano.bin, config.toml, and boot.scr to $$dir"; \
-		fi; \
-	done
 
 # ── S-mode + deterministic block generation & pipeline test ──────────────────
 # Measures deterministic per-stage block time and blocks/sec on bare-metal hardware.

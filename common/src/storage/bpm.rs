@@ -59,12 +59,10 @@ pub const MAX_FRAMES: usize = 32768;
 /// Base physical address of Upper DRAM Bank 1 (`0x1_0000_0000 ..`).
 pub const HIGH_DRAM_BASE: usize = crate::soc::HIGH_DRAM_BASE;
 
-/// Target resident 4 KB frames per shard in DRAM Bank 1
-/// (`81,920` on K1 8 GB = `5.00 GB` total; `409,600` on K3 32 GB = `25.00 GB` total).
+/// Target resident 4 KB frames per shard in DRAM Bank 1 (`81,920` on K1 8 GB = `5.00 GB` total).
 pub const HIGH_DRAM_TARGET_FRAMES: usize = crate::soc::HIGH_DRAM_TARGET_FRAMES;
 
-/// Maximum 4 KB frames per shard in DRAM Bank 1
-/// (`86,016` on K1 8 GB = `5.25 GB` max; `425,984` on K3 32 GB = `26.00 GB` max).
+/// Maximum 4 KB frames per shard in DRAM Bank 1 (`86,016` on K1 8 GB = `5.25 GB` max).
 pub const HIGH_DRAM_MAX_FRAMES: usize = crate::soc::HIGH_DRAM_MAX_FRAMES;
 
 /// Compact 24-byte metadata per frame kept in Bank 0 L2-friendly memory so Clock eviction sweeps

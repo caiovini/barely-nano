@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-// CLINT timer frequency (configured in `crate::soc::CLINT_FREQ`, 24 MHz on SpacemiT K1/K3)
+// CLINT timer frequency (configured in `crate::soc::CLINT_FREQ`, 24 MHz on SpacemiT K1)
 pub const FREQ: u64 = crate::soc::CLINT_FREQ;
 
 static TIME_OFFSET_NS: AtomicU64 = AtomicU64::new(0);

@@ -509,7 +509,6 @@ fi
 | Target | Feature flag | Purpose |
 |---|---|---|
 | `make build` / `make build-k1` / `make build-smode` | `simd,k1` | **Production build (SpacemiT K1 8 GB)** — builds `barely-nano.bin` and `boot.scr` (5.00 GB DRAM Bank 1 cache) and deploys to SD card if mounted |
-| `make build-k3` | `simd,k3` | **SpacemiT K3 (32 GB LPDDR5) build** — builds `barely-nano.bin` with a 25.00 GB DRAM Bank 1 Buffer Pool (see [`spacemit_k3_migration.md`](file:///mnt/data/rust-workspace/barely-nano/spacemit_k3_migration.md)) |
 | `make build-block-test` / `make build-spammer` | `block-test,simd` | **Deterministic hardware benchmark** — measures single-block and 64-block pipeline latency and BPS on hardware |
 | `make run-tests` | — | Runs all host-side unit test suites (`crypto`, `core`, `ledger`, `messages`, `node`, `rpc_messages`, `rpc_handler`, `websocket_messages`, `websocket_client`, `websocket_server`) |
 | `make run-crypto-tests` | `simd` | Runs cryptographic (`rsnano_sha`) unit tests |
