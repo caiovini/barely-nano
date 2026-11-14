@@ -24,17 +24,17 @@ Unlike the SpacemiT K1 (`0x0000_0000` Low DRAM + `0x1_0000_0000` High DRAM), the
 ## 2. 16-Hart Hybrid Topology (`8× X100 @ 2.4 GHz` + `8× A100 @ 2.0 GHz`)
 
 The SpacemiT K3 integrates 16 RVA23 harts across 4 clusters:
-- **Cluster 0 — X100 Harts `0..3` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb`):**
+- **Cluster 0 — X100 Harts `0..=3` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb`):**
   - **Hart 0 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and cooperative async executor tasks (`WORKER_HARTS`).
   - **Hart 1 (`Maint+Net`):** Boot initialization, 10GbE RTL8127 `smoltcp` network polling, HTTP JSON-RPC (`7076`), WebSocket (`7078`), Live Web Dashboard (`7080`), and watchdog kicking.
   - **Harts 2 & 3 (`Crypto-X100`):** 4-way `VLEN=256` (`Zvkb` native `vror.vi`) Ed25519 signature verification (`signature_checker.help_verify()`) + inbound `MessageProcessor::run_batch()`.
-- **Cluster 1 — X100 Harts `4..7` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb`):**
+- **Cluster 1 — X100 Harts `4..=7` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb`):**
   - **Hart 4 (`Consensus`):** Drives `aec_voter`, `aec_ticker`, `election_schedulers`, `backlog_scan`, `bootstrap_server`, and async executor tasks (`WORKER_HARTS`).
-  - **Hart 5 (`Ledger-B`):** Parallel B-Tree mutations for **Shards `21..42`** (`Ledger::try_run_ledger_b_job`), WAL segments, and `unchecked` dependency drain.
-  - **Hart 6 (`Ledger-A`):** Primary `block_processor` batch coordinator (`FAST_BATCH_SLOTS = 2048`), parallel B-Tree mutations for **Shards `0..21`**, WAL checkpointing, and `confirming_set` cementation.
-  - **Hart 7 (`Ledger-C + Storage`):** Parallel B-Tree mutations for **Shards `42..64`** (`Ledger::try_run_ledger_c_job`), online representative weight calculation, NVMe Free-List GC/pruning, and async tasks.
-- **Clusters 2 & 3 — A100 Harts `8..15` (`2.0 GHz`, `VLEN=1024`, `Zvkb`):**
-  - **Harts `8..14` (`Crypto-A100`):** 7 dedicated **16-way `VLEN=1024` SIMD** Ed25519 + Blake2b batch verifiers (`verify_batch_16` / `compress_16_blocks`, auto-selected at runtime via `csrr vlenb >= 128`) + inbound `MessageProcessor::run_batch()` drainers.
+  - **Hart 5 (`Ledger-B`):** Parallel B-Tree mutations for **Shards `21..=41`** (half-open `[21, 42)`, 21 shards — `Ledger::try_run_ledger_b_job`), WAL segments, and `unchecked` dependency drain.
+  - **Hart 6 (`Ledger-A`):** Primary `block_processor` batch coordinator (`FAST_BATCH_SLOTS = 2048`), parallel B-Tree mutations for **Shards `0..=20`** (half-open `[0, 21)`, 21 shards), WAL checkpointing, and `confirming_set` cementation.
+  - **Hart 7 (`Ledger-C + Storage`):** Parallel B-Tree mutations for **Shards `42..=63`** (half-open `[42, 64)`, 22 shards — `Ledger::try_run_ledger_c_job`), online representative weight calculation, NVMe Free-List GC/pruning, and async tasks.
+- **Clusters 2 & 3 — A100 Harts `8..=15` (`2.0 GHz`, `VLEN=1024`, `Zvkb`):**
+  - **Harts `8..=14` (`Crypto-A100`):** 7 dedicated **16-way `VLEN=1024` SIMD** Ed25519 + Blake2b batch verifiers (`verify_batch_16` / `compress_16_blocks`, auto-selected at runtime via `csrr vlenb >= 128`) + inbound `MessageProcessor::run_batch()` drainers.
   - **Hart `15` (`HDMI+Mon`):** Waveshare 5-inch HDMI SimpleFB graphical dashboard (`common/src/hdmi_fb.rs`) and 15-second hardware telemetry & lock-contention profiler.
 
 ---

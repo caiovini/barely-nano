@@ -266,13 +266,13 @@ struct LedgerStripeFlushJob {
     shard_end: usize,
 }
 
-/// Marks Hart 5 (`Ledger-B`, Shards 21..42) as online so Hart 6 (`Ledger-A`, Shards 0..21)
+/// Marks Hart 5 (`Ledger-B`, Shards `21..=41`, half-open `[21, 42)`) as online so Hart 6 (`Ledger-A`, Shards `0..=20`)
 /// dispatches the middle shard stripe of each block batch to Hart 5 across Cluster 1's shared L2.
 pub fn set_ledger_b_online(online: bool) {
     LEDGER_B_ONLINE.store(online, Ordering::Release);
 }
 
-/// Marks Hart 7 (`Ledger-C`, Shards 42..64) as online so Hart 6 (`Ledger-A`, Shards 0..21)
+/// Marks Hart 7 (`Ledger-C`, Shards `42..=63`, half-open `[42, 64)`) as online so Hart 6 (`Ledger-A`, Shards `0..=20`)
 /// dispatches the upper shard stripe of each block batch to Hart 7 across Cluster 1's shared L2.
 pub fn set_ledger_c_online(online: bool) {
     LEDGER_C_ONLINE.store(online, Ordering::Release);
