@@ -219,7 +219,7 @@ impl BufferPool {
         let data_ptr = shard_addr as *mut crate::storage::AlignedBlock;
 
         let mut page_to_frame = Vec::with_capacity(PAGE_DIR_CAP);
-        for _ in 0..64 {
+        for _ in 0..16 {
             page_to_frame.push(Some(alloc::boxed::Box::new([u32::MAX; PAGE_CHUNK_SIZE])));
         }
 

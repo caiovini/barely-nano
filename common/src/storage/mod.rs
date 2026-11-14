@@ -26,7 +26,7 @@ use crate::uboot;
 use spin::Mutex;
 use alloc::sync::Arc;
 
-pub const SHARD_COUNT: usize = 16;
+pub const SHARD_COUNT: usize = 64;
 
 /// Issues a RISC-V `Zicbop` `prefetch.r 0(ptr)` cache-line read prefetch hint.
 #[inline(always)]
@@ -71,9 +71,9 @@ pub fn prefetch_write(ptr: *const u8) {
 }
 
 /// Per-hart shard-lock statistics (CLINT ticks): time waiting for, and holding, shard locks.
-pub static LOCK_WAIT: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::atomic::AtomicU64::new(0) }; 8];
-pub static LOCK_HOLD: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::atomic::AtomicU64::new(0) }; 8];
-pub static LOCK_ACQ: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::atomic::AtomicU64::new(0) }; 8];
+pub static LOCK_WAIT: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+pub static LOCK_HOLD: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+pub static LOCK_ACQ: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 
 #[inline]
 fn current_hart() -> usize {
@@ -83,7 +83,7 @@ fn current_hart() -> usize {
         // SAFETY: reads the thread-pointer register, which this kernel sets to the hart id on boot;
         // the instruction has no side effects.
         unsafe { core::arch::asm!("mv {0}, tp", out(reg) id) };
-        id & 7
+        id & 15
     }
     #[cfg(not(target_arch = "riscv64"))]
     {
@@ -186,7 +186,7 @@ pub static WALLET_SHARD: ShardMutex = ShardMutex::new();
 
 pub fn reset_prof() {
     use core::sync::atomic::Ordering::Relaxed;
-    for h in 0..8 {
+    for h in 0..16 {
         LOCK_WAIT[h].store(0, Relaxed);
         LOCK_HOLD[h].store(0, Relaxed);
         LOCK_ACQ[h].store(0, Relaxed);
@@ -211,9 +211,10 @@ pub fn db_shard(index: usize) -> &'static ShardMutex {
 
 pub fn get_shard_index(key: &[u8]) -> usize {
     if key.len() < 2 { return 0; }
-    // We use the high 4 bits of the first byte of the actual key (after Table ID) to shard.
-    // This provides Prefix Sharding, which allows range scans to work by visiting shards in order.
-    (key[1] >> 4) as usize
+    // Use the high 6 bits of the first byte of the actual key (after Table ID) to shard across
+    // 64 disjoint B-Tree shards (`0..64`). This preserves Prefix Sharding so range scans visit
+    // shards in strictly ascending lexicographical order.
+    (key[1] >> 2) as usize
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,7 +309,7 @@ impl StorageContext {
                     return Err(StorageError::IoError);
                 }
                 let count = 8;
-                if (buf.as_ptr() as usize) >= HIGH_DRAM_THRESHOLD {
+                if (buf.as_ptr() as usize) % 64 != 0 {
                     let ret = uboot::dev_read(info, lba, count, self.dma_bounce.bytes.as_mut_ptr());
                     if ret > 0 {
                         buf[..4096].copy_from_slice(&self.dma_bounce.bytes);
@@ -351,7 +352,7 @@ impl StorageContext {
                     return Err(StorageError::IoError);
                 }
                 let count = 8;
-                let ret = if (buf.as_ptr() as usize) >= HIGH_DRAM_THRESHOLD {
+                let ret = if (buf.as_ptr() as usize) % 64 != 0 {
                     self.dma_bounce.bytes.copy_from_slice(&buf[..4096]);
                     uboot::dev_write(info, lba, count, self.dma_bounce.bytes.as_ptr())
                 } else {
@@ -478,7 +479,7 @@ impl StorageContext {
             StorageBackend::UBoot(info) => {
                 let lba = (block_id * 8) as u64 + STORAGE_BASE_LBA;
                 let count = 8;
-                if (buf.as_ptr() as usize) >= HIGH_DRAM_THRESHOLD {
+                if (buf.as_ptr() as usize) % 64 != 0 {
                     let ret = uboot::dev_read(info, lba, count, self.dma_bounce.bytes.as_mut_ptr());
                     if ret > 0 {
                         buf[..4096].copy_from_slice(&self.dma_bounce.bytes);
@@ -512,7 +513,7 @@ impl StorageContext {
             StorageBackend::UBoot(info) => {
                 let lba = (block_id * 8) as u64 + STORAGE_BASE_LBA;
                 let count = 8;
-                let ret = if (buf.as_ptr() as usize) >= HIGH_DRAM_THRESHOLD {
+                let ret = if (buf.as_ptr() as usize) % 64 != 0 {
                     self.dma_bounce.bytes.copy_from_slice(&buf[..4096]);
                     uboot::dev_write(info, lba, count, self.dma_bounce.bytes.as_ptr())
                 } else {

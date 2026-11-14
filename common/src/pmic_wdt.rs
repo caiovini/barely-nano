@@ -156,6 +156,11 @@ unsafe fn i2c_write_byte(data: u8, cond_start: bool, cond_stop: bool, wait_ack: 
 ///
 /// Returns true on success, false if any I2C transaction timed out.
 pub fn disable() -> bool {
+    if crate::trap::probe_read_u32(APBC_BASE + APBC_TWSI8_OFFSET).is_none()
+        || crate::trap::probe_read_u32(I2C8_BASE).is_none()
+    {
+        return false;
+    }
     unsafe {
         // 1. Enable APB clock for I2C8: write reset-done value
         let clk_reg = (APBC_BASE + APBC_TWSI8_OFFSET) as *mut u32;
@@ -229,6 +234,9 @@ pub fn disable() -> bool {
 /// Writes SPM8821_WDT_CLEAR_STATUS (bit 0) to WDT_CTRL, then restores the
 /// current value.  Safe to call periodically from the heartbeat loop.
 pub fn kick() -> bool {
+    if crate::trap::probe_read_u32(I2C8_BASE).is_none() {
+        return false;
+    }
     unsafe {
         i2c_reset();
 

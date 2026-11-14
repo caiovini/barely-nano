@@ -401,7 +401,7 @@ static HOT_BLOCKS: [spin::Mutex<[Option<HotBlockEntry>; HOT_BLOCK_SLOTS]>; SHARD
 #[inline]
 fn hot_block_slot(hash: &BlockHash) -> (usize, usize) {
     let b = hash.as_bytes();
-    let shard = (b[0] >> 4) as usize;
+    let shard = (b[0] >> 2) as usize;
     let slot = (u16::from_ne_bytes([b[1], b[2]]) as usize) & (HOT_BLOCK_SLOTS - 1);
     (shard, slot)
 }
@@ -574,9 +574,9 @@ impl BtreeBlockStore {
         let mut i = 0;
         let n = items.len();
         while i < n {
-            let shard_idx = (items[i].0.as_bytes()[0] >> 4) as usize;
+            let shard_idx = (items[i].0.as_bytes()[0] >> 2) as usize;
             let mut j = i + 1;
-            while j < n && ((items[j].0.as_bytes()[0] >> 4) as usize) == shard_idx {
+            while j < n && ((items[j].0.as_bytes()[0] >> 2) as usize) == shard_idx {
                 j += 1;
             }
             let shard_items = &items[i..j];

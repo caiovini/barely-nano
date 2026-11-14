@@ -1,9 +1,9 @@
-/* S-mode: Kernel loads at 0x11000000 (Orange Pi RV2 hardware layout) */
+/* S-mode: Kernel loads at 0x104000000 (SpacemiT K3 Pico-ITX 16 GB LPDDR5 layout) */
 ENTRY(_start);
 
 MEMORY
 {
-  RAM (rwx) : ORIGIN = 0x11000000, LENGTH = 1792M
+  RAM (rwx) : ORIGIN = 0x104000000, LENGTH = 3392M
 }
 
 SECTIONS
@@ -24,17 +24,16 @@ SECTIONS
     _bss_end = .;
   } > RAM
 
-  /* Stack: 256MB (32MB per Hart) */
+  /* Stack: 256MB (16MB per Hart across 16 Harts: 0x108000000 .. 0x118000000) */
   . = ALIGN(4096);
-  . = 0x12000000;
+  . = 0x108000000;
   _stack_bottom = .;
   . = . + 0x10000000;
   _stack_top = .;
 
-  /* Heap: ~1.45GB - stops before U-Boot's reserved area at 0x7dd8b000 */
+  /* Heap start at 0x118000000; 3.00GB span (0x118000000 .. 0x1D8000000) is sized via soc::HEAP_END
+   * to avoid >2GB R_RISCV_PCREL_HI20 relocation overflow from 0x104000000. */
   . = ALIGN(4096);
-  . = 0x22000000;
+  . = 0x118000000;
   _heap_start = .;
-  . = . + 0x5B000000;
-  _heap_end = .;
 }

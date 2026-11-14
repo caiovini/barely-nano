@@ -165,14 +165,10 @@ pub fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool)
             "vadd.vv v8, v8, v10",
             "vadd.vv v8, v8, v16",
             "vxor.vv v14, v14, v8",
-            "vsrl.vx v20, v14, {sh32}",
-            "vsll.vx v14, v14, {sh32}",
-            "vor.vv v14, v14, v20",
+            "vror.vi v14, v14, 32",
             "vadd.vv v12, v12, v14",
             "vxor.vv v10, v10, v12",
-            "vsrl.vi v20, v10, 24",
-            "vsll.vx v10, v10, {sh40}",
-            "vor.vv v10, v10, v20",
+            "vror.vi v10, v10, 24",
             
             "addi {idx_ptr}, {idx_ptr}, 32",
             "vle64.v v20, ({idx_ptr})",
@@ -181,14 +177,10 @@ pub fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool)
             "vadd.vv v8, v8, v10",
             "vadd.vv v8, v8, v18",
             "vxor.vv v14, v14, v8",
-            "vsrl.vi v20, v14, 16",
-            "vsll.vx v14, v14, {sh48}",
-            "vor.vv v14, v14, v20",
+            "vror.vi v14, v14, 16",
             "vadd.vv v12, v12, v14",
             "vxor.vv v10, v10, v12",
-            "vsrl.vx v20, v10, {sh63}",
-            "vsll.vi v10, v10, 1",
-            "vor.vv v10, v10, v20",
+            "vror.vi v10, v10, 63",
             
             "vrgather.vv v2, v10, v22",
             "vrgather.vv v4, v12, v24",
@@ -204,14 +196,10 @@ pub fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool)
             "vadd.vv v8, v8, v10",
             "vadd.vv v8, v8, v16",
             "vxor.vv v14, v14, v8",
-            "vsrl.vx v20, v14, {sh32}",
-            "vsll.vx v14, v14, {sh32}",
-            "vor.vv v14, v14, v20",
+            "vror.vi v14, v14, 32",
             "vadd.vv v12, v12, v14",
             "vxor.vv v10, v10, v12",
-            "vsrl.vi v20, v10, 24",
-            "vsll.vx v10, v10, {sh40}",
-            "vor.vv v10, v10, v20",
+            "vror.vi v10, v10, 24",
             
             "addi {idx_ptr}, {idx_ptr}, 32",
             "vle64.v v20, ({idx_ptr})",
@@ -220,14 +208,10 @@ pub fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool)
             "vadd.vv v8, v8, v10",
             "vadd.vv v8, v8, v18",
             "vxor.vv v14, v14, v8",
-            "vsrl.vi v20, v14, 16",
-            "vsll.vx v14, v14, {sh48}",
-            "vor.vv v14, v14, v20",
+            "vror.vi v14, v14, 16",
             "vadd.vv v12, v12, v14",
             "vxor.vv v10, v10, v12",
-            "vsrl.vx v20, v10, {sh63}",
-            "vsll.vi v10, v10, 1",
-            "vor.vv v10, v10, v20",
+            "vror.vi v10, v10, 63",
             
             "vrgather.vv v2, v10, v28",
             "vrgather.vv v4, v12, v30",
@@ -258,10 +242,6 @@ pub fn compress_vector(h: &mut [u64; 8], block: &[u8; 128], t: u128, last: bool)
             uv10 = in(reg) undiag_v10.as_ptr(),
             uv12 = in(reg) undiag_v12.as_ptr(),
             uv14 = in(reg) undiag_v14.as_ptr(),
-            sh32 = in(reg) 32usize,
-            sh40 = in(reg) 40usize,
-            sh48 = in(reg) 48usize,
-            sh63 = in(reg) 63usize,
             tmp = out(reg) _,
             round_idx = out(reg) _,
             max_rounds = out(reg) _,
@@ -374,382 +354,248 @@ pub fn compress_four_blocks(
         asm!(
             "vsetivli zero, 4, e64, m1",
             
-            // 1. Initial Load of v0..v26 (14 state variables)
-            // Explicit LMUL=2 group bases are even: v0, v2, ..., v26
+            // 1. Load all 16 transposed state variables into v0..v15 (LMUL=1 on VLEN >= 256)
             "vle64.v v0, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vle64.v v1, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v2, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
+            "vle64.v v3, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v4, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vle64.v v5, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v6, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
+            "vle64.v v7, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v8, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vle64.v v9, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v10, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
+            "vle64.v v11, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v12, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vle64.v v13, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vle64.v v14, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
-            "vle64.v v16, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vle64.v v18, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vle64.v v20, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vle64.v v22, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vle64.v v24, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vle64.v v26, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, -416", // Restore v_ptr to base (13 increments of 32 = 416)
+            "vle64.v v15, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, -480",
 
             // Initial lookahead setup for Step 1 of Round 0:
             "ld {x_ptr}, 0({offsets_ptr})",
             "ld {y_ptr}, 8({offsets_ptr})",
-            "vle64.v v30, ({x_ptr})", // Load Step 1 x in background
+            "vle64.v v30, ({x_ptr})",
 
             "li {round_idx}, 0",
             
             "2:", // Loop start
             
-            // --- Step 1: g(0, 4, 8, 12) -> Registers: v0, v8, v16, v24 ---
-            "ld {x_ptr}, 16({offsets_ptr})", // Pre-load Step 2 x_ptr
-            
-            "vadd.vv v0, v0, v8",
+            // --- Step 1: g(0, 4, 8, 12) ---
+            "ld {x_ptr}, 16({offsets_ptr})",
+            "vadd.vv v0, v0, v4",
             "vadd.vv v0, v0, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 1 y in background!
-            
-            "ld {y_ptr}, 24({offsets_ptr})", // Pre-load Step 2 y_ptr
-            
-            "vxor.vv v24, v24, v0",
-            "vsrl.vx v21, v24, {sh32}",
-            "vsll.vx v24, v24, {sh32}",
-            "vor.vv v24, v24, v21",
-            "vadd.vv v16, v16, v24",
-            "vxor.vv v8, v8, v16",
-            "vsrl.vx v21, v8, {sh24}",
-            "vsll.vx v8, v8, {sh40}",
-            "vor.vv v8, v8, v21",
-
-            "vadd.vv v0, v0, v8",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 24({offsets_ptr})",
+            "vxor.vv v12, v12, v0",
+            "vror.vi v12, v12, 32",
+            "vadd.vv v8, v8, v12",
+            "vxor.vv v4, v4, v8",
+            "vror.vi v4, v4, 24",
+            "vadd.vv v0, v0, v4",
             "vadd.vv v0, v0, v30",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v12, v12, v0",
+            "vror.vi v12, v12, 16",
+            "vadd.vv v8, v8, v12",
+            "vxor.vv v4, v4, v8",
+            "vror.vi v4, v4, 63",
 
-            "vle64.v v30, ({x_ptr})", // Trigger load of Step 2 x in background!
+            // --- Step 2: g(1, 5, 9, 13) ---
+            "ld {x_ptr}, 32({offsets_ptr})",
+            "vadd.vv v1, v1, v5",
+            "vadd.vv v1, v1, v30",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 40({offsets_ptr})",
+            "vxor.vv v13, v13, v1",
+            "vror.vi v13, v13, 32",
+            "vadd.vv v9, v9, v13",
+            "vxor.vv v5, v5, v9",
+            "vror.vi v5, v5, 24",
+            "vadd.vv v1, v1, v5",
+            "vadd.vv v1, v1, v30",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v13, v13, v1",
+            "vror.vi v13, v13, 16",
+            "vadd.vv v9, v9, v13",
+            "vxor.vv v5, v5, v9",
+            "vror.vi v5, v5, 63",
 
-            "vxor.vv v24, v24, v0",
-            "vsrl.vx v21, v24, {sh16}",
-            "vsll.vx v24, v24, {sh48}",
-            "vor.vv v24, v24, v21",
-            "vadd.vv v16, v16, v24",
-            "vxor.vv v8, v8, v16",
-            "vsrl.vx v21, v8, {sh63}",
-            "vsll.vx v8, v8, {sh1}",
-            "vor.vv v8, v8, v21",
-
-            // --- Step 2: g(1, 5, 9, 13) -> Registers: v2, v10, v18, v26 ---
-            "ld {x_ptr}, 32({offsets_ptr})", // Pre-load Step 3 x_ptr
-            
-            "vadd.vv v2, v2, v10",
+            // --- Step 3: g(2, 6, 10, 14) ---
+            "ld {x_ptr}, 48({offsets_ptr})",
+            "vadd.vv v2, v2, v6",
             "vadd.vv v2, v2, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 2 y in background!
-            
-            "ld {y_ptr}, 40({offsets_ptr})", // Pre-load Step 3 y_ptr
-            
-            "vxor.vv v26, v26, v2",
-            "vsrl.vx v21, v26, {sh32}",
-            "vsll.vx v26, v26, {sh32}",
-            "vor.vv v26, v26, v21",
-            "vadd.vv v18, v18, v26",
-            "vxor.vv v10, v10, v18",
-            "vsrl.vx v21, v10, {sh24}",
-            "vsll.vx v10, v10, {sh40}",
-            "vor.vv v10, v10, v21",
-            
-            "vadd.vv v2, v2, v10",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 56({offsets_ptr})",
+            "vxor.vv v14, v14, v2",
+            "vror.vi v14, v14, 32",
+            "vadd.vv v10, v10, v14",
+            "vxor.vv v6, v6, v10",
+            "vror.vi v6, v6, 24",
+            "vadd.vv v2, v2, v6",
             "vadd.vv v2, v2, v30",
-            
-            "vle64.v v30, ({x_ptr})", // Trigger load of Step 3 x in background!
-            
-            "addi {x_ptr}, {v_ptr}, 448",
-            "vle64.v v28, ({x_ptr})", // Trigger load of Step 3 v14 in background!
-            
-            "vxor.vv v26, v26, v2",
-            "vsrl.vx v21, v26, {sh16}",
-            "vsll.vx v26, v26, {sh48}",
-            "vor.vv v26, v26, v21",
-            "vadd.vv v18, v18, v26",
-            "vxor.vv v10, v10, v18",
-            "vsrl.vx v21, v10, {sh63}",
-            "vsll.vx v10, v10, {sh1}",
-            "vor.vv v10, v10, v21",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v14, v14, v2",
+            "vror.vi v14, v14, 16",
+            "vadd.vv v10, v10, v14",
+            "vxor.vv v6, v6, v10",
+            "vror.vi v6, v6, 63",
 
-            // --- Step 3: g(2, 6, 10, 14) -> Registers: v4, v12, v20, v28 (uses v14) ---
-            "ld {x_ptr}, 48({offsets_ptr})", // Pre-load Step 4 x_ptr
-            
-            "vadd.vv v4, v4, v12",
-            "vadd.vv v4, v4, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 3 y in background!
-            
-            "ld {y_ptr}, 56({offsets_ptr})", // Pre-load Step 4 y_ptr
-            
-            "vxor.vv v28, v28, v4",
-            "vsrl.vx v21, v28, {sh32}",
-            "vsll.vx v28, v28, {sh32}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v20, v20, v28",
-            "vxor.vv v12, v12, v20",
-            "vsrl.vx v21, v12, {sh24}",
-            "vsll.vx v12, v12, {sh40}",
-            "vor.vv v12, v12, v21",
-            
-            "vadd.vv v4, v4, v12",
-            "vadd.vv v4, v4, v30",
-            
-            "vle64.v v30, ({x_ptr})", // Trigger load of Step 4 x in background!
-            
-            "vxor.vv v28, v28, v4",
-            "vsrl.vx v21, v28, {sh16}",
-            "vsll.vx v28, v28, {sh48}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v20, v20, v28",
-            
-            "addi {x_ptr}, {v_ptr}, 448",
-            "vse64.v v28, ({x_ptr})", // Save modified v14 to memory
-            
-            "addi {x_ptr}, {v_ptr}, 480",
-            "vle64.v v28, ({x_ptr})", // Trigger load of Step 4 v15 in background!
-            
-            "vxor.vv v12, v12, v20",
-            "vsrl.vx v21, v12, {sh63}",
-            "vsll.vx v12, v12, {sh1}",
-            "vor.vv v12, v12, v21",
+            // --- Step 4: g(3, 7, 11, 15) ---
+            "ld {x_ptr}, 64({offsets_ptr})",
+            "vadd.vv v3, v3, v7",
+            "vadd.vv v3, v3, v30",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 72({offsets_ptr})",
+            "vxor.vv v15, v15, v3",
+            "vror.vi v15, v15, 32",
+            "vadd.vv v11, v11, v15",
+            "vxor.vv v7, v7, v11",
+            "vror.vi v7, v7, 24",
+            "vadd.vv v3, v3, v7",
+            "vadd.vv v3, v3, v30",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v15, v15, v3",
+            "vror.vi v15, v15, 16",
+            "vadd.vv v11, v11, v15",
+            "vxor.vv v7, v7, v11",
+            "vror.vi v7, v7, 63",
 
-            // --- Step 4: g(3, 7, 11, 15) -> Registers: v6, v14, v22, v28 (uses v15) ---
-            "ld {x_ptr}, 64({offsets_ptr})", // Pre-load Step 5 x_ptr
-            
-            "vadd.vv v6, v6, v14",
-            "vadd.vv v6, v6, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 4 y in background!
-            
-            "ld {y_ptr}, 72({offsets_ptr})", // Pre-load Step 5 y_ptr
-            
-            "vxor.vv v28, v28, v6",
-            "vsrl.vx v21, v28, {sh32}",
-            "vsll.vx v28, v28, {sh32}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v22, v22, v28",
-            "vxor.vv v14, v14, v22",
-            "vsrl.vx v21, v14, {sh24}",
-            "vsll.vx v14, v14, {sh40}",
-            "vor.vv v14, v14, v21",
-
-            "vadd.vv v6, v6, v14",
-            "vadd.vv v6, v6, v30",
-
-            "vle64.v v30, ({x_ptr})", // Trigger load of Step 5 x in background!
-
-            "vxor.vv v28, v28, v6",
-            "vsrl.vx v21, v28, {sh16}",
-            "vsll.vx v28, v28, {sh48}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v22, v22, v28",
-            "vxor.vv v14, v14, v22",
-            "vsrl.vx v21, v14, {sh63}",
-            "vsll.vx v14, v14, {sh1}",
-            "vor.vv v14, v14, v21",
-
-            // --- Step 5: g(0, 5, 10, 15) -> Registers: v0, v10, v20, v28 (uses v15) ---
-            "ld {x_ptr}, 80({offsets_ptr})", // Pre-load Step 6 x_ptr
-            
-            "vadd.vv v0, v0, v10",
+            // --- Step 5: g(0, 5, 10, 15) ---
+            "ld {x_ptr}, 80({offsets_ptr})",
+            "vadd.vv v0, v0, v5",
             "vadd.vv v0, v0, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 5 y in background!
-            
-            "ld {y_ptr}, 88({offsets_ptr})", // Pre-load Step 6 y_ptr
-            
-            "vxor.vv v28, v28, v0",
-            "vsrl.vx v21, v28, {sh32}",
-            "vsll.vx v28, v28, {sh32}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v20, v20, v28",
-            "vxor.vv v10, v10, v20",
-            "vsrl.vx v21, v10, {sh24}",
-            "vsll.vx v10, v10, {sh40}",
-            "vor.vv v10, v10, v21",
-            
-            "vadd.vv v0, v0, v10",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 88({offsets_ptr})",
+            "vxor.vv v15, v15, v0",
+            "vror.vi v15, v15, 32",
+            "vadd.vv v10, v10, v15",
+            "vxor.vv v5, v5, v10",
+            "vror.vi v5, v5, 24",
+            "vadd.vv v0, v0, v5",
             "vadd.vv v0, v0, v30",
-            
-            "vle64.v v30, ({x_ptr})", // Trigger load of Step 6 x in background!
-            
-            "vxor.vv v28, v28, v0",
-            "vsrl.vx v21, v28, {sh16}",
-            "vsll.vx v28, v28, {sh48}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v20, v20, v28",
-            
-            "addi {x_ptr}, {v_ptr}, 480",
-            "vse64.v v28, ({x_ptr})", // Save modified v15 to memory
-            
-            "vxor.vv v10, v10, v20",
-            "vsrl.vx v21, v10, {sh63}",
-            "vsll.vx v10, v10, {sh1}",
-            "vor.vv v10, v10, v21",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v15, v15, v0",
+            "vror.vi v15, v15, 16",
+            "vadd.vv v10, v10, v15",
+            "vxor.vv v5, v5, v10",
+            "vror.vi v5, v5, 63",
 
-            // --- Step 6: g(1, 6, 11, 12) -> Registers: v2, v12, v22, v24 ---
-            "ld {x_ptr}, 96({offsets_ptr})", // Pre-load Step 7 x_ptr
-            
-            "vadd.vv v2, v2, v12",
+            // --- Step 6: g(1, 6, 11, 12) ---
+            "ld {x_ptr}, 96({offsets_ptr})",
+            "vadd.vv v1, v1, v6",
+            "vadd.vv v1, v1, v30",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 104({offsets_ptr})",
+            "vxor.vv v12, v12, v1",
+            "vror.vi v12, v12, 32",
+            "vadd.vv v11, v11, v12",
+            "vxor.vv v6, v6, v11",
+            "vror.vi v6, v6, 24",
+            "vadd.vv v1, v1, v6",
+            "vadd.vv v1, v1, v30",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v12, v12, v1",
+            "vror.vi v12, v12, 16",
+            "vadd.vv v11, v11, v12",
+            "vxor.vv v6, v6, v11",
+            "vror.vi v6, v6, 63",
+
+            // --- Step 7: g(2, 7, 8, 13) ---
+            "ld {x_ptr}, 112({offsets_ptr})",
+            "vadd.vv v2, v2, v7",
             "vadd.vv v2, v2, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 6 y in background!
-            
-            "ld {y_ptr}, 104({offsets_ptr})", // Pre-load Step 7 y_ptr
-            
-            "vxor.vv v24, v24, v2",
-            "vsrl.vx v21, v24, {sh32}",
-            "vsll.vx v24, v24, {sh32}",
-            "vor.vv v24, v24, v21",
-            "vadd.vv v22, v22, v24",
-            "vxor.vv v12, v12, v22",
-            "vsrl.vx v21, v12, {sh24}",
-            "vsll.vx v12, v12, {sh40}",
-            "vor.vv v12, v12, v21",
-            
-            "vadd.vv v2, v2, v12",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 120({offsets_ptr})",
+            "vxor.vv v13, v13, v2",
+            "vror.vi v13, v13, 32",
+            "vadd.vv v8, v8, v13",
+            "vxor.vv v7, v7, v8",
+            "vror.vi v7, v7, 24",
+            "vadd.vv v2, v2, v7",
             "vadd.vv v2, v2, v30",
-            
-            "vle64.v v30, ({x_ptr})", // Trigger load of Step 7 x in background!
-            
-            "vxor.vv v24, v24, v2",
-            "vsrl.vx v21, v24, {sh16}",
-            "vsll.vx v24, v24, {sh48}",
-            "vor.vv v24, v24, v21",
-            "vadd.vv v22, v22, v24",
-            "vxor.vv v12, v12, v22",
-            "vsrl.vx v21, v12, {sh63}",
-            "vsll.vx v12, v12, {sh1}",
-            "vor.vv v12, v12, v21",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v13, v13, v2",
+            "vror.vi v13, v13, 16",
+            "vadd.vv v8, v8, v13",
+            "vxor.vv v7, v7, v8",
+            "vror.vi v7, v7, 63",
 
-            // --- Step 7: g(2, 7, 8, 13) -> Registers: v4, v14, v16, v26 ---
-            "ld {x_ptr}, 112({offsets_ptr})", // Pre-load Step 8 x_ptr
-            
-            "vadd.vv v4, v4, v14",
-            "vadd.vv v4, v4, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 7 y in background!
-            
-            "ld {y_ptr}, 120({offsets_ptr})", // Pre-load Step 8 y_ptr
-            
-            "vxor.vv v26, v26, v4",
-            "vsrl.vx v21, v26, {sh32}",
-            "vsll.vx v26, v26, {sh32}",
-            "vor.vv v26, v26, v21",
-            "vadd.vv v16, v16, v26",
-            "vxor.vv v14, v14, v16",
-            "vsrl.vx v21, v14, {sh24}",
-            "vsll.vx v14, v14, {sh40}",
-            "vor.vv v14, v14, v21",
-            
-            "vadd.vv v4, v4, v14",
-            "vadd.vv v4, v4, v30",
-            
-            "vle64.v v30, ({x_ptr})", // Trigger load of Step 8 x in background!
-            
-            "addi {x_ptr}, {v_ptr}, 448",
-            "vle64.v v28, ({x_ptr})", // Trigger load of Step 8 v14 in background!
-            
-            "vxor.vv v26, v26, v4",
-            "vsrl.vx v21, v26, {sh16}",
-            "vsll.vx v26, v26, {sh48}",
-            "vor.vv v26, v26, v21",
-            "vadd.vv v16, v16, v26",
-            "vxor.vv v14, v14, v16",
-            "vsrl.vx v21, v14, {sh63}",
-            "vsll.vx v14, v14, {sh1}",
-            "vor.vv v14, v14, v21",
+            // --- Step 8: g(3, 4, 9, 14) ---
+            "addi {offsets_ptr}, {offsets_ptr}, 128",
+            "ld {x_ptr}, 0({offsets_ptr})",
+            "vadd.vv v3, v3, v4",
+            "vadd.vv v3, v3, v30",
+            "vle64.v v30, ({y_ptr})",
+            "ld {y_ptr}, 8({offsets_ptr})",
+            "vxor.vv v14, v14, v3",
+            "vror.vi v14, v14, 32",
+            "vadd.vv v9, v9, v14",
+            "vxor.vv v4, v4, v9",
+            "vror.vi v4, v4, 24",
+            "vadd.vv v3, v3, v4",
+            "vadd.vv v3, v3, v30",
+            "vle64.v v30, ({x_ptr})",
+            "vxor.vv v14, v14, v3",
+            "vror.vi v14, v14, 16",
+            "vadd.vv v9, v9, v14",
+            "vxor.vv v4, v4, v9",
+            "vror.vi v4, v4, 63",
 
-            // --- Step 8: g(3, 4, 9, 14) -> Registers: v6, v8, v18, v28 (uses v14) ---
-            "addi {offsets_ptr}, {offsets_ptr}, 128", // Move to next round offsets
-            "ld {x_ptr}, 0({offsets_ptr})", // Pre-load Round N+1 Step 1 x_ptr
-            
-            "vadd.vv v6, v6, v8",
-            "vadd.vv v6, v6, v30",
-            
-            "vle64.v v30, ({y_ptr})", // Trigger load of Step 8 y in background!
-            
-            "ld {y_ptr}, 8({offsets_ptr})", // Pre-load Round N+1 Step 1 y_ptr
-            
-            "vxor.vv v28, v28, v6",
-            "vsrl.vx v21, v28, {sh32}",
-            "vsll.vx v28, v28, {sh32}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v18, v18, v28",
-            "vxor.vv v8, v8, v18",
-            "vsrl.vx v21, v8, {sh24}",
-            "vsll.vx v8, v8, {sh40}",
-            "vor.vv v8, v8, v21",
-            
-            "vadd.vv v6, v6, v8",
-            "vadd.vv v6, v6, v30",
-            
-            "vle64.v v30, ({x_ptr})", // Trigger load of Round N+1 Step 1 x in background!
-            
-            "vxor.vv v28, v28, v6",
-            "vsrl.vx v21, v28, {sh16}",
-            "vsll.vx v28, v28, {sh48}",
-            "vor.vv v28, v28, v21",
-            "vadd.vv v18, v18, v28",
-            
-            "addi {x_ptr}, {v_ptr}, 448",
-            "vse64.v v28, ({x_ptr})", // Save modified v14 to memory
-            
-            "vxor.vv v8, v8, v18",
-            "vsrl.vx v21, v8, {sh63}",
-            "vsll.vx v8, v8, {sh1}",
-            "vor.vv v8, v8, v21",
-            
             // --- Loop Control ---
             "addi {round_idx}, {round_idx}, 1",
             "li {max_rounds}, 12",
             "blt {round_idx}, {max_rounds}, 2b",
 
-            // --- Write Back permanent registers v0..v13 (14 state variables) ---
+            // --- Write Back all 16 state variables v0..v15 ---
             "vse64.v v0, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vse64.v v1, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v2, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
+            "vse64.v v3, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v4, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vse64.v v5, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v6, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
+            "vse64.v v7, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v8, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vse64.v v9, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v10, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
+            "vse64.v v11, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v12, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, 32",
+            "vse64.v v13, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
             "vse64.v v14, ({v_ptr})",
             "addi {v_ptr}, {v_ptr}, 32",
-            "vse64.v v16, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vse64.v v18, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vse64.v v20, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vse64.v v22, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vse64.v v24, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, 32",
-            "vse64.v v26, ({v_ptr})",
-            "addi {v_ptr}, {v_ptr}, -416", // Restore v_ptr to base (13 increments of 32 = 416)
+            "vse64.v v15, ({v_ptr})",
+            "addi {v_ptr}, {v_ptr}, -480",
 
             v_ptr = inout(reg) v_ptr => _,
             offsets_ptr = inout(reg) offsets_ptr => _,
@@ -757,21 +603,11 @@ pub fn compress_four_blocks(
             max_rounds = out(reg) _,
             x_ptr = out(reg) _,
             y_ptr = out(reg) _,
-            sh32 = in(reg) 32usize,
-            sh24 = in(reg) 24usize,
-            sh40 = in(reg) 40usize,
-            sh16 = in(reg) 16usize,
-            sh48 = in(reg) 48usize,
-            sh63 = in(reg) 63usize,
-            sh1 = in(reg) 1usize,
             out("v0") _, out("v1") _, out("v2") _, out("v3") _,
             out("v4") _, out("v5") _, out("v6") _, out("v7") _,
             out("v8") _, out("v9") _, out("v10") _, out("v11") _,
             out("v12") _, out("v13") _, out("v14") _, out("v15") _,
-            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-            out("v20") _, out("v21") _, out("v22") _, out("v23") _,
-            out("v24") _, out("v25") _, out("v26") _, out("v27") _,
-            out("v28") _, out("v29") _, out("v30") _, out("v31") _,
+            out("v30") _,
         );
     }
 
@@ -893,6 +729,463 @@ pub fn hash64_batch_4(inputs: [&[u8]; 4]) -> [[u8; 64]; 4] {
         }
     }
     out
+}
+
+/// Returns `true` when the executing RISC-V hart has `VLEN >= 1024` (`vlenb >= 128`),
+/// which is true on SpacemiT K3 Cluster 2 & 3 (A100 cores, Harts 8..15).
+#[inline(always)]
+pub fn has_vlen_1024() -> bool {
+    #[cfg(all(target_arch = "riscv64", feature = "simd"))]
+    {
+        let vlenb: usize;
+        // SAFETY: Reading `vlenb` CSR is side-effect-free on RVV 1.0 harts with VS enabled.
+        unsafe {
+            core::arch::asm!("csrr {}, vlenb", out(reg) vlenb, options(nomem, nostack, preserves_flags));
+        }
+        vlenb >= 128
+    }
+    #[cfg(not(all(target_arch = "riscv64", feature = "simd")))]
+    {
+        false
+    }
+}
+
+/// 16-way lock-step parallel Blake2b compression.
+/// On SpacemiT K3 A100 cores (`VLEN=1024`, `vlenb=128`), a single `LMUL=1` vector register
+/// holds `16 x 64-bit` lanes (`v0..v15`), compressing 16 independent 128-byte blocks
+/// simultaneously with `Zvkb` `vror.vi` rotations and zero register spills in the exact
+/// same instruction count as `compress_four_blocks`.
+/// On `VLEN=256` cores or host targets, transparently executes 4 calls to `compress_four_blocks`.
+pub fn compress_16_blocks(
+    h: &mut [&mut [u64; 8]; 16],
+    blocks: &[&[u8; 128]; 16],
+    t: &[u128; 16],
+    last: &[bool; 16],
+) {
+    #[cfg(all(target_arch = "riscv64", feature = "simd"))]
+    if has_vlen_1024() {
+        #[repr(align(64))]
+        struct AlignedBuffer16([u64; 16 * 16]);
+
+        let mut v_buf = AlignedBuffer16([0u64; 16 * 16]);
+        let v = &mut v_buf.0;
+        for j in 0..16 {
+            for i in 0..8 {
+                v[i * 16 + j] = h[j][i];
+            }
+            v[8 * 16 + j] = IV[0];
+            v[9 * 16 + j] = IV[1];
+            v[10 * 16 + j] = IV[2];
+            v[11 * 16 + j] = IV[3];
+            v[12 * 16 + j] = IV[4] ^ (t[j] as u64);
+            v[13 * 16 + j] = IV[5] ^ ((t[j] >> 64) as u64);
+            v[14 * 16 + j] = if last[j] { !IV[6] } else { IV[6] };
+            v[15 * 16 + j] = IV[7];
+        }
+
+        let mut m_buf = AlignedBuffer16([0u64; 16 * 16]);
+        let m = &mut m_buf.0;
+        for j in 0..16 {
+            for i in 0..16 {
+                let off = i * 8;
+                m[i * 16 + j] = u64::from_le_bytes(blocks[j][off..off + 8].try_into().unwrap());
+            }
+        }
+
+        let mut msg_ptrs = [0u64; 13 * 16];
+        let m_ptr_val = m.as_ptr() as u64;
+        for round in 0..12 {
+            let s = &SIGMA[round];
+            for i in 0..16 {
+                msg_ptrs[round * 16 + i] = m_ptr_val + (s[i] * 128) as u64;
+            }
+        }
+        for i in 0..16 {
+            msg_ptrs[12 * 16 + i] = m_ptr_val;
+        }
+
+        // SAFETY: `has_vlen_1024()` verified `vlenb >= 128`, so `vsetivli zero, 16, e64, m1`
+        // configures `VL = 16` (`16 * 8 = 128` bytes per `LMUL=1` vector register `v0..v15`).
+        // All `v_ptr` and `msg_ptrs` accesses are in-bounds of `AlignedBuffer16`.
+        unsafe {
+            let offsets_ptr = msg_ptrs.as_ptr();
+            let v_ptr = v.as_mut_ptr();
+
+            asm!(
+                "vsetivli zero, 16, e64, m1",
+
+                "vle64.v v0, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v1, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v2, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v3, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v4, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v5, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v6, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v7, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v8, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v9, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v10, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v11, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v12, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v13, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v14, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vle64.v v15, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, -1920",
+
+                "ld {x_ptr}, 0({offsets_ptr})",
+                "ld {y_ptr}, 8({offsets_ptr})",
+                "vle64.v v30, ({x_ptr})",
+
+                "li {round_idx}, 0",
+
+                "2:",
+                // --- Step 1: g(0, 4, 8, 12) ---
+                "ld {x_ptr}, 16({offsets_ptr})",
+                "vadd.vv v0, v0, v4",
+                "vadd.vv v0, v0, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 24({offsets_ptr})",
+                "vxor.vv v12, v12, v0",
+                "vror.vi v12, v12, 32",
+                "vadd.vv v8, v8, v12",
+                "vxor.vv v4, v4, v8",
+                "vror.vi v4, v4, 24",
+                "vadd.vv v0, v0, v4",
+                "vadd.vv v0, v0, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v12, v12, v0",
+                "vror.vi v12, v12, 16",
+                "vadd.vv v8, v8, v12",
+                "vxor.vv v4, v4, v8",
+                "vror.vi v4, v4, 63",
+
+                // --- Step 2: g(1, 5, 9, 13) ---
+                "ld {x_ptr}, 32({offsets_ptr})",
+                "vadd.vv v1, v1, v5",
+                "vadd.vv v1, v1, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 40({offsets_ptr})",
+                "vxor.vv v13, v13, v1",
+                "vror.vi v13, v13, 32",
+                "vadd.vv v9, v9, v13",
+                "vxor.vv v5, v5, v9",
+                "vror.vi v5, v5, 24",
+                "vadd.vv v1, v1, v5",
+                "vadd.vv v1, v1, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v13, v13, v1",
+                "vror.vi v13, v13, 16",
+                "vadd.vv v9, v9, v13",
+                "vxor.vv v5, v5, v9",
+                "vror.vi v5, v5, 63",
+
+                // --- Step 3: g(2, 6, 10, 14) ---
+                "ld {x_ptr}, 48({offsets_ptr})",
+                "vadd.vv v2, v2, v6",
+                "vadd.vv v2, v2, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 56({offsets_ptr})",
+                "vxor.vv v14, v14, v2",
+                "vror.vi v14, v14, 32",
+                "vadd.vv v10, v10, v14",
+                "vxor.vv v6, v6, v10",
+                "vror.vi v6, v6, 24",
+                "vadd.vv v2, v2, v6",
+                "vadd.vv v2, v2, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v14, v14, v2",
+                "vror.vi v14, v14, 16",
+                "vadd.vv v10, v10, v14",
+                "vxor.vv v6, v6, v10",
+                "vror.vi v6, v6, 63",
+
+                // --- Step 4: g(3, 7, 11, 15) ---
+                "ld {x_ptr}, 64({offsets_ptr})",
+                "vadd.vv v3, v3, v7",
+                "vadd.vv v3, v3, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 72({offsets_ptr})",
+                "vxor.vv v15, v15, v3",
+                "vror.vi v15, v15, 32",
+                "vadd.vv v11, v11, v15",
+                "vxor.vv v7, v7, v11",
+                "vror.vi v7, v7, 24",
+                "vadd.vv v3, v3, v7",
+                "vadd.vv v3, v3, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v15, v15, v3",
+                "vror.vi v15, v15, 16",
+                "vadd.vv v11, v11, v15",
+                "vxor.vv v7, v7, v11",
+                "vror.vi v7, v7, 63",
+
+                // --- Step 5: g(0, 5, 10, 15) ---
+                "ld {x_ptr}, 80({offsets_ptr})",
+                "vadd.vv v0, v0, v5",
+                "vadd.vv v0, v0, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 88({offsets_ptr})",
+                "vxor.vv v15, v15, v0",
+                "vror.vi v15, v15, 32",
+                "vadd.vv v10, v10, v15",
+                "vxor.vv v5, v5, v10",
+                "vror.vi v5, v5, 24",
+                "vadd.vv v0, v0, v5",
+                "vadd.vv v0, v0, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v15, v15, v0",
+                "vror.vi v15, v15, 16",
+                "vadd.vv v10, v10, v15",
+                "vxor.vv v5, v5, v10",
+                "vror.vi v5, v5, 63",
+
+                // --- Step 6: g(1, 6, 11, 12) ---
+                "ld {x_ptr}, 96({offsets_ptr})",
+                "vadd.vv v1, v1, v6",
+                "vadd.vv v1, v1, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 104({offsets_ptr})",
+                "vxor.vv v12, v12, v1",
+                "vror.vi v12, v12, 32",
+                "vadd.vv v11, v11, v12",
+                "vxor.vv v6, v6, v11",
+                "vror.vi v6, v6, 24",
+                "vadd.vv v1, v1, v6",
+                "vadd.vv v1, v1, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v12, v12, v1",
+                "vror.vi v12, v12, 16",
+                "vadd.vv v11, v11, v12",
+                "vxor.vv v6, v6, v11",
+                "vror.vi v6, v6, 63",
+
+                // --- Step 7: g(2, 7, 8, 13) ---
+                "ld {x_ptr}, 112({offsets_ptr})",
+                "vadd.vv v2, v2, v7",
+                "vadd.vv v2, v2, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 120({offsets_ptr})",
+                "vxor.vv v13, v13, v2",
+                "vror.vi v13, v13, 32",
+                "vadd.vv v8, v8, v13",
+                "vxor.vv v7, v7, v8",
+                "vror.vi v7, v7, 24",
+                "vadd.vv v2, v2, v7",
+                "vadd.vv v2, v2, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v13, v13, v2",
+                "vror.vi v13, v13, 16",
+                "vadd.vv v8, v8, v13",
+                "vxor.vv v7, v7, v8",
+                "vror.vi v7, v7, 63",
+
+                // --- Step 8: g(3, 4, 9, 14) ---
+                "addi {offsets_ptr}, {offsets_ptr}, 128",
+                "ld {x_ptr}, 0({offsets_ptr})",
+                "vadd.vv v3, v3, v4",
+                "vadd.vv v3, v3, v30",
+                "vle64.v v30, ({y_ptr})",
+                "ld {y_ptr}, 8({offsets_ptr})",
+                "vxor.vv v14, v14, v3",
+                "vror.vi v14, v14, 32",
+                "vadd.vv v9, v9, v14",
+                "vxor.vv v4, v4, v9",
+                "vror.vi v4, v4, 24",
+                "vadd.vv v3, v3, v4",
+                "vadd.vv v3, v3, v30",
+                "vle64.v v30, ({x_ptr})",
+                "vxor.vv v14, v14, v3",
+                "vror.vi v14, v14, 16",
+                "vadd.vv v9, v9, v14",
+                "vxor.vv v4, v4, v9",
+                "vror.vi v4, v4, 63",
+
+                "addi {round_idx}, {round_idx}, 1",
+                "li {max_rounds}, 12",
+                "blt {round_idx}, {max_rounds}, 2b",
+
+                "vse64.v v0, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v1, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v2, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v3, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v4, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v5, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v6, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v7, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v8, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v9, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v10, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v11, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v12, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v13, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v14, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, 128",
+                "vse64.v v15, ({v_ptr})",
+                "addi {v_ptr}, {v_ptr}, -1920",
+
+                v_ptr = inout(reg) v_ptr => _,
+                offsets_ptr = inout(reg) offsets_ptr => _,
+                round_idx = out(reg) _,
+                max_rounds = out(reg) _,
+                x_ptr = out(reg) _,
+                y_ptr = out(reg) _,
+                out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+                out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+                out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+                out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+                out("v30") _,
+            );
+        }
+
+        for j in 0..16 {
+            for i in 0..8 {
+                h[j][i] ^= v[i * 16 + j] ^ v[(i + 8) * 16 + j];
+            }
+        }
+        return;
+    }
+
+    for chunk in 0..4 {
+        let base = chunk * 4;
+        let [h0, h1, h2, h3] = &mut h[base..base + 4] else { unreachable!() };
+        let mut h_sub = [&mut **h0, &mut **h1, &mut **h2, &mut **h3];
+        let b_sub = [blocks[base], blocks[base + 1], blocks[base + 2], blocks[base + 3]];
+        let t_sub = [t[base], t[base + 1], t[base + 2], t[base + 3]];
+        let l_sub = [last[base], last[base + 1], last[base + 2], last[base + 3]];
+        compress_four_blocks(&mut h_sub, &b_sub, &t_sub, &l_sub);
+    }
+}
+
+pub fn hash_batch_16(inputs: [&[u8]; 16]) -> [[u8; 32]; 16] {
+    let mut h = [IV; 16];
+    for i in 0..16 {
+        h[i][0] ^= 0x01010020;
+    }
+
+    hash_batch_16_impl(&mut h, inputs);
+
+    let mut out = [[0u8; 32]; 16];
+    for j in 0..16 {
+        for i in 0..4 {
+            let word = h[j][i];
+            out[j][i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+    out
+}
+
+pub fn hash64_batch_16(inputs: [&[u8]; 16]) -> [[u8; 64]; 16] {
+    let mut h = [IV; 16];
+    for i in 0..16 {
+        h[i][0] ^= 0x01010040;
+    }
+
+    hash_batch_16_impl(&mut h, inputs);
+
+    let mut out = [[0u8; 64]; 16];
+    for j in 0..16 {
+        for i in 0..8 {
+            let word = h[j][i];
+            out[j][i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+    out
+}
+
+fn hash_batch_16_impl(h: &mut [[u64; 8]; 16], inputs: [&[u8]; 16]) {
+    let len0 = inputs[0].len();
+    let all_same_len = inputs.iter().all(|inp| inp.len() == len0);
+    if all_same_len {
+        let mut offset = 0;
+        let mut t = [0u128; 16];
+        let mut remaining = len0;
+
+        let [
+            h0, h1, h2, h3, h4, h5, h6, h7,
+            h8, h9, h10, h11, h12, h13, h14, h15,
+        ] = h;
+        let mut h_refs = [
+            h0, h1, h2, h3, h4, h5, h6, h7,
+            h8, h9, h10, h11, h12, h13, h14, h15,
+        ];
+
+        while remaining > 128 {
+            let mut blocks = [[0u8; 128]; 16];
+            for j in 0..16 {
+                blocks[j].copy_from_slice(&inputs[j][offset..offset + 128]);
+                t[j] += 128;
+            }
+            let blocks_refs = [
+                &blocks[0], &blocks[1], &blocks[2], &blocks[3],
+                &blocks[4], &blocks[5], &blocks[6], &blocks[7],
+                &blocks[8], &blocks[9], &blocks[10], &blocks[11],
+                &blocks[12], &blocks[13], &blocks[14], &blocks[15],
+            ];
+            let last = [false; 16];
+            compress_16_blocks(&mut h_refs, &blocks_refs, &t, &last);
+            offset += 128;
+            remaining -= 128;
+        }
+
+        let mut blocks = [[0u8; 128]; 16];
+        for j in 0..16 {
+            blocks[j][..remaining].copy_from_slice(&inputs[j][offset..offset + remaining]);
+            t[j] += remaining as u128;
+        }
+        let blocks_refs = [
+            &blocks[0], &blocks[1], &blocks[2], &blocks[3],
+            &blocks[4], &blocks[5], &blocks[6], &blocks[7],
+            &blocks[8], &blocks[9], &blocks[10], &blocks[11],
+            &blocks[12], &blocks[13], &blocks[14], &blocks[15],
+        ];
+        let last = [true; 16];
+        compress_16_blocks(&mut h_refs, &blocks_refs, &t, &last);
+    } else {
+        for j in 0..16 {
+            let outlen = ((h[j][0] ^ IV[0]) & 0xff) as usize;
+            let mut hasher = Blake2bHasher::new(outlen);
+            hasher.update(inputs[j]);
+            let full = hasher.finalize();
+            if h[j][0] & 0x40 != 0 {
+                for i in 0..8 {
+                    h[j][i] = u64::from_le_bytes(full[i * 8..(i + 1) * 8].try_into().unwrap());
+                }
+            } else {
+                for i in 0..4 {
+                    h[j][i] = u64::from_le_bytes(full[i * 8..(i + 1) * 8].try_into().unwrap());
+                }
+            }
+        }
+    }
 }
 
 /// Diagnostic for the 4-way kernel: returns (lane mismatch mask, lane-0 scalar result,
@@ -1110,8 +1403,30 @@ mod tests {
     }
 
     #[test]
+    fn test_hash64_batch_16() {
+        let mut payloads = [[0u8; 96]; 16];
+        for i in 0..16 {
+            for b in 0..96 {
+                payloads[i][b] = ((i * 37 + b * 13 + 5) & 0xff) as u8;
+            }
+        }
+        let refs = [
+            &payloads[0][..], &payloads[1][..], &payloads[2][..], &payloads[3][..],
+            &payloads[4][..], &payloads[5][..], &payloads[6][..], &payloads[7][..],
+            &payloads[8][..], &payloads[9][..], &payloads[10][..], &payloads[11][..],
+            &payloads[12][..], &payloads[13][..], &payloads[14][..], &payloads[15][..],
+        ];
+        let got64 = hash64_batch_16(refs);
+        let got32 = hash_batch_16(refs);
+        for i in 0..16 {
+            assert_eq!(got64[i], hash64(refs[i]));
+            assert_eq!(got32[i], hash(refs[i]));
+        }
+    }
+
+    #[test]
     fn test_blake2b_zeros() {
-        let mut data = [0u8; 36]; // 32 byte seed + 4 byte index
+        let data = [0u8; 36]; // 32 byte seed + 4 byte index
         let h32 = hash(&data);
         let h64 = hash64(&data);
         

@@ -256,7 +256,15 @@ const EMPTY_HART_PUBKEY_CACHE: HartPubkeyCache = HartPubkeyCache {
     next_way: [0; PUBKEY_CACHE_SETS],
 };
 
-static PUBKEY_POINT_CACHE: [TinyLock<HartPubkeyCache>; 8] = [
+static PUBKEY_POINT_CACHE: [TinyLock<HartPubkeyCache>; 16] = [
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
+    TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
     TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
     TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
     TinyLock::new(EMPTY_HART_PUBKEY_CACHE),
@@ -273,16 +281,16 @@ fn pubkey_cache_shard(bytes: &[u8; 32]) -> usize {
     {
         let tp: usize;
         // SAFETY: Reading the RISC-V thread pointer register `tp` is side-effect-free;
-        // each bare-metal hart sets `tp` to its `hart_id` (0..7) at boot.
+        // each bare-metal hart sets `tp` to its `hart_id` (0..15) at boot.
         unsafe {
             core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, preserves_flags));
         }
         let _ = bytes;
-        tp & 7
+        tp & 15
     }
     #[cfg(not(target_arch = "riscv64"))]
     {
-        (bytes[0] as usize) & 7
+        (bytes[0] as usize) & 15
     }
 }
 
@@ -1776,6 +1784,129 @@ pub fn verify_batch_4(
     } else {
         // Safe sequential fallback
         for i in 0..4 {
+            results[i] = verify(public_keys[i], messages[i], signatures[i]);
+        }
+    }
+
+    results
+}
+
+/// 16-way batched Ed25519 signature verification designed for SpacemiT K3 Cluster 2 & 3
+/// A100 cores (`VLEN=1024`), computing all 16 `k = Blake2b-512(R || A || M)` challenges in a
+/// single `VLEN=1024` `blake2b::hash64_batch_16` vector pass.
+pub fn verify_batch_16(
+    public_keys: [&[u8; 32]; 16],
+    messages: [&[u8]; 16],
+    signatures: [&[u8; 64]; 16],
+) -> [bool; 16] {
+    let mut results = [false; 16];
+    let len0 = messages[0].len();
+    let all_match = messages.iter().all(|m| m.len() == len0);
+
+    if all_match && len0 <= 128 {
+        let mut combs: [Option<&'static [[PrecomputedPoint; 8]; 16]>; 16] = [None; 16];
+        let mut fallback_tables: [Option<[PrecomputedPoint; 8]>; 16] = [None; 16];
+
+        for i in 0..16 {
+            let mut reused = false;
+            for j in 0..i {
+                if public_keys[i] == public_keys[j] {
+                    combs[i] = combs[j];
+                    fallback_tables[i] = fallback_tables[j];
+                    reused = true;
+                    break;
+                }
+            }
+            if reused {
+                continue;
+            }
+            if let Some(c) = Point::get_or_create_comb(public_keys[i]) {
+                combs[i] = Some(c);
+            } else if let Some(t) = Point::get_or_create_neg_table(public_keys[i]) {
+                fallback_tables[i] = Some(t);
+            } else {
+                for k in 0..16 {
+                    results[k] = verify(public_keys[k], messages[k], signatures[k]);
+                }
+                return results;
+            }
+        }
+
+        let mut payloads = [[0u8; 64 + 128]; 16];
+        for i in 0..16 {
+            payloads[i][0..32].copy_from_slice(&signatures[i][..32]);
+            payloads[i][32..64].copy_from_slice(public_keys[i]);
+            payloads[i][64..64 + len0].copy_from_slice(messages[i]);
+        }
+
+        let payload_refs: [&[u8]; 16] = [
+            &payloads[0][..64 + len0],
+            &payloads[1][..64 + len0],
+            &payloads[2][..64 + len0],
+            &payloads[3][..64 + len0],
+            &payloads[4][..64 + len0],
+            &payloads[5][..64 + len0],
+            &payloads[6][..64 + len0],
+            &payloads[7][..64 + len0],
+            &payloads[8][..64 + len0],
+            &payloads[9][..64 + len0],
+            &payloads[10][..64 + len0],
+            &payloads[11][..64 + len0],
+            &payloads[12][..64 + len0],
+            &payloads[13][..64 + len0],
+            &payloads[14][..64 + len0],
+            &payloads[15][..64 + len0],
+        ];
+
+        let k_hashes = blake2b::hash64_batch_16(payload_refs);
+
+        let mut sb_minus_ka = [ProjectivePoint::IDENTITY; 16];
+        for i in 0..16 {
+            let k_bytes = sc_reduce(&k_hashes[i]);
+            let mut s_le = [0u8; 32];
+            s_le.copy_from_slice(&signatures[i][32..]);
+            if (s_le[31] & 0xE0) != 0 {
+                s_le = Scalar::from_bytes_wide_32(&s_le).to_bytes();
+            }
+
+            sb_minus_ka[i] = if let Some(c) = combs[i] {
+                Point::double_scalar_mul_comb(&s_le, c, &k_bytes)
+            } else {
+                Point::double_scalar_mul_base_and_point_with_table(
+                    &s_le,
+                    fallback_tables[i].as_ref().unwrap(),
+                    &k_bytes,
+                )
+            };
+        }
+
+        let z_invs_0 = FieldElement::batch_invert_8([
+            &sb_minus_ka[0].z,
+            &sb_minus_ka[1].z,
+            &sb_minus_ka[2].z,
+            &sb_minus_ka[3].z,
+            &sb_minus_ka[4].z,
+            &sb_minus_ka[5].z,
+            &sb_minus_ka[6].z,
+            &sb_minus_ka[7].z,
+        ]);
+        let z_invs_1 = FieldElement::batch_invert_8([
+            &sb_minus_ka[8].z,
+            &sb_minus_ka[9].z,
+            &sb_minus_ka[10].z,
+            &sb_minus_ka[11].z,
+            &sb_minus_ka[12].z,
+            &sb_minus_ka[13].z,
+            &sb_minus_ka[14].z,
+            &sb_minus_ka[15].z,
+        ]);
+
+        for i in 0..8 {
+            results[i] = sb_minus_ka[i].to_bytes_with_z_inv(&z_invs_0[i]) == signatures[i][..32];
+            results[i + 8] = sb_minus_ka[i + 8].to_bytes_with_z_inv(&z_invs_1[i]) == signatures[i + 8][..32];
+        }
+    } else {
+        for i in 0..16 {
             results[i] = verify(public_keys[i], messages[i], signatures[i]);
         }
     }

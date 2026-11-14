@@ -86,7 +86,7 @@ impl BtreeConfirmationHeightStore {
                 } else {
                     let mut k = [0u8; KEY_SIZE];
                     k[0] = Self::TABLE_ID;
-                    k[1] = (i as u8) << 4;
+                    k[1] = (i as u8) << 2;
                     k
                 };
                 let mut it = db.iter(seek_key);

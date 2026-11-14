@@ -264,7 +264,7 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
     if !is_interrupt && (cause == 5 || cause == 7) {
         let sepc = csrr!("sepc");
         let stval = csrr!("stval");
-        if stval == 0 && (0x1100_0000..0x1140_0000).contains(&sepc) && (sepc & 1) == 0 {
+        if stval == 0 && (0x1_0400_0000usize..0x1_0800_0000usize).contains(&sepc) && (sepc & 1) == 0 {
             let lo = unsafe { core::ptr::read_volatile(sepc as *const u16) } as u32;
             let hi = unsafe { core::ptr::read_volatile((sepc + 2) as *const u16) } as u32;
             if (lo | (hi << 16)) == 0x0100_000f {

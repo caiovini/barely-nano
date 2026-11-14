@@ -248,8 +248,8 @@ fn parse_mac_str(s: &str) -> Option<[u8; 6]> {
     }
 }
 
-/// Default RAM address where `boot.cmd` fatloads `config.toml` (`0x10F00000`, 1 MB below kernel `_start`).
-const CONFIG_RAM_ADDR: usize = 0x10F0_0000;
+/// Default RAM address where `boot.cmd` fatloads `config.toml` (`0x103F00000`, 1 MB below kernel `_start`).
+const CONFIG_RAM_ADDR: usize = 0x1_03F0_0000;
 const CONFIG_RAM_MAX_LEN: usize = 64 * 1024;
 
 /// Reads `config.toml` fatloaded into RAM by U-Boot (`0x10F00000`), or falls back
@@ -303,35 +303,9 @@ fn load_config_toml_str() -> &'static str {
     include_str!("../../config.toml")
 }
 
-fn scan_for_api_sig() -> Option<usize> {
-    let start_addr = 0x7b000000_usize;
-    let end_addr = 0x7f000000_usize;
-    let magic = b"UBootAPI";
-
-    // We scan in 8-byte steps as structures are 8-byte aligned in RAM
-    for addr in (start_addr..end_addr).step_by(8) {
-        let ptr = addr as *const u8;
-        unsafe {
-            let mut matched = true;
-            for i in 0..8 {
-                if core::ptr::read_volatile(ptr.add(i)) != magic[i] {
-                    matched = false;
-                    break;
-                }
-            }
-            if matched {
-                if kernel_common::uboot::validate_api(addr) {
-                    return Some(addr);
-                }
-            }
-        }
-    }
-    None
-}
-
 #[inline]
 pub fn clean_cache_range(addr: usize, len: usize) {
-    let block_size = 64; // SpacemiT K1 / X60 cache line size is 64 bytes
+    let block_size = 64; // SpacemiT K3 (X100 / A100) cache line size is 64 bytes
     let start = addr & !(block_size - 1);
     let end = (addr + len + block_size - 1) & !(block_size - 1);
     let mut current = start;
@@ -377,7 +351,7 @@ pub fn invalidate_cache_range(addr: usize, len: usize) {
 
 
 #[no_mangle]
-pub static mut SECONDARY_HART_WAKE: [u32; 8] = [0; 8];
+pub static mut SECONDARY_HART_WAKE: [u32; 16] = [0; 16];
 
 #[no_mangle]
 pub extern "C" fn rust_main(
@@ -411,13 +385,6 @@ pub extern "C" fn rust_main(
 
         kernel_common::uart::blind_write(b'D'); // Done waiting
 
-
-        // NOTE: We intentionally do NOT call invalidate_cache_range(bss) here.
-        // cbo.inval requires menvcfg.CBIE to be set by M-mode. If OpenSBI doesn't
-        // enable this for secondary harts on this SoC, the instruction traps silently.
-        // The HART_DISPATCH_READY SeqCst barrier + Hart 1's clean_cache_range is
-        // sufficient to guarantee BSS visibility across clusters.
-
         // secondary_hart_main grabs node+exec from globals AFTER trap::init().
         secondary_hart_main(hart_id);
     }
@@ -439,8 +406,6 @@ pub extern "C" fn rust_main(
         kernel_common::uart::print(b"\r\n");
 
         // We are the first hart to boot. We MUST zero the BSS section!
-        // If we don't, all spinlocks and Option types will have random garbage from RAM,
-        // causing infinite spins and watchdog resets!
         extern "C" {
             static mut _bss_start: u8;
             static mut _bss_end: u8;
@@ -453,8 +418,6 @@ pub extern "C" fn rust_main(
             clean_cache_range(bss_start as usize, len);
         }
 
-        // Signal that BSS is ready — any hart that erroneously enters the boot
-        // path (e.g. wrong hart_id delivered by OpenSBI) will not spin forever.
         BOOT_COMPLETE.store(true, Ordering::SeqCst);
 
         // Now that BSS is zeroed, we can safely write to UBOOT_JT (which lives in BSS)
@@ -462,16 +425,12 @@ pub extern "C" fn rust_main(
             kernel_common::uboot::init(jt_ptr);
         }
     } else {
-        // Secondary harts must wait for the boot hart to finish zeroing BSS and setting up locks.
-        // We can't spin on a BSS variable here, but secondary harts shouldn't reach here
-        // until the boot hart wakes them up via SBI anyway.
-        // Just in case U-Boot woke them up, spin.
         while !BOOT_COMPLETE.load(Ordering::SeqCst) {
             core::hint::spin_loop();
         }
     }
 
-    if hart_id >= 8 {
+    if hart_id >= 16 {
         let _guard = uart::UART_LOCK.lock();
         uart::print_no_lock(b"[entry] ERROR: Invalid Hart ID\n");
         loop {}
@@ -480,83 +439,19 @@ pub extern "C" fn rust_main(
     {
         let _guard = uart::UART_LOCK.lock();
         uart::print_no_lock(b"[entry] Hart ");
-        uart::putchar_no_lock(b'0' + hart_id as u8);
+        uart::print_usize_no_lock(hart_id);
         uart::print_no_lock(b" entered rust_main\n");
     }
 
     kernel_common::uart::print(b"RM-");
     {
         let _guard = uart::UART_LOCK.lock();
-        uart::putchar_no_lock(b'0' + hart_id as u8);
+        uart::print_usize_no_lock(hart_id);
     }
     kernel_common::uart::print(b"\n");
 
-    // Initialization continues...
     if prev_boot_id.is_ok() {
-        // We are the first hart to boot!
-        kernel_common::watchdog::disable(); // Try to disable early to prevent resets during init
-
-        // Dynamically discover the U-Boot API address:
-        // 1. Try to read the "api_address" environment variable
-        // 2. Fall back to scanning the RAM area (0x7b000000 - 0x7f000000) for "UBootAPI" magic
-        // 3. Fall back to the last known hardcoded address as a final resort
-        let mut api_ptr = None;
-
-        if let Some(env_ptr) = kernel_common::uboot::env_get("api_address") {
-            kernel_common::uart::print(b"[boot] Found api_address in U-Boot env: ");
-            // Print the environment string to console
-            unsafe {
-                let mut p = env_ptr;
-                while *p != 0 {
-                    kernel_common::uboot::putc(*p);
-                    p = p.add(1);
-                }
-            }
-            kernel_common::uart::print(b"\n");
-
-            if let Some(parsed) = parse_hex_env(env_ptr) {
-                if kernel_common::uboot::validate_api(parsed) {
-                    api_ptr = Some(parsed);
-                } else {
-                    kernel_common::uart::print(b"[boot] env api_address fails validation!\n");
-                }
-            }
-        }
-
-        if api_ptr.is_none() {
-            kernel_common::uart::print(b"[boot] Falling back to memory scanning...\n");
-            api_ptr = scan_for_api_sig();
-        }
-
-        let final_api_ptr = match api_ptr {
-            Some(addr) => {
-                kernel_common::uart::print(b"[boot] Dynamically resolved U-Boot API at ");
-                kernel_common::uart::print_hex(addr);
-                kernel_common::uart::print(b"\n");
-                addr
-            }
-            None => {
-                let fallback = 0x7dfcae80_usize;
-                kernel_common::uart::print(
-                    b"[boot] WARNING: API discovery failed. Trying hardcoded fallback at ",
-                );
-                kernel_common::uart::print_hex(fallback);
-                kernel_common::uart::print(b"\n");
-                fallback
-            }
-        };
-
-        unsafe {
-            let sig_candidate = final_api_ptr as *const kernel_common::uboot::ApiSignature;
-            if kernel_common::uboot::validate_api(final_api_ptr) {
-                kernel_common::uboot::init_api(sig_candidate);
-                kernel_common::uart::print(b"[boot] U-Boot API Version ");
-                kernel_common::uart::print_usize((*sig_candidate).version as usize);
-                kernel_common::uart::print(b" connected!\n");
-            } else {
-                kernel_common::uart::print(b"[boot] ERROR: U-Boot API Signature NOT valid!\n");
-            }
-        }
+        kernel_common::watchdog::disable();
         boot_hart_main(hart_id);
     } else {
         loop {
@@ -582,11 +477,10 @@ fn boot_hart_main(hart_id: usize) {
         static _stack_bottom: u8;
         static _stack_top: u8;
         static _heap_start: u8;
-        static _heap_end: u8;
     }
 
     let heap_start = (unsafe { &_heap_start as *const u8 as usize } + 15) & !15;
-    let heap_end = unsafe { &_heap_end as *const u8 as usize } & !15;
+    let heap_end = kernel_common::soc::HEAP_END & !15;
     let heap_len = heap_end - heap_start;
 
     if HEAP_MAGIC.load(Ordering::SeqCst) != MAGIC_VAL {
@@ -664,7 +558,7 @@ fn boot_hart_main(hart_id: usize) {
             heap_len / 1024 / 1024
         );
 
-        kernel_common::oled::init();
+        kernel_common::hdmi_fb::init();
 
         #[cfg(feature = "block-test")]
         let network = rsnano_core::Networks::NanoDevNetwork;
@@ -672,7 +566,7 @@ fn boot_hart_main(hart_id: usize) {
         let network = daemon_toml.network_or(rsnano_core::Networks::NanoLiveNetwork);
         tracing::info!("[boot] Using network: {}", network.as_str());
 
-        let mut daemon_config = rsnano_node::config::DaemonConfig::new2(network, 8);
+        let mut daemon_config = rsnano_node::config::DaemonConfig::new2(network, 16);
         daemon_config.rpc_enable = true;
         daemon_config.merge_toml(&daemon_toml);
 
@@ -890,9 +784,9 @@ fn boot_hart_main(hart_id: usize) {
         let secondary_start_addr = unsafe { &_start_secondary as *const u8 as usize };
 
         // Physical Hart 0 is the U-Boot boot hart (running as Logical Hart 1: Maint+Net).
-        // Start Physical Harts 1..7 at `_start_secondary`, where Physical Hart 1 maps to
-        // Logical Hart 0 (VoteProc) and Physical Harts 2..7 map to Logical Harts 2..7.
-        for phys_id in 1..8 {
+        // Start Physical Harts 1..16 at `_start_secondary`, where Physical Hart 1 maps to
+        // Logical Hart 0 (VoteProc) and Physical Harts 2..15 map to Logical Harts 2..15.
+        for phys_id in 1..16 {
             let logical_id = if phys_id == 1 { 0 } else { phys_id };
             let (initial_err, initial_status) = kernel_common::sbi::hart_get_status(phys_id);
             tracing::debug!(
@@ -905,10 +799,7 @@ fn boot_hart_main(hart_id: usize) {
 
             let (err, _) = kernel_common::sbi::hart_start(phys_id, secondary_start_addr, 0);
 
-            // Workaround for SpacemiT K1 OpenSBI:
-            // The firmware might fail to send the wakeup IPI internally,
-            // leaving the hart stuck in START_PENDING state.
-            // We send a manual IPI to force it to wake up.
+            // Send wakeup IPI in case firmware leaves the hart in START_PENDING state.
             kernel_common::sbi::send_ipi(1 << phys_id, 0);
 
             // Wait up to ~1s for it to leave START_PENDING (status=2)
@@ -997,16 +888,19 @@ fn dispatch_hart_task(
     exec: kernel_common::async_rt::Executor,
 ) -> ! {
     match hart_id {
-        // CLUSTER 0 (Shared L2 - Ingress, Verification & Vote Ingestion)
+        // CLUSTER 0 (X100 @ 2.4 GHz, VLEN=256, 2 MB Shared L2 - 10GbE Ingress, Message Decoding, Bootstrap & Votes)
         0 => run_vote_processor_loop(node_arc, exec, hart_id),
         1 => run_maintenance_and_network_loop(node_arc, exec, hart_id),
-        2 => run_crypto_worker_1_loop(node_arc, exec, hart_id),
-        3 => run_crypto_worker_2_loop(node_arc, exec, hart_id),
-        // CLUSTER 1 (Shared L2 - Consensus & Sharded Ledger Storage)
+        2 => run_message_processor_loop(node_arc, exec, hart_id),
+        3 => run_unchecked_and_bootstrap_loop(node_arc, exec, hart_id),
+        // CLUSTER 1 (X100 @ 2.4 GHz, VLEN=256, 2 MB Shared L2 - Consensus & 3-Stripe 64-Shard Ledger Storage)
         4 => run_consensus_and_elections_loop(node_arc, exec, hart_id),
         5 => run_ledger_b_loop(node_arc, exec, hart_id),
         6 => run_ledger_a_loop(node_arc, exec, hart_id),
-        7 => run_storage_flush_and_monitor_loop(node_arc, exec, hart_id),
+        7 => run_ledger_c_and_wal_loop(node_arc, exec, hart_id),
+        // CLUSTERS 2 & 3 (A100 @ 2.0 GHz, VLEN=1024 - 16-Way Vector Crypto Engines & HDMI Dashboard)
+        8..=14 => run_a100_crypto_worker_loop(node_arc, exec, hart_id),
+        15 => run_hdmi_display_and_monitor_loop(node_arc, exec, hart_id),
         _ => {
             tracing::warn!(
                 "[boot] Hart {}: Reserved/unassigned, entering parking loop",
@@ -1171,12 +1065,12 @@ fn run_vote_processor_loop(
     }
 }
 
-fn run_crypto_worker_1_loop(
+fn run_message_processor_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 2: Crypto Worker 1 (SIMD Verify) loop enter");
+    tracing::debug!("[boot] Hart 2: Dedicated MessageProcessor (10GbE Deserialization) loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
@@ -1191,7 +1085,7 @@ fn run_crypto_worker_1_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart 2 (Crypto-1) | Iters: {} | Verified: {}",
+                "[heartbeat] Hart 2 (MsgProc) | Iters: {} | SyncAssisted: {}",
                 iterations,
                 verified_count
             );
@@ -1200,65 +1094,110 @@ fn run_crypto_worker_1_loop(
         }
 
         let mut worked = false;
-        // 1. High-priority synchronous signature batches waiting on Hart 6
-        while node_arc.signature_checker.has_sync_tasks() {
-            let n = node_arc.signature_checker.help_verify();
-            if n > 0 {
-                worked = true;
-                verified_count = verified_count.wrapping_add(n);
-            } else {
-                break;
-            }
-        }
 
-        // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
-        if !node_arc.inbound_message_queue.is_empty_relaxed()
-            && !node_arc.signature_checker.has_sync_tasks()
-        {
+        // 1. Drain inbound 10GbE network messages into BlockProcessorQueue & bg_tasks
+        if !node_arc.inbound_message_queue.is_empty_relaxed() {
             let hp1 = kernel_common::clint::mtime();
-            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
-                worked = true;
-            }
-            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
-        }
-
-        while node_arc.signature_checker.has_sync_tasks() {
-            let n = node_arc.signature_checker.help_verify();
-            if n > 0 {
-                worked = true;
-                verified_count = verified_count.wrapping_add(n);
-            } else {
-                break;
-            }
-        }
-
-        // 3. Background signature pre-verification (up to 64 blocks = 16x4 per batch so Harts 2 & 3
-        // keep pace with 256-block MessageProcessor batches before Hart 6 pops them).
-        if !node_arc.signature_checker.is_empty_relaxed() {
-            for _ in 0..16 {
-                let n = node_arc.signature_checker.help_verify();
-                if n > 0 {
+            for _ in 0..4 {
+                if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
                     worked = true;
-                    verified_count = verified_count.wrapping_add(n);
                 } else {
                     break;
                 }
             }
+            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
+        }
+
+        // 2. Assist with synchronous batch signature tasks if Hart 6 is waiting
+        while node_arc.signature_checker.has_sync_tasks() {
+            let n = node_arc.signature_checker.help_verify_sync();
+            if n > 0 {
+                worked = true;
+                verified_count = verified_count.wrapping_add(n);
+            } else {
+                break;
+            }
         }
 
         let _ = (&exec, hart_id);
+        adaptive_pause_backoff(worked, &mut idle_spins);
+        iterations += 1;
+    }
+}
+
+fn run_unchecked_and_bootstrap_loop(
+    node_arc: Arc<Node>,
+    exec: kernel_common::async_rt::Executor,
+    hart_id: usize,
+) -> ! {
+    tracing::debug!("[boot] Hart 3: UncheckedMap Drainer & BootstrapServer loop enter");
+    let mut last_heartbeat = kernel_common::clint::mtime();
+    let mut last_watchdog = kernel_common::clint::mtime();
+    let mut iterations = 0;
+    let mut idle_spins = 1u32;
+    loop {
+        let mtime = kernel_common::clint::mtime();
+        if mtime - last_watchdog > seconds(1) {
+            kernel_common::watchdog::kick();
+            last_watchdog = mtime;
+        }
+
+        if mtime - last_heartbeat > seconds(10) {
+            tracing::debug!(
+                "[heartbeat] Hart 3 (Unchecked+Boot) | Iters: {} | Unchecked: {}",
+                iterations,
+                node_arc.unchecked.len()
+            );
+            iterations = 0;
+            last_heartbeat = mtime;
+        }
+
+        let mut worked = false;
+
+        // 1. Drain satisfied unchecked block dependencies into BlockProcessorQueue
+        if !node_arc.unchecked.is_empty()
+            && node_arc.unchecked.buffer_count() > 0
+            && node_arc.confirming_set.len() < 16_384
+        {
+            node_arc.unchecked.run_once();
+            worked = true;
+        }
+
+        // 2. Service bootstrap server requests
+        if node_arc.bootstrap_server.run_once() {
+            worked = true;
+        }
+
+        // 3. Drive async executor tasks (bootstrap outbound queries & TCP sockets)
+        for _ in 0..8 {
+            if exec.run_once(hart_id) {
+                worked = true;
+            } else {
+                break;
+            }
+        }
+
+        // 4. Assist with synchronous signature tasks if Hart 6 is waiting
+        if node_arc.signature_checker.has_sync_tasks() {
+            if node_arc.signature_checker.help_verify_sync() > 0 {
+                worked = true;
+            }
+        }
 
         adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
 }
 
-fn run_crypto_worker_2_loop(
+fn run_a100_crypto_worker_loop(
     node_arc: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 3: Crypto Worker 2 (SIMD Verify) loop enter");
+    tracing::debug!(
+        "[boot] Hart {}: A100 VLEN=1024 16-Way Vector Crypto Worker loop enter",
+        hart_id
+    );
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
@@ -1273,7 +1212,8 @@ fn run_crypto_worker_2_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart 3 (Crypto-2) | Iters: {} | Verified: {}",
+                "[heartbeat] Hart {} (A100 Crypto) | Iters: {} | Verified: {}",
+                hart_id,
                 iterations,
                 verified_count
             );
@@ -1282,7 +1222,6 @@ fn run_crypto_worker_2_loop(
         }
 
         let mut worked = false;
-        // 1. High-priority synchronous signature batches waiting on Hart 6
         while node_arc.signature_checker.has_sync_tasks() {
             let n = node_arc.signature_checker.help_verify();
             if n > 0 {
@@ -1293,31 +1232,8 @@ fn run_crypto_worker_2_loop(
             }
         }
 
-        // 2. Drain inbound network messages into BlockProcessorQueue & bg_tasks without starving TCP
-        if !node_arc.inbound_message_queue.is_empty_relaxed()
-            && !node_arc.signature_checker.has_sync_tasks()
-        {
-            let hp1 = kernel_common::clint::mtime();
-            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
-                worked = true;
-            }
-            HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
-        }
-
-        while node_arc.signature_checker.has_sync_tasks() {
-            let n = node_arc.signature_checker.help_verify();
-            if n > 0 {
-                worked = true;
-                verified_count = verified_count.wrapping_add(n);
-            } else {
-                break;
-            }
-        }
-
-        // 3. Background signature pre-verification (up to 64 blocks = 16x4 per batch so Harts 2 & 3
-        // keep pace with 256-block MessageProcessor batches before Hart 6 pops them).
         if !node_arc.signature_checker.is_empty_relaxed() {
-            for _ in 0..16 {
+            for _ in 0..8 {
                 let n = node_arc.signature_checker.help_verify();
                 if n > 0 {
                     worked = true;
@@ -1328,8 +1244,7 @@ fn run_crypto_worker_2_loop(
             }
         }
 
-        let _ = (&exec, hart_id);
-
+        let _ = &exec;
         adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
@@ -1340,7 +1255,7 @@ fn run_ledger_b_loop(
     _exec: kernel_common::async_rt::Executor,
     _hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 5: Ledger-B (Shards 8-15, WAL 8-15 & Unchecked Drain) loop enter");
+    tracing::debug!("[boot] Hart 5: Ledger-B (Stripe 1 Shards 21..42 & WAL 32..64) loop enter");
     rsnano_ledger::set_ledger_b_online(true);
     kernel_common::storage::wal::set_wal_b_online(true);
 
@@ -1357,10 +1272,9 @@ fn run_ledger_b_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart 5 (Ledger-B) | Iters: {} | Shards8_15_Batches: {} | Unchecked: {}",
+                "[heartbeat] Hart 5 (Ledger-B) | Iters: {} | Stripe1_Batches: {}",
                 iterations,
                 rsnano_ledger::LEDGER_B_JOBS_COMPLETED.load(Ordering::Relaxed),
-                node_arc.unchecked.len()
             );
             iterations = 0;
             last_heartbeat = mtime;
@@ -1368,8 +1282,9 @@ fn run_ledger_b_loop(
 
         let mut worked = false;
 
-        // 1. Highest priority: execute Shards 8-15 B-Tree mutations & WAL segments 8-15 clean/trim
-        // in parallel with Hart 6 (Ledger-A, Shards 0-7) across Cluster 1's shared 512 KB L2.
+        // 1. Highest priority: execute Stripe 1 (Shards 21..42) B-Tree mutations & WAL segments 32..64
+        // in parallel with Hart 6 (Stripe 0: Shards 0..21) and Hart 7 (Stripe 2: Shards 42..64)
+        // across Cluster 1's shared 2 MB L2 cache.
         while rsnano_ledger::try_run_ledger_b_job() {
             worked = true;
         }
@@ -1377,8 +1292,7 @@ fn run_ledger_b_loop(
             worked = true;
         }
 
-        // 2. While Hart 6 is blocked in `sig_ms` waiting for synchronous batch signature checks,
-        // help verify `sync_tasks` in Cluster 1's shared L2 cache.
+        // 2. While Hart 6 is waiting for synchronous batch signature checks, help verify `sync_tasks`.
         while node_arc.signature_checker.has_sync_tasks() {
             if node_arc.signature_checker.help_verify_sync() > 0 {
                 worked = true;
@@ -1387,26 +1301,6 @@ fn run_ledger_b_loop(
             }
         }
 
-        // 3. Drain satisfied unchecked block dependencies into BlockProcessorQueue
-        if !node_arc.unchecked.is_empty()
-            && node_arc.unchecked.buffer_count() > 0
-            && node_arc.confirming_set.len() < 16_384
-        {
-            node_arc.unchecked.run_once();
-            worked = true;
-            while rsnano_ledger::try_run_ledger_b_job() {}
-        }
-
-        // 4. Service bootstrap responder when ledger commit and unchecked queues are idle
-        if !worked
-            && node_arc.block_processor.total_queue_len() == 0
-            && node_arc.unchecked.buffer_count() == 0
-            && node_arc.bootstrap_server.run_once()
-        {
-            worked = true;
-        }
-
-        // Keep idle backoff short on Hart 5 so it wakes immediately when Hart 6 publishes a batch
         kernel_common::uboot::eth_check_tx_stall();
         if worked {
             idle_spins = 1;
@@ -1414,6 +1308,104 @@ fn run_ledger_b_loop(
             for _ in 0..idle_spins {
                 if rsnano_ledger::try_run_ledger_b_job()
                     || kernel_common::storage::wal::try_run_wal_b_job()
+                    || node_arc.signature_checker.has_sync_tasks()
+                {
+                    idle_spins = 1;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if idle_spins < 16 {
+                idle_spins <<= 1;
+            }
+        }
+        iterations += 1;
+    }
+}
+
+fn run_ledger_c_and_wal_loop(
+    node_arc: Arc<Node>,
+    exec: kernel_common::async_rt::Executor,
+    hart_id: usize,
+) -> ! {
+    tracing::debug!("[boot] Hart 7: Ledger-C (Stripe 2 Shards 42..64) & NVMe WAL DMA Flush loop enter");
+    rsnano_ledger::set_ledger_c_online(true);
+    kernel_common::storage::wal::set_wal_bg_online(true);
+
+    let mut last_heartbeat = kernel_common::clint::mtime();
+    let mut last_watchdog = kernel_common::clint::mtime();
+    let mut last_cleanup = kernel_common::clint::mtime();
+    let mut iterations = 0;
+    let mut idle_spins = 1u32;
+    loop {
+        let mtime = kernel_common::clint::mtime();
+        if mtime - last_watchdog > seconds(1) {
+            kernel_common::watchdog::kick();
+            last_watchdog = mtime;
+        }
+
+        if mtime - last_heartbeat > seconds(10) {
+            tracing::debug!(
+                "[heartbeat] Hart 7 (Ledger-C+WAL) | Iters: {} | Stripe2_Batches: {}",
+                iterations,
+                rsnano_ledger::LEDGER_C_JOBS_COMPLETED.load(Ordering::Relaxed)
+            );
+            iterations = 0;
+            last_heartbeat = mtime;
+        }
+
+        let mut worked = false;
+
+        // 1. Highest priority: execute Stripe 2 (Shards 42..64) B-Tree mutations in Cluster 1's 2 MB L2
+        while rsnano_ledger::try_run_ledger_c_job() {
+            worked = true;
+        }
+
+        // 2. Background NVMe WAL + Home-Page DMA Flush
+        if kernel_common::storage::wal::try_run_wal_bg_flush() {
+            worked = true;
+            while rsnano_ledger::try_run_ledger_c_job() {}
+        }
+
+        // 3. Periodic non-blocking NVMe Free-List & Buffer Pool excess frame reclamation
+        if mtime - last_cleanup > seconds(2) {
+            for i in 0..kernel_common::storage::SHARD_COUNT {
+                if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
+                    if let Some(btree) = btree_guard.as_mut() {
+                        btree.bpm.trim_excess();
+                    }
+                }
+            }
+            last_cleanup = mtime;
+        }
+
+        // 4. Assist with async executor tasks when idle
+        for _ in 0..8 {
+            if rsnano_ledger::try_run_ledger_c_job() {
+                worked = true;
+                break;
+            }
+            if exec.run_once(hart_id) {
+                worked = true;
+            } else {
+                break;
+            }
+        }
+
+        // 5. Assist with synchronous batch signature tasks if Hart 6 is waiting
+        if !worked && node_arc.signature_checker.has_sync_tasks() {
+            if node_arc.signature_checker.help_verify_sync() > 0 {
+                worked = true;
+            }
+        }
+
+        kernel_common::uboot::eth_check_tx_stall();
+        if worked {
+            idle_spins = 1;
+        } else {
+            for _ in 0..idle_spins {
+                if rsnano_ledger::try_run_ledger_c_job()
+                    || kernel_common::storage::wal::is_wal_bg_pending()
                     || node_arc.signature_checker.has_sync_tasks()
                 {
                     idle_spins = 1;
@@ -1995,22 +1987,20 @@ impl rsnano_network::AsyncDnsResolver for BareMetalDnsResolver {
     }
 }
 
-fn run_storage_flush_and_monitor_loop(
+fn run_hdmi_display_and_monitor_loop(
     node_mon: Arc<Node>,
     exec: kernel_common::async_rt::Executor,
     hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 7: Storage Flush & Monitor loop enter");
-    kernel_common::storage::wal::set_wal_bg_online(true);
+    tracing::debug!("[boot] Hart 15: Waveshare HDMI SimpleFB Dashboard & System Monitor loop enter");
     let mut last_tick = kernel_common::clint::mtime();
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
-    let mut last_oled = kernel_common::clint::mtime();
-    let mut last_cleanup = kernel_common::clint::mtime();
+    let mut last_hdmi = kernel_common::clint::mtime();
     let mut last_online_weight_tick = kernel_common::clint::mtime();
     let mut last_stored_count = node_mon.ledger.block_count();
     let mut last_confirmed_count = node_mon.ledger.confirmed_count();
-    let mut last_oled_stored = last_stored_count;
+    let mut last_hdmi_stored = last_stored_count;
     let mut shard_pages = [0usize; kernel_common::storage::SHARD_COUNT];
     let mut shard_free = [0usize; kernel_common::storage::SHARD_COUNT];
     let mut shard_cached = [0usize; kernel_common::storage::SHARD_COUNT];
@@ -2044,12 +2034,12 @@ fn run_storage_flush_and_monitor_loop(
     }
     let mut iterations = 0;
 
-    // Initial OLED status render right after boot completes
+    // Initial HDMI status render right after boot completes
     {
         let ch_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
         MON_PEERS_TOTAL.store(ch_info.total, Ordering::Relaxed);
         MON_PEERS_OUT.store(ch_info.outbound, Ordering::Relaxed);
-        kernel_common::oled::update_status(
+        kernel_common::hdmi_fb::update_status(
             ch_info.total,
             last_stored_count as usize,
             last_confirmed_count as usize,
@@ -2073,49 +2063,38 @@ fn run_storage_flush_and_monitor_loop(
             last_online_weight_tick = mtime;
         }
 
-        // Periodic non-blocking NVMe Free-List & Buffer Pool excess frame reclamation
-        if mtime - last_cleanup > seconds(2) {
-            for i in 0..kernel_common::storage::SHARD_COUNT {
-                if let Some(mut btree_guard) = kernel_common::storage::SHARDS[i].try_lock() {
-                    if let Some(btree) = btree_guard.as_mut() {
-                        btree.bpm.trim_excess();
-                    }
-                }
-            }
-            last_cleanup = mtime;
-        }
-
-        // 1. Background NVMe WAL + Home-Page DMA Flush:
-        // Harts 5 & 6 snapshot dirty pages at a transaction boundary and hand the batch to Hart 7
-        // so synchronous U-Boot NVMe DMA writes never stall the Cluster 1 ledger commit pipeline.
-        if kernel_common::storage::wal::try_run_wal_bg_flush() {
-            iterations += 1;
-            continue;
-        }
-
-        // 2. Hardware OLED status refresh
-        if mtime - last_oled > seconds(2) {
+        // 1. Hardware Waveshare HDMI SimpleFB dashboard refresh
+        if mtime - last_hdmi > seconds(1) {
             let stored_now = node_mon.ledger.block_count();
             let confirmed_now = node_mon.ledger.confirmed_count();
-            let oled_bps = stored_now.saturating_sub(last_oled_stored) / 2;
-            last_oled_stored = stored_now;
+            let hdmi_bps = stored_now.saturating_sub(last_hdmi_stored);
+            last_hdmi_stored = stored_now;
             let ch_info = node_mon.network.try_read().map(|n| n.channels_info()).unwrap_or_default();
             MON_PEERS_TOTAL.store(ch_info.total, Ordering::Relaxed);
             MON_PEERS_OUT.store(ch_info.outbound, Ordering::Relaxed);
-            MON_BPS.store(oled_bps as usize, Ordering::Relaxed);
-            kernel_common::oled::update_status(
+            MON_BPS.store(hdmi_bps as usize, Ordering::Relaxed);
+            let unchecked = node_mon.unchecked.len();
+            let bpq = node_mon.block_processor.total_queue_len();
+            let aec = node_mon.active.try_read().map(|a| a.len()).unwrap_or(0);
+            kernel_common::hdmi_fb::update_dashboard(
                 ch_info.total,
                 stored_now as usize,
                 confirmed_now as usize,
-                oled_bps as usize,
+                unchecked,
+                bpq,
+                aec,
+                hdmi_bps as usize,
+                MON_CPS.load(Ordering::Relaxed),
                 cached_db_kb,
+                MON_CACHE_MB.load(Ordering::Relaxed),
+                MON_HEAP_USED_MB.load(Ordering::Relaxed),
             );
-            last_oled = mtime;
+            last_hdmi = mtime;
         }
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart 7 (Storage+Mon) | Iters: {}",
+                "[heartbeat] Hart 15 (HDMI+Mon) | Iters: {}",
                 iterations
             );
             last_heartbeat = mtime;
@@ -2377,7 +2356,7 @@ fn log_block_prof_debug() {
         sp_ms(10), sp_ms(11), sp_n(12)
     );
 
-    for h in 0..8 {
+    for h in 0..16 {
         let acq = kernel_common::storage::LOCK_ACQ[h].load(Ordering::Relaxed);
         if acq > 0 {
             let hold_ms = (kernel_common::storage::LOCK_HOLD[h].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
@@ -2508,7 +2487,7 @@ fn run_ledger_a_loop(
 #[cfg(feature = "block-test")]
 fn drain_async_events(exec: &kernel_common::async_rt::Executor) {
     for _ in 0..4 {
-        for h in 0..8 {
+        for h in 0..16 {
             let len = exec.local_queues[h].lock().len();
             for _ in 0..len {
                 exec.run_once(h);
@@ -2895,8 +2874,8 @@ fn run_deterministic_block_test(
     } else {
         0
     };
-    kernel_common::oled::set_test_bps(bps_whole);
-    kernel_common::oled::update_status(
+    kernel_common::hdmi_fb::set_test_bps(bps_whole);
+    kernel_common::hdmi_fb::update_status(
         0,
         node.ledger.block_count() as usize,
         node.ledger.confirmed_count() as usize,

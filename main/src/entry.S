@@ -22,19 +22,19 @@
     .global _start
     .global _start_secondary
 _start:
-    # U-Boot `go 0x11000000` enters here on Physical Hart 0 (with a0 = argc = 1, gp = gd_t).
-    # Assign Logical Hart 1 (Maint+Net) to the boot hart.
+    # U-Boot `go 0x104000000` enters here on Physical Hart 0 (with a0 = argc = 1, gp = gd_t).
+    # Assign Logical Hart 1 (10GbE Net + RPC + WS + Dashboard) to the boot hart.
     mv   s0, a0
     mv   s1, a1
     li   tp, 1
     j    .Lentry_common
 
 _start_secondary:
-    # OpenSBI HSM `sbi_hsm_hart_start` enters here on Physical Harts 1..7 (a0 = physical hart_id).
-    # Map Physical Hart 1 -> Logical Hart 0 (Crypto-3), and Physical Harts 2..7 -> Logical Harts 2..7.
+    # OpenSBI HSM `sbi_hsm_hart_start` enters here on Physical Harts 1..15 (a0 = physical hart_id).
+    # Map Physical Hart 1 -> Logical Hart 0 (VoteProc), and Physical Harts 2..15 -> Logical Harts 2..15.
     mv   s0, a0
     mv   s1, a1
-    li   t0, 7
+    li   t0, 15
     and  t1, a0, t0
     li   t0, 1
     bne  t1, t0, 2f
@@ -45,7 +45,7 @@ _start_secondary:
 .Lentry_common:
 
     # Write 1 to SECONDARY_HART_WAKE array at index tp using AMO
-    # AMO bypasses L1 cache and is usually coherent across clusters on this SoC
+    # AMO bypasses L1 cache and is coherent across clusters on SpacemiT K3
     la   t0, SECONDARY_HART_WAKE
     slli t1, tp, 2
     add  t0, t0, t1
@@ -67,32 +67,32 @@ _start_secondary:
     la   t0, early_trap
     csrw stvec, t0
 
-    # Enable FS and VS in sstatus
+    # Enable FS and VS in sstatus (required for X100 VLEN=256 and A100 VLEN=1024 RVV 1.0 + Zvkb)
     li   t0, (3 << 13) | (3 << 9)
     csrs sstatus, t0
 
-    # U-Boot RISC-V ABI:
-    # a0: argc (often used as hartid in standalone apps)
+    # U-Boot RISC-V ABI on SpacemiT K3:
+    # a0: argc
     # a1: argv
-    # gp: pointer to global_data (gd_t)
-    
+    # gp: pointer to global_data (gd_t), where gd->jt is at byte offset 32 (0x20)
+
     # Capture gp and load Jump Table immediately ONLY for Hart 1 (boot hart)
     li   s11, 0
     li   t0, 1
     bne  tp, t0, 1f      # Only Hart 1 expects gp from U-Boot
     mv   s10, gp
     beqz s10, 1f
-    ld   s11, 264(s10)   # s11 = jt_ptr
+    ld   s11, 32(s10)    # s11 = gd->jt (offset 0x20 on SpacemiT K3 U-Boot)
 1:
-    
-    # Set up stack: _stack_top - (hart_id * 32MB)
+
+    # Set up stack: _stack_top - (hart_id * 16MB) across 16 Harts (256MB total)
     la   sp, _stack_top
-    li   t0, 25           # Shift left by 25 for 32MB
+    li   t0, 24           # Shift left by 24 for 16MB per hart
     sll  t1, tp, t0
     sub  sp, sp, t1
 
     # Restore parameters for rust_main
-    mv   a0, tp           # Pass sanitized hart_id
+    mv   a0, tp           # Pass sanitized logical hart_id (0..15)
     mv   a1, s1           # opaque
     mv   a2, s11          # Pass jt_ptr in a2
     call rust_main
@@ -104,7 +104,7 @@ park:
 
 .align 4
 early_trap:
-    # Use direct MMIO to UART to print trap info
+    # Use direct MMIO to UART0 (0xd4017000) to print trap info
     lui  t0, 0xd4017
     slli t0, t0, 32
     srli t0, t0, 32
@@ -112,9 +112,16 @@ early_trap:
     # Print 'T'
     PUTC 0x54
 
-    # Print hart ID
+    # Print hart ID (0..9, A..F)
     mv   t1, tp
+    andi t1, t1, 0xf
+    li   t5, 10
+    blt  t1, t5, 3f
+    addi t1, t1, 0x37
+    j    7f
+3:
     addi t1, t1, 0x30
+7:
     PUT_T1
 
     # Print ':'
@@ -169,7 +176,7 @@ early_trap_loop:
 .global secondary_spin
 secondary_spin:
     # Get hart ID (already in a0 from OpenSBI)
-    li   t0, 7
+    li   t0, 15
     and  t1, a0, t0
 
     # Write 0xDEADBEEF to SECONDARY_HART_WAKE[hartid]
@@ -177,12 +184,12 @@ secondary_spin:
     slli t1, t1, 2
     add  t0, t0, t1
     li   t2, 0xDEADBEEF
-    
+
     .option push
     .option arch, +a
     amoswap.w.rl zero, t2, 0(t0)
     .option pop
-    
+
     .option push
     .option arch, +zicbom
     cbo.clean 0(t0)

@@ -181,13 +181,16 @@ impl SignatureChecker {
 
     /// Used by Crypto Worker Harts: drains high-priority synchronous batch tasks first,
     /// and when idle, pre-verifies queued blocks from `bg_tasks`.
+    /// On SpacemiT K3 A100 cores (`VLEN=1024`), pops up to 16 tasks per batch (`verify_batch_16`).
     pub fn help_verify(&self) -> usize {
+        let batch_cap = if rsnano_sha::blake2b::has_vlen_1024() { 16 } else { 4 };
+
         if self.sync_count.load(Ordering::Relaxed) > 0 {
-            let mut tasks: [Option<SignatureTask>; 4] = [None, None, None, None];
+            let mut tasks: [Option<SignatureTask>; 16] = [const { None }; 16];
             let mut count = 0;
             {
                 let mut lock = self.tasks.lock();
-                while count < 4 {
+                while count < batch_cap {
                     if let Some(t) = lock.pop_front() {
                         if t.ctx.block.is_signature_verified() {
                             t.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
@@ -223,7 +226,7 @@ impl SignatureChecker {
             return 0;
         }
 
-        let mut tasks: [Option<SignatureTask>; 4] = [None, None, None, None];
+        let mut tasks: [Option<SignatureTask>; 16] = [const { None }; 16];
         let mut count = 0;
         {
             let mut lock = self.bg_tasks.lock();
@@ -231,7 +234,7 @@ impl SignatureChecker {
                 self.bg_count.store(0, Ordering::Relaxed);
                 return 0;
             }
-            while count < 4 {
+            while count < batch_cap {
                 if let Some(ctx) = lock.pop_front() {
                     if ctx.block.is_signature_verified() {
                         ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
@@ -279,10 +282,10 @@ impl SignatureChecker {
     }
 
     fn verify_tasks_slice(&self, tasks: &mut [Option<SignatureTask>]) {
-        if tasks.len() == 4 {
+        if tasks.len() == 16 {
             let mut all_have_account = true;
-            let mut accounts = [rsnano_core::Account::zero(); 4];
-            for i in 0..4 {
+            let mut accounts = [rsnano_core::Account::zero(); 16];
+            for i in 0..16 {
                 let t = tasks[i].as_ref().unwrap();
                 if let Some(acc) = t.account {
                     accounts[i] = acc;
@@ -295,10 +298,53 @@ impl SignatureChecker {
             }
 
             if all_have_account {
-                let t0 = tasks[0].as_ref().unwrap();
-                let t1 = tasks[1].as_ref().unwrap();
-                let t2 = tasks[2].as_ref().unwrap();
-                let t3 = tasks[3].as_ref().unwrap();
+                let keys_val: [rsnano_core::PublicKey; 16] =
+                    core::array::from_fn(|i| accounts[i].as_key());
+                let keys: [&[u8; 32]; 16] =
+                    core::array::from_fn(|i| keys_val[i].as_bytes());
+                let hashes: [rsnano_core::BlockHash; 16] =
+                    core::array::from_fn(|i| tasks[i].as_ref().unwrap().ctx.block.hash());
+                let msgs: [&[u8]; 16] =
+                    core::array::from_fn(|i| hashes[i].as_bytes() as &[u8]);
+                let sigs_val: [rsnano_core::Signature; 16] =
+                    core::array::from_fn(|i| tasks[i].as_ref().unwrap().ctx.block.signature().clone());
+                let sigs: [&[u8; 64]; 16] =
+                    core::array::from_fn(|i| sigs_val[i].as_bytes());
+
+                let results = rsnano_sha::ed25519::verify_batch_16(keys, msgs, sigs);
+                for i in 0..16 {
+                    let t = tasks[i].as_ref().unwrap();
+                    if results[i] {
+                        t.ctx.block.set_signature_verified(true);
+                    }
+                    t.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
+                }
+                return;
+            }
+        }
+
+        let mut offset = 0;
+        while offset + 4 <= tasks.len() {
+            let chunk = &mut tasks[offset..offset + 4];
+            let mut all_have_account = true;
+            let mut accounts = [rsnano_core::Account::zero(); 4];
+            for i in 0..4 {
+                let t = chunk[i].as_ref().unwrap();
+                if let Some(acc) = t.account {
+                    accounts[i] = acc;
+                } else if let Some(acc) = t.ctx.block.account_field() {
+                    accounts[i] = acc;
+                } else {
+                    all_have_account = false;
+                    break;
+                }
+            }
+
+            if all_have_account {
+                let t0 = chunk[0].as_ref().unwrap();
+                let t1 = chunk[1].as_ref().unwrap();
+                let t2 = chunk[2].as_ref().unwrap();
+                let t3 = chunk[3].as_ref().unwrap();
 
                 let keys_val = [
                     accounts[0].as_key(),
@@ -339,18 +385,20 @@ impl SignatureChecker {
 
                 let results = rsnano_sha::ed25519::verify_batch_4(keys, msgs, sigs);
                 for i in 0..4 {
-                    let t = tasks[i].as_ref().unwrap();
+                    let t = chunk[i].take().unwrap();
                     if results[i] {
                         t.ctx.block.set_signature_verified(true);
                     }
                     t.ctx.sig_state.store(SIG_STATE_DONE, Ordering::Release);
                 }
-                return;
+                offset += 4;
+            } else {
+                break;
             }
         }
 
-        // Graceful sequential fallback for less than 4 tasks or invalid accounts
-        for opt in tasks.iter_mut() {
+        // Graceful sequential fallback for remaining tasks or invalid accounts
+        for opt in tasks[offset..].iter_mut() {
             if let Some(task) = opt.take() {
                 let account = if let Some(acc) = task.account {
                     acc

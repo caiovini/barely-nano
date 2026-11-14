@@ -1,11 +1,15 @@
-//! # U-Boot Standalone API Bindings
+//! # SpacemiT K3 U-Boot Jump Table (`gd->jt`) Bindings
 //!
-//! This module provides a high-performance bridge between the bare-metal Rust node
-//! and the underlying U-Boot bootloader. By leveraging U-Boot's Jump Table and
-//! Syscall API, we can use mature C-based drivers for Ethernet, SSD (NVMe), and
-//! I2C without the overhead of a full operating system.
+//! Provides a direct, zero-copy FFI bridge between the bare-metal Rust node and
+//! U-Boot on SpacemiT K3 (`gd->jt` at byte offset `0x20` of `struct global_data`).
+//! Exposes:
+//! - Console & Environment (`putc`, `puts`, `udelay`, `get_timer`, `env_get`)
+//! - Realtek RTL8127 10GbE SFP+ Ethernet (`eth_init`, `eth_halt`, `eth_send`, `eth_receive`)
+//! - Waveshare 5-inch HDMI SimpleFB Display (`video_get_fb`, `video_get_xsize`, `video_get_ysize`,
+//!   `video_clear`, `video_fill`, `video_sync_all`, `bmp_display`)
+//! - PCIe NVMe Block Storage (`blk_get_capacity`, `blk_read_lba`, `blk_write_lba`)
 
-use core::ffi::c_void;
+use core::ffi::{c_char, c_int, c_ulong, c_void};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use spin::Mutex;
@@ -13,6 +17,9 @@ use spin::Mutex;
 static UBOOT_LOCK: Mutex<()> = Mutex::new(());
 static UBOOT_NET_LOCK: Mutex<()> = Mutex::new(());
 static UBOOT_GP: AtomicUsize = AtomicUsize::new(0);
+
+/// Byte offset of `gd->jt` inside `struct global_data` on 64-bit RISC-V (`GD_JT`).
+pub const GD_JT_OFFSET: usize = 0x20;
 
 struct UBootContext {
     old_gp: usize,
@@ -57,42 +64,60 @@ impl Drop for UBootContext {
     }
 }
 
-/// The U-Boot Jump Table structure.
-/// This matches the `struct jt_funcs` defined in U-Boot's `include/_exports.h`.
+/// The SpacemiT K3 U-Boot Jump Table structure (`59` function pointers).
+/// Matches `struct jt_funcs` defined in `/mnt/data/rust-workspace/u-boot/include/_exports.h`.
 #[repr(C)]
 pub struct JumpTable {
-    pub get_version: extern "C" fn() -> unsafe extern "C" fn() -> u64,
-    pub getc: extern "C" fn() -> i32,
-    pub tstc: extern "C" fn() -> i32,
-    pub putc: extern "C" fn(c: u8),
-    pub puts: extern "C" fn(s: *const u8),
-    pub printf: extern "C" fn(fmt: *const u8, ...),
-    pub install_hdlr: extern "C" fn(),
-    pub free_hdlr: extern "C" fn(),
-    pub malloc: extern "C" fn(size: usize) -> *mut c_void,
-    pub free: extern "C" fn(ptr: *mut c_void),
-    pub udelay: extern "C" fn(usec: u64),
-    pub get_timer: extern "C" fn(base: u64) -> u64,
-    pub vprintf: extern "C" fn(fmt: *const u8, args: *mut c_void) -> i32,
-    pub do_reset: extern "C" fn() -> i32,
-    pub env_get: extern "C" fn(name: *const u8) -> *const u8,
-    pub env_set: extern "C" fn(name: *const u8, value: *const u8) -> i32,
-    pub simple_strtoul: extern "C" fn(cp: *const u8, endp: *mut *const u8, base: u32) -> u64,
-    pub strict_strtoul: extern "C" fn(cp: *const u8, base: u32, res: *mut u64) -> i32,
-    pub simple_strtol: extern "C" fn(cp: *const u8, endp: *mut *const u8, base: u32) -> i64,
-    pub strcmp: extern "C" fn(cs: *const u8, ct: *const u8) -> i32,
-    pub i2c_write: extern "C" fn(chip: u8, addr: u32, alen: i32, buffer: *const u8, len: i32) -> i32,
-    pub i2c_read: extern "C" fn(chip: u8, addr: u32, alen: i32, buffer: *mut u8, len: i32) -> i32,
-    pub spi_setup_slave: extern "C" fn(),
-    pub spi_free_slave: extern "C" fn(),
-    pub spi_claim_bus: extern "C" fn(),
-    pub spi_release_bus: extern "C" fn(),
-    pub spi_xfer: extern "C" fn(),
-    pub ustrtoul: extern "C" fn(cp: *const u8, endp: *mut *const u8, base: u32) -> u64,
-    pub ustrtoull: extern "C" fn(cp: *const u8, endp: *mut *const u8, base: u32) -> u64,
-    pub strcpy: extern "C" fn(dest: *mut u8, src: *const u8) -> *mut u8,
-    pub mdelay: extern "C" fn(msec: u64),
-    pub memset: extern "C" fn(s: *mut c_void, c: i32, n: usize) -> *mut c_void,
+    // 0..17: Console, Heap, Timer, Environment
+    pub get_version: unsafe extern "C" fn() -> c_ulong,
+    pub getc: unsafe extern "C" fn() -> c_int,
+    pub tstc: unsafe extern "C" fn() -> c_int,
+    pub putc: unsafe extern "C" fn(c_char),
+    pub puts: unsafe extern "C" fn(*const c_char),
+    pub flush: unsafe extern "C" fn(),
+    pub printf: unsafe extern "C" fn(*const c_char, ...) -> c_int,
+    pub vprintf: *const c_void,
+    pub malloc: unsafe extern "C" fn(usize) -> *mut c_void,
+    pub realloc: unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void,
+    pub calloc: unsafe extern "C" fn(usize, usize) -> *mut c_void,
+    pub free: unsafe extern "C" fn(*mut c_void),
+    pub mdelay: unsafe extern "C" fn(c_ulong),
+    pub udelay: unsafe extern "C" fn(c_ulong),
+    pub get_timer: unsafe extern "C" fn(c_ulong) -> c_ulong,
+    pub do_reset: *const c_void,
+    pub env_get: unsafe extern "C" fn(*const c_char) -> *const u8,
+    pub env_set: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int,
+
+    // 18..37: String & memory helpers (20 pointers)
+    pub _str_mem_helpers: [*const c_void; 20],
+
+    // 38..41: MDIO/PHY helpers (4 pointers)
+    pub _mdio_helpers: [*const c_void; 4],
+
+    // 42..48 (offset 0x150..0x180): Ethernet API (RTL8127 10GbE Fiber / active eth device)
+    pub eth_init: unsafe extern "C" fn() -> c_int,
+    pub eth_halt: unsafe extern "C" fn(),
+    pub eth_send: unsafe extern "C" fn(packet: *mut c_void, length: c_int) -> c_int,
+    pub eth_rx: unsafe extern "C" fn() -> c_int,
+    pub eth_receive: unsafe extern "C" fn(packet: *mut c_void, length: c_int) -> c_int,
+    pub eth_get_name: unsafe extern "C" fn() -> *const c_char,
+    pub eth_set_current: unsafe extern "C" fn(),
+
+    // 49..55 (offset 0x188..0x1b8): HDMI / SimpleFB Video API (Waveshare 5-inch HDMI LCD)
+    pub video_get_fb: unsafe extern "C" fn() -> c_ulong,
+    pub video_get_xsize: unsafe extern "C" fn(dev: *mut c_void) -> c_int,
+    pub video_get_ysize: unsafe extern "C" fn(dev: *mut c_void) -> c_int,
+    pub video_clear: unsafe extern "C" fn(dev: *mut c_void) -> c_int,
+    pub video_fill: unsafe extern "C" fn(dev: *mut c_void, colour: u32) -> c_int,
+    pub video_sync_all: unsafe extern "C" fn(),
+    pub bmp_display: unsafe extern "C" fn(addr: c_ulong, x: c_int, y: c_int) -> c_int,
+
+    // 56..58 (offset 0x1c0..0x1d0): NVMe / Block Storage API
+    pub blk_get_capacity: unsafe extern "C" fn() -> c_ulong,
+    pub blk_read_lba:
+        unsafe extern "C" fn(start: c_ulong, blkcnt: c_ulong, buffer: *mut c_void) -> c_ulong,
+    pub blk_write_lba:
+        unsafe extern "C" fn(start: c_ulong, blkcnt: c_ulong, buffer: *const c_void) -> c_ulong,
 }
 
 static UBOOT_JT: AtomicPtr<JumpTable> = AtomicPtr::new(core::ptr::null_mut());
@@ -109,13 +134,18 @@ pub unsafe fn init(jt_ptr: *const JumpTable) {
     UBOOT_GP.store(gp_val, Ordering::SeqCst);
 }
 
+#[inline]
+pub fn is_initialized() -> bool {
+    !UBOOT_JT.load(Ordering::Relaxed).is_null()
+}
+
 pub fn putc(c: u8) {
     let jt = UBOOT_JT.load(Ordering::Relaxed);
     if !jt.is_null() {
         let _lock = UBOOT_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            ((*jt).putc)(c);
+            ((*jt).putc)(c as c_char);
         }
     }
 }
@@ -126,7 +156,7 @@ pub fn puts(s: &str) {
         let _lock = UBOOT_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            ((*jt).puts)(s.as_ptr());
+            ((*jt).puts)(s.as_ptr() as *const c_char);
         }
     }
 }
@@ -137,7 +167,7 @@ pub fn udelay(usec: u64) {
         let _lock = UBOOT_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            ((*jt).udelay)(usec);
+            ((*jt).udelay)(usec as c_ulong);
         }
     }
 }
@@ -148,39 +178,28 @@ pub fn get_timer(base: u64) -> u64 {
         let _lock = UBOOT_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            return ((*jt).get_timer)(base);
+            return ((*jt).get_timer)(base as c_ulong) as u64;
         }
     }
     0
 }
 
-#[repr(C)]
-pub struct ApiSignature {
-    pub signature: [u8; 8],
-    pub version: u16,
-    pub _pad1: u16,
-    pub checksum: u32,
-    pub syscall: extern "C" fn(type_: i32, ret: *mut i32, ...) -> i32,
-}
-
-pub const API_DEV_ENUM: i32 = 9;
-pub const API_DEV_OPEN: i32 = 10;
-pub const API_DEV_CLOSE: i32 = 11;
-pub const API_DEV_READ: i32 = 12;
-pub const API_DEV_WRITE: i32 = 13;
-
-static UBOOT_API: AtomicPtr<ApiSignature> = AtomicPtr::new(core::ptr::null_mut());
-
-pub fn validate_api(ptr: usize) -> bool {
-    unsafe {
-        let sig = &*(ptr as *const ApiSignature);
-        sig.signature == *b"UBootAPI"
+pub fn env_get(name: &str) -> Option<*const u8> {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        let mut name_buf = [0u8; 64];
+        let len = name.len().min(63);
+        name_buf[0..len].copy_from_slice(&name.as_bytes()[0..len]);
+        name_buf[len] = 0;
+        unsafe {
+            let val = ((*jt).env_get)(name_buf.as_ptr() as *const c_char);
+            if val.is_null() { None } else { Some(val) }
+        }
+    } else {
+        None
     }
-}
-
-pub unsafe fn init_api(sig_ptr: *const ApiSignature) {
-    if sig_ptr.is_null() { return; }
-    UBOOT_API.store(sig_ptr as *mut _, Ordering::SeqCst);
 }
 
 #[repr(C)]
@@ -201,164 +220,62 @@ unsafe impl Sync for DeviceInfo {}
 pub const DEV_TYP_NET: i32 = 1;
 pub const DEV_TYP_STOR: i32 = 2;
 
-/// SpacemiT K1 EMAC0 MMIO registers (`ethernet@cac80000` in `x1.dtsi`).
-#[cfg(target_arch = "riscv64")]
-const EMAC0_BASE: usize = 0xCAC8_0000;
-#[cfg(target_arch = "riscv64")]
-const DMA_CONTROL: usize = EMAC0_BASE + 0x0004;
-#[cfg(target_arch = "riscv64")]
-const DMA_TRANSMIT_AUTO_POLL_COUNTER: usize = EMAC0_BASE + 0x0010;
-#[cfg(target_arch = "riscv64")]
-const DMA_TRANSMIT_POLL_DEMAND: usize = EMAC0_BASE + 0x0014;
-#[cfg(target_arch = "riscv64")]
-const DMA_TRANSMIT_BASE_ADDRESS: usize = EMAC0_BASE + 0x001C;
-#[cfg(target_arch = "riscv64")]
-const DMA_RECEIVE_BASE_ADDRESS: usize = EMAC0_BASE + 0x0020;
+/// Static NVMe `if_type` tag (`8 != 6 (MMC)` and `!= 7 (SD)`) referenced by `DeviceInfo::cookie`.
+static NVME_COOKIE_IF_TYPE: i32 = 8;
+static NET_COOKIE_TAG: i32 = 1;
 
-/// CLINT `mtime` timestamp when Hart 1 entered `API_DEV_WRITE` (`emac_send`), or `0` when idle.
-/// Used by secondary harts to issue a delayed `DMA_TRANSMIT_POLL_DEMAND` kick if `emac_send`'s
-/// `fence i,or` allowed the initial poll demand to arrive at the EMAC before `cbo.flush` drained
-/// `tx_desc` to DRAM.
-pub static EMAC_TX_START_MTIME: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-
-/// Ensures hardware TX auto-polling is disabled (`DMA_TRANSMIT_AUTO_POLL_COUNTER = 0`), matching
-/// U-Boot's `emac_configure_tx` so the DMA engine never reads partially-written cached descriptors.
 #[inline]
-pub fn eth_disable_tx_auto_poll() {
-    #[cfg(target_arch = "riscv64")]
-    unsafe {
-        core::arch::asm!("fence rw, io", options(nostack));
-        core::ptr::write_volatile(DMA_TRANSMIT_AUTO_POLL_COUNTER as *mut u32, 0);
-        core::arch::asm!("fence io, io", options(nostack));
-    }
-}
+pub fn eth_disable_tx_auto_poll() {}
 
-/// Called by secondary harts during `adaptive_pause_backoff`. If an `emac_send` call has been
-/// spinning in U-Boot's `for (i = 0; i < 1000000; i++)` loop for more than 200 microseconds
-/// (`4_800` CLINT ticks at 24 MHz), `emac_flush_desc` has already drained to DRAM and the TX DMA
-/// missed the initial `DMA_TRANSMIT_POLL_DEMAND` due to U-Boot's `fence i,or`. Re-writing
-/// `DMA_TRANSMIT_POLL_DEMAND` wakes the Suspended TX DMA in ~0.2 ms instead of timing out after 1.67s.
 #[inline]
-pub fn eth_check_tx_stall() {
-    #[cfg(target_arch = "riscv64")]
-    {
-        let start = EMAC_TX_START_MTIME.load(Ordering::Relaxed);
-        if start != 0 {
-            let now = crate::clint::mtime();
-            if now.wrapping_sub(start) > 4_800 {
-                if EMAC_TX_START_MTIME
-                    .compare_exchange(start, now, Ordering::AcqRel, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    unsafe {
-                        core::arch::asm!("fence rw, io", options(nostack));
-                        core::ptr::write_volatile(DMA_TRANSMIT_POLL_DEMAND as *mut u32, 0xFF);
-                        core::arch::asm!("fence io, rw", options(nostack));
-                    }
-                }
-            }
-        }
-    }
-}
+pub fn eth_check_tx_stall() {}
 
-/// Resynchronizes the U-Boot `x1_emac` TX descriptor ring and `priv->tx_desc_idx` if `emac_send`
-/// ever returns an error (`-ETIMEDOUT`), preventing `priv->tx_desc_idx` and hardware
-/// `DMA_CURRENT_TRANSMIT_DESCRIPTOR_POINTER` from getting out of sync.
-#[cfg(target_arch = "riscv64")]
-unsafe fn eth_recover_tx_dma() {
-    core::arch::asm!("fence rw, io", options(nostack));
-    let tx_base = core::ptr::read_volatile(DMA_TRANSMIT_BASE_ADDRESS as *const u32) as usize;
-    let rx_base = core::ptr::read_volatile(DMA_RECEIVE_BASE_ADDRESS as *const u32) as usize;
-    if tx_base < 0x1000_0000 || rx_base != tx_base.wrapping_add(2048 * 16) {
-        core::ptr::write_volatile(DMA_TRANSMIT_POLL_DEMAND as *mut u32, 0xFF);
-        return;
-    }
-
-    // Stop TX DMA while keeping RX DMA running
-    let dma_ctrl = core::ptr::read_volatile(DMA_CONTROL as *const u32);
-    core::ptr::write_volatile(DMA_CONTROL as *mut u32, dma_ctrl & !1u32);
-    core::arch::asm!("fence io, rw", options(nostack));
-
-    // Clear all 2048 TX descriptors (16 bytes each = 32 KB) and flush to DRAM
-    let tx_words = tx_base as *mut u32;
-    for i in 0..(2048 * 4) {
-        core::ptr::write_volatile(tx_words.add(i), 0);
-    }
-    let mut line = tx_base & !63usize;
-    let end = tx_base + 2048 * 16;
-    while line < end {
-        core::arch::asm!("cbo.flush 0({0})", in(reg) line, options(nostack));
-        line += 64;
-    }
-    core::arch::asm!("fence rw, io", options(nostack));
-
-    // Locate `priv->tx_desc_idx` in U-Boot's `struct emac_priv` (immediately following `tx_descs`
-    // and `rx_descs` pointers) and reset it to 0 to match `DMA_TRANSMIT_BASE_ADDRESS`.
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if !api.is_null() {
-        let search_start = (api as usize).saturating_sub(32 * 1024 * 1024) & !7usize;
-        let search_end = (api as usize).saturating_add(4 * 1024 * 1024) & !7usize;
-        let mut p = search_start;
-        while p < search_end {
-            let w0 = core::ptr::read_volatile(p as *const usize);
-            if w0 == tx_base {
-                let w1 = core::ptr::read_volatile((p + 8) as *const usize);
-                if w1 == rx_base {
-                    let tx_idx_ptr = (p + 16) as *mut i32;
-                    let idx = core::ptr::read_volatile(tx_idx_ptr);
-                    if (0..2048).contains(&idx) {
-                        core::ptr::write_volatile(tx_idx_ptr, 0);
-                        let flush_addr = (p + 16) & !63usize;
-                        core::arch::asm!("cbo.flush 0({0})", in(reg) flush_addr, options(nostack));
-                        break;
-                    }
-                }
-            }
-            p += 8;
-        }
-    }
-
-    // Reprogram TX base address and restart TX DMA
-    core::arch::asm!("fence rw, io", options(nostack));
-    core::ptr::write_volatile(DMA_TRANSMIT_BASE_ADDRESS as *mut u32, tx_base as u32);
-    core::ptr::write_volatile(DMA_CONTROL as *mut u32, dma_ctrl | 1u32);
-    core::arch::asm!("fence io, io", options(nostack));
-}
-
-/// Sends a raw network packet using the U-Boot Ethernet driver.
-pub fn eth_send(info: &DeviceInfo, buffer: &[u8]) -> i32 {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    let mut ret = 0i32;
-    if !api.is_null() {
+/// Returns the active U-Boot Ethernet device name (e.g. `"eth_rtl8169"` for RTL8127 10GbE).
+pub fn eth_get_name() -> &'static str {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
         let _lock = UBOOT_NET_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            let len = buffer.len() as i32;
-            EMAC_TX_START_MTIME.store(crate::clint::mtime().max(1), Ordering::Release);
-            // API_dev_write for network takes 3 arguments: di, buf, len
-            ((*api).syscall)(API_DEV_WRITE, &mut ret, info as *const DeviceInfo, buffer.as_ptr(), &len);
-            EMAC_TX_START_MTIME.store(0, Ordering::Release);
-            #[cfg(target_arch = "riscv64")]
-            if ret != 0 {
-                eth_recover_tx_dma();
+            let ptr = ((*jt).eth_get_name)() as *const u8;
+            if !ptr.is_null() {
+                let mut len = 0usize;
+                while len < 64 && *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                if let Ok(s) = core::str::from_utf8(core::slice::from_raw_parts(ptr, len)) {
+                    return s;
+                }
             }
         }
     }
-    ret
+    "unknown"
 }
 
-/// Sends a batch of raw network packets using the U-Boot Ethernet driver,
-/// amortizing U-Boot context switches and locks across all queued TX packets.
+/// Sends a raw network packet using U-Boot's `eth_send` Jump Table entry.
+pub fn eth_send(_info: &DeviceInfo, buffer: &[u8]) -> i32 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_NET_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        unsafe {
+            return ((*jt).eth_send)(buffer.as_ptr() as *mut c_void, buffer.len() as c_int);
+        }
+    }
+    -1
+}
+
+/// Sends a batch of raw network packets using U-Boot's `eth_send` Jump Table entry,
+/// amortizing `UBOOT_NET_LOCK` and `gp` context switching across the entire batch.
 pub fn eth_send_batch(
-    info: &DeviceInfo,
+    _info: &DeviceInfo,
     slots: &[[u8; 1536]],
     lens: &[u16],
     start_head: usize,
     count: usize,
 ) -> usize {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if api.is_null() || count == 0 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if jt.is_null() || count == 0 {
         return 0;
     }
     let _lock = UBOOT_NET_LOCK.lock();
@@ -368,24 +285,11 @@ pub fn eth_send_batch(
     let mut curr_idx = start_head;
 
     while sent < count {
-        let len = lens[curr_idx] as i32;
-        let mut ret = 0i32;
-        unsafe {
-            EMAC_TX_START_MTIME.store(crate::clint::mtime().max(1), Ordering::Release);
-            ((*api).syscall)(
-                API_DEV_WRITE,
-                &mut ret,
-                info as *const DeviceInfo,
-                slots[curr_idx].as_ptr(),
-                &len,
-            );
-            EMAC_TX_START_MTIME.store(0, Ordering::Release);
-            #[cfg(target_arch = "riscv64")]
-            if ret != 0 {
-                eth_recover_tx_dma();
-                sent += 1;
-                break;
-            }
+        let len = lens[curr_idx] as c_int;
+        let ret = unsafe { ((*jt).eth_send)(slots[curr_idx].as_ptr() as *mut c_void, len) };
+        if ret < 0 {
+            sent += 1;
+            break;
         }
         curr_idx = (curr_idx + 1) % total_slots;
         sent += 1;
@@ -393,39 +297,34 @@ pub fn eth_send_batch(
     sent
 }
 
-/// Receives a raw network packet using the U-Boot Ethernet driver.
-pub fn eth_receive(info: &DeviceInfo, buffer: &mut [u8]) -> i32 {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    let mut ret = 0i32;
-    if !api.is_null() {
+/// Receives a raw network packet using U-Boot's `eth_receive` Jump Table entry.
+pub fn eth_receive(_info: &DeviceInfo, buffer: &mut [u8]) -> i32 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
         let _lock = UBOOT_NET_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            let mut len = buffer.len() as i32;
-            let mut actual_len = 0i32;
-            // API_dev_read for network takes 4 arguments: di, buf, len, act_len
-            ((*api).syscall)(API_DEV_READ, &mut ret, info as *const DeviceInfo, buffer.as_mut_ptr(), &mut len, &mut actual_len);
-            if ret == 0 {
-                return actual_len;
-            } else {
-                return -ret;
+            let copied =
+                ((*jt).eth_receive)(buffer.as_mut_ptr() as *mut c_void, buffer.len() as c_int);
+            if copied > 0 {
+                return copied;
             }
         }
     }
     -1
 }
 
-/// Receives a batch of raw network packets using the U-Boot Ethernet driver,
-/// amortizing U-Boot context switches and locks across all available packets in the DMA ring.
+/// Receives a batch of raw network packets using U-Boot's `eth_receive` Jump Table entry,
+/// draining up to `max_count` frames from the RTL8127 512-descriptor RX ring in one lock hold.
 pub fn eth_receive_batch(
-    info: &DeviceInfo,
+    _info: &DeviceInfo,
     slots: &mut [[u8; 1536]],
     lens: &mut [u16],
     start_tail: usize,
     max_count: usize,
 ) -> usize {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if api.is_null() {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if jt.is_null() || max_count == 0 {
         return 0;
     }
     let _lock = UBOOT_NET_LOCK.lock();
@@ -435,21 +334,11 @@ pub fn eth_receive_batch(
     let mut curr_idx = start_tail;
 
     while received < max_count {
-        let mut len = slots[curr_idx].len() as i32;
-        let mut actual_len = 0i32;
-        let mut ret = 0i32;
-        unsafe {
-            ((*api).syscall)(
-                API_DEV_READ,
-                &mut ret,
-                info as *const DeviceInfo,
-                slots[curr_idx].as_mut_ptr(),
-                &mut len,
-                &mut actual_len,
-            );
-        }
-        if ret == 0 && actual_len > 0 {
-            lens[curr_idx] = actual_len as u16;
+        let max_len = slots[curr_idx].len() as c_int;
+        let copied =
+            unsafe { ((*jt).eth_receive)(slots[curr_idx].as_mut_ptr() as *mut c_void, max_len) };
+        if copied > 0 {
+            lens[curr_idx] = copied as u16;
             curr_idx = (curr_idx + 1) % total_slots;
             received += 1;
         } else {
@@ -459,54 +348,68 @@ pub fn eth_receive_batch(
     received
 }
 
-pub fn env_get(name: &str) -> Option<*const u8> {
-    let jt = UBOOT_JT.load(Ordering::Relaxed);
-    if !jt.is_null() {
-        let _lock = UBOOT_LOCK.lock();
-        let _ctx = UBootContext::enter();
-        let mut name_buf = [0u8; 64];
-        let len = name.len().min(63);
-        name_buf[0..len].copy_from_slice(&name.as_bytes()[0..len]);
-        name_buf[len] = 0;
-        unsafe {
-            let val = ((*jt).env_get)(name_buf.as_ptr());
-            if val.is_null() { None } else { Some(val) }
-        }
-    } else {
-        None
-    }
-}
-
 pub fn dev_enum(prev: Option<&DeviceInfo>) -> Option<DeviceInfo> {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if !api.is_null() {
-        let _lock = UBOOT_LOCK.lock();
-        let _ctx = UBootContext::enter();
-        unsafe {
-            let mut ret = 0;
-            let mut info = core::mem::zeroed::<DeviceInfo>();
-            info.cookie = prev.map(|d| d.cookie).unwrap_or(core::ptr::null_mut());
-            ((*api).syscall)(API_DEV_ENUM, &mut ret, &mut info);
-            if ret == 0 && !info.cookie.is_null() {
-                Some(info)
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if jt.is_null() {
+        return None;
+    }
+    match prev {
+        None => Some(DeviceInfo {
+            type_: DEV_TYP_NET,
+            _pad1: 0,
+            cookie: (&NET_COOKIE_TAG as *const i32) as *mut c_void,
+            block_count: 0,
+            block_size: 0,
+            state: 0,
+            _pad2: 0,
+        }),
+        Some(p) if p.type_ == DEV_TYP_NET => {
+            let cap = {
+                let _lock = UBOOT_LOCK.lock();
+                let _ctx = UBootContext::enter();
+                unsafe { ((*jt).blk_get_capacity)() as u64 }
+            };
+            if cap > 0 {
+                Some(DeviceInfo {
+                    type_: DEV_TYP_STOR,
+                    _pad1: 0,
+                    cookie: (&NVME_COOKIE_IF_TYPE as *const i32) as *mut c_void,
+                    block_count: cap,
+                    block_size: 512,
+                    state: 0,
+                    _pad2: 0,
+                })
             } else {
                 None
             }
         }
-    } else {
-        None
+        _ => None,
     }
 }
 
 pub fn dev_open(info: &mut DeviceInfo) -> i32 {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if !api.is_null() {
-        let _lock = UBOOT_LOCK.lock();
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if jt.is_null() {
+        return -1;
+    }
+    if info.type_ == DEV_TYP_NET {
+        let _lock = UBOOT_NET_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            let mut ret = 0;
-            ((*api).syscall)(API_DEV_OPEN, &mut ret, info as *mut DeviceInfo);
-            ret
+            ((*jt).eth_set_current)();
+            ((*jt).eth_halt)();
+            ((*jt).eth_init)()
+        }
+    } else if info.type_ == DEV_TYP_STOR {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        let cap = unsafe { ((*jt).blk_get_capacity)() as u64 };
+        if cap > 0 {
+            info.block_count = cap;
+            info.block_size = 512;
+            0
+        } else {
+            -1
         }
     } else {
         -1
@@ -514,47 +417,128 @@ pub fn dev_open(info: &mut DeviceInfo) -> i32 {
 }
 
 pub fn dev_close(info: &mut DeviceInfo) -> i32 {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if !api.is_null() {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if jt.is_null() {
+        return -1;
+    }
+    if info.type_ == DEV_TYP_NET {
+        let _lock = UBOOT_NET_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        unsafe {
+            ((*jt).eth_halt)();
+        }
+    }
+    0
+}
+
+pub fn dev_read(_info: &DeviceInfo, start_block: u64, blocks: u64, buffer: *mut u8) -> i32 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
         let _lock = UBOOT_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            let mut ret = 0;
-            ((*api).syscall)(API_DEV_CLOSE, &mut ret, info as *mut DeviceInfo);
-            ret
+            let read = ((*jt).blk_read_lba)(
+                start_block as c_ulong,
+                blocks as c_ulong,
+                buffer as *mut c_void,
+            );
+            read as i32
         }
     } else {
         -1
     }
 }
 
-pub fn dev_read(info: &DeviceInfo, start_block: u64, blocks: u64, buffer: *mut u8) -> i32 {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if !api.is_null() {
+pub fn dev_write(_info: &DeviceInfo, start_block: u64, blocks: u64, buffer: *const u8) -> i32 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
         let _lock = UBOOT_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            let mut ret = 0;
-            let mut actual_blocks = 0u64;
-            ((*api).syscall)(API_DEV_READ, &mut ret, info as *const DeviceInfo, buffer, &blocks, &start_block, &mut actual_blocks);
-            if ret == 0 { actual_blocks as i32 } else { -ret }
+            let written = ((*jt).blk_write_lba)(
+                start_block as c_ulong,
+                blocks as c_ulong,
+                buffer as *const c_void,
+            );
+            written as i32
         }
     } else {
         -1
     }
 }
 
-pub fn dev_write(info: &DeviceInfo, start_block: u64, blocks: u64, buffer: *const u8) -> i32 {
-    let api = UBOOT_API.load(Ordering::Relaxed);
-    if !api.is_null() {
+// ── HDMI / SimpleFB Video Framebuffer API (Waveshare 5-inch HDMI LCD) ────────
+
+/// Returns the physical framebuffer base address (`0` if no HDMI display is active).
+pub fn video_get_fb() -> usize {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        unsafe { ((*jt).video_get_fb)() as usize }
+    } else {
+        0
+    }
+}
+
+/// Returns the horizontal resolution in pixels of the primary HDMI display.
+pub fn video_get_xsize() -> usize {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        let w = unsafe { ((*jt).video_get_xsize)(core::ptr::null_mut()) };
+        if w > 0 { w as usize } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Returns the vertical resolution in pixels of the primary HDMI display.
+pub fn video_get_ysize() -> usize {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        let h = unsafe { ((*jt).video_get_ysize)(core::ptr::null_mut()) };
+        if h > 0 { h as usize } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Clears the primary HDMI video framebuffer.
+pub fn video_clear() -> i32 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        unsafe { ((*jt).video_clear)(core::ptr::null_mut()) }
+    } else {
+        -1
+    }
+}
+
+/// Fills the primary HDMI video framebuffer with `colour`.
+pub fn video_fill(colour: u32) -> i32 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        unsafe { ((*jt).video_fill)(core::ptr::null_mut(), colour) }
+    } else {
+        -1
+    }
+}
+
+/// Flushes CPU D-cache lines for the HDMI framebuffer to DRAM so scanout reflects updates.
+pub fn video_sync_all() {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
         let _lock = UBOOT_LOCK.lock();
         let _ctx = UBootContext::enter();
         unsafe {
-            let mut ret = 0;
-            ((*api).syscall)(API_DEV_WRITE, &mut ret, info as *const DeviceInfo, buffer, &blocks, &start_block);
-            if ret == 0 { blocks as i32 } else { -ret }
+            ((*jt).video_sync_all)();
         }
-    } else {
-        -1
     }
 }

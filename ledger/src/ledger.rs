@@ -109,9 +109,9 @@ pub static LEDGER_PROF: [core::sync::atomic::AtomicU64; 10] = [
     core::sync::atomic::AtomicU64::new(0),
 ];
 
-const FAST_BATCH_SLOTS: usize = 1024;
+const FAST_BATCH_SLOTS: usize = 2048;
 const FAST_BATCH_MASK: usize = FAST_BATCH_SLOTS - 1;
-const FAST_BATCH_MAX_INDEXED: usize = 768;
+const FAST_BATCH_MAX_INDEXED: usize = 1536;
 
 trait BatchHashKey: Eq + Clone {
     fn fast_hash(&self) -> usize;
@@ -249,40 +249,61 @@ static LEDGER_B_JOB_DONE: AtomicBool = AtomicBool::new(false);
 pub static LEDGER_B_JOBS_COMPLETED: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-struct LedgerBFlushJob {
+static LEDGER_C_ONLINE: AtomicBool = AtomicBool::new(false);
+static LEDGER_C_JOB_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static LEDGER_C_JOB_DONE: AtomicBool = AtomicBool::new(false);
+pub static LEDGER_C_JOBS_COMPLETED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+struct LedgerStripeFlushJob {
     store: *const BtreeStore,
     ext_succ: *const [(BlockHash, BlockHash)],
     pending: *const [(rsnano_core::PendingKey, DeferredPendingOp)],
     all_sorted_blocks: *const [(BlockHash, SavedBlock, BlockHash)],
-    blocks_upper: *const [(BlockHash, SavedBlock, BlockHash)],
+    blocks_slice: *const [(BlockHash, SavedBlock, BlockHash)],
     accounts: *const [(Account, (AccountInfo, AccountInfo))],
+    shard_start: usize,
+    shard_end: usize,
 }
 
-/// Marks Hart 5 (`Ledger-B`, Shards 8..15) as online so Hart 6 (`Ledger-A`, Shards 0..7)
-/// dispatches the upper shard half of each block batch to Hart 5 across Cluster 1's shared L2.
+/// Marks Hart 5 (`Ledger-B`, Shards 21..42) as online so Hart 6 (`Ledger-A`, Shards 0..21)
+/// dispatches the middle shard stripe of each block batch to Hart 5 across Cluster 1's shared L2.
 pub fn set_ledger_b_online(online: bool) {
     LEDGER_B_ONLINE.store(online, Ordering::Release);
 }
 
+/// Marks Hart 7 (`Ledger-C`, Shards 42..64) as online so Hart 6 (`Ledger-A`, Shards 0..21)
+/// dispatches the upper shard stripe of each block batch to Hart 7 across Cluster 1's shared L2.
+pub fn set_ledger_c_online(online: bool) {
+    LEDGER_C_ONLINE.store(online, Ordering::Release);
+}
+
+#[inline(always)]
+fn byte0_in_shard_range(byte0: u8, shard_start: usize, shard_end: usize) -> bool {
+    let s = (byte0 >> 2) as usize;
+    s >= shard_start && s < shard_end
+}
+
 #[inline]
-fn flush_shard_half(
+fn flush_shard_range(
     store: &BtreeStore,
     ext_succ: &[(BlockHash, BlockHash)],
     pending: &[(rsnano_core::PendingKey, DeferredPendingOp)],
     all_sorted_blocks: &[(BlockHash, SavedBlock, BlockHash)],
     blocks_slice: &[(BlockHash, SavedBlock, BlockHash)],
     accounts: &[(Account, (AccountInfo, AccountInfo))],
-    upper_half: bool,
+    shard_start: usize,
+    shard_end: usize,
 ) {
     for (prev, succ) in ext_succ {
-        if ((prev.as_bytes()[0] & 0x80) != 0) == upper_half {
+        if byte0_in_shard_range(prev.as_bytes()[0], shard_start, shard_end) {
             if all_sorted_blocks.binary_search_by(|e| e.0.cmp(prev)).is_err() {
                 store.successors.put(prev, succ);
             }
         }
     }
     for (key, op) in pending {
-        if ((key.receiving_account.as_bytes()[0] & 0x80) != 0) == upper_half {
+        if byte0_in_shard_range(key.receiving_account.as_bytes()[0], shard_start, shard_end) {
             match op {
                 DeferredPendingOp::Insert(info) => store.pending.put(key, info),
                 DeferredPendingOp::DeleteOnDisk => store.pending.del(key),
@@ -294,7 +315,7 @@ fn flush_shard_half(
         store.block.put_batch_with_successors(blocks_slice);
     }
     for (account, (first_old_info, target_info)) in accounts {
-        if ((account.as_bytes()[0] & 0x80) != 0) == upper_half {
+        if byte0_in_shard_range(account.as_bytes()[0], shard_start, shard_end) {
             if !target_info.head.is_zero() {
                 if !first_old_info.head.is_zero() && first_old_info.epoch != target_info.epoch {
                     store.account.del(account);
@@ -308,8 +329,8 @@ fn flush_shard_half(
     }
 }
 
-/// Polled by Hart 5 (`Ledger-B`) in Cluster 1 to execute Shards `8..15` B-Tree mutations
-/// in parallel while Hart 6 (`Ledger-A`) executes Shards `0..7`.
+/// Polled by Hart 5 (`Ledger-B`) in Cluster 1 to execute Shards `21..42` B-Tree mutations
+/// in parallel while Hart 6 (`Ledger-A`) executes Shards `0..21` and Hart 7 (`Ledger-C`) executes `42..64`.
 #[inline]
 pub fn try_run_ledger_b_job() -> bool {
     let job_addr = LEDGER_B_JOB_PTR.swap(0, Ordering::AcqRel);
@@ -319,19 +340,48 @@ pub fn try_run_ledger_b_job() -> bool {
     // SAFETY: `job_addr` was published by Hart 6 on its stack and Hart 6 spins on
     // `LEDGER_B_JOB_DONE` with `Acquire` ordering before returning from the frame.
     unsafe {
-        let job = &*(job_addr as *const LedgerBFlushJob);
-        flush_shard_half(
+        let job = &*(job_addr as *const LedgerStripeFlushJob);
+        flush_shard_range(
             &*job.store,
             &*job.ext_succ,
             &*job.pending,
             &*job.all_sorted_blocks,
-            &*job.blocks_upper,
+            &*job.blocks_slice,
             &*job.accounts,
-            true,
+            job.shard_start,
+            job.shard_end,
         );
     }
     LEDGER_B_JOBS_COMPLETED.fetch_add(1, Ordering::Relaxed);
     LEDGER_B_JOB_DONE.store(true, Ordering::Release);
+    true
+}
+
+/// Polled by Hart 7 (`Ledger-C`) in Cluster 1 to execute Shards `42..64` B-Tree mutations
+/// in parallel while Hart 6 (`Ledger-A`) executes Shards `0..21` and Hart 5 (`Ledger-B`) executes `21..42`.
+#[inline]
+pub fn try_run_ledger_c_job() -> bool {
+    let job_addr = LEDGER_C_JOB_PTR.swap(0, Ordering::AcqRel);
+    if job_addr == 0 {
+        return false;
+    }
+    // SAFETY: `job_addr` was published by Hart 6 on its stack and Hart 6 spins on
+    // `LEDGER_C_JOB_DONE` with `Acquire` ordering before returning from the frame.
+    unsafe {
+        let job = &*(job_addr as *const LedgerStripeFlushJob);
+        flush_shard_range(
+            &*job.store,
+            &*job.ext_succ,
+            &*job.pending,
+            &*job.all_sorted_blocks,
+            &*job.blocks_slice,
+            &*job.accounts,
+            job.shard_start,
+            job.shard_end,
+        );
+    }
+    LEDGER_C_JOBS_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    LEDGER_C_JOB_DONE.store(true, Ordering::Release);
     true
 }
 
@@ -1076,51 +1126,145 @@ impl Ledger {
                 }
             }
 
-            let mid = sorted_blocks.partition_point(|e| (e.0.as_bytes()[0] & 0x80) == 0);
+            let cut1 = sorted_blocks.partition_point(|e| (e.0.as_bytes()[0] >> 2) < 21);
+            let cut2 = sorted_blocks.partition_point(|e| (e.0.as_bytes()[0] >> 2) < 42);
             let ext_succ_slice = external_successors.entries();
             let pending_slice = deferred_pending.entries();
             let accounts_slice = deferred_accounts.entries();
 
-            if LEDGER_B_ONLINE.load(Ordering::Relaxed) {
-                let job = LedgerBFlushJob {
+            let b_online = LEDGER_B_ONLINE.load(Ordering::Relaxed);
+            let c_online = LEDGER_C_ONLINE.load(Ordering::Relaxed)
+                && !kernel_common::storage::wal::is_wal_bg_pending();
+
+            if b_online && c_online {
+                let job_b = LedgerStripeFlushJob {
                     store: &self.store as *const BtreeStore,
                     ext_succ: ext_succ_slice as *const [(BlockHash, BlockHash)],
                     pending: pending_slice as *const [(rsnano_core::PendingKey, DeferredPendingOp)],
                     all_sorted_blocks: sorted_blocks.as_slice()
                         as *const [(BlockHash, SavedBlock, BlockHash)],
-                    blocks_upper: &sorted_blocks[mid..]
+                    blocks_slice: &sorted_blocks[cut1..cut2]
                         as *const [(BlockHash, SavedBlock, BlockHash)],
                     accounts: accounts_slice as *const [(Account, (AccountInfo, AccountInfo))],
+                    shard_start: 21,
+                    shard_end: 42,
                 };
-                let job_addr = &job as *const LedgerBFlushJob as usize;
+                let job_c = LedgerStripeFlushJob {
+                    store: &self.store as *const BtreeStore,
+                    ext_succ: ext_succ_slice as *const [(BlockHash, BlockHash)],
+                    pending: pending_slice as *const [(rsnano_core::PendingKey, DeferredPendingOp)],
+                    all_sorted_blocks: sorted_blocks.as_slice()
+                        as *const [(BlockHash, SavedBlock, BlockHash)],
+                    blocks_slice: &sorted_blocks[cut2..]
+                        as *const [(BlockHash, SavedBlock, BlockHash)],
+                    accounts: accounts_slice as *const [(Account, (AccountInfo, AccountInfo))],
+                    shard_start: 42,
+                    shard_end: 64,
+                };
+                let job_b_addr = &job_b as *const LedgerStripeFlushJob as usize;
+                let job_c_addr = &job_c as *const LedgerStripeFlushJob as usize;
                 LEDGER_B_JOB_DONE.store(false, Ordering::Release);
-                LEDGER_B_JOB_PTR.store(job_addr, Ordering::Release);
+                LEDGER_C_JOB_DONE.store(false, Ordering::Release);
+                LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+                LEDGER_C_JOB_PTR.store(job_c_addr, Ordering::Release);
 
-                // Hart 6 (Ledger-A) executes Shards 0..7 while Hart 5 (Ledger-B) executes Shards 8..15.
-                flush_shard_half(
+                // Hart 6 (Ledger-A) executes Stripe 0 (Shards 0..21) while Hart 5 (Ledger-B)
+                // executes Stripe 1 (Shards 21..42) and Hart 7 (Ledger-C) executes Stripe 2 (Shards 42..64).
+                flush_shard_range(
+                    &self.store,
+                    ext_succ_slice,
+                    pending_slice,
+                    &sorted_blocks,
+                    &sorted_blocks[..cut1],
+                    accounts_slice,
+                    0,
+                    21,
+                );
+
+                let stole_b = LEDGER_B_JOB_PTR
+                    .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+                if stole_b {
+                    flush_shard_range(
+                        &self.store,
+                        ext_succ_slice,
+                        pending_slice,
+                        &sorted_blocks,
+                        &sorted_blocks[cut1..cut2],
+                        accounts_slice,
+                        21,
+                        42,
+                    );
+                }
+
+                let stole_c = LEDGER_C_JOB_PTR
+                    .compare_exchange(job_c_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+                if stole_c {
+                    flush_shard_range(
+                        &self.store,
+                        ext_succ_slice,
+                        pending_slice,
+                        &sorted_blocks,
+                        &sorted_blocks[cut2..],
+                        accounts_slice,
+                        42,
+                        64,
+                    );
+                }
+
+                if !stole_b {
+                    while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
+                        core::hint::spin_loop();
+                    }
+                }
+                if !stole_c {
+                    while !LEDGER_C_JOB_DONE.load(Ordering::Acquire) {
+                        core::hint::spin_loop();
+                    }
+                }
+            } else if b_online {
+                let mid = sorted_blocks.partition_point(|e| (e.0.as_bytes()[0] >> 2) < 32);
+                let job_b = LedgerStripeFlushJob {
+                    store: &self.store as *const BtreeStore,
+                    ext_succ: ext_succ_slice as *const [(BlockHash, BlockHash)],
+                    pending: pending_slice as *const [(rsnano_core::PendingKey, DeferredPendingOp)],
+                    all_sorted_blocks: sorted_blocks.as_slice()
+                        as *const [(BlockHash, SavedBlock, BlockHash)],
+                    blocks_slice: &sorted_blocks[mid..]
+                        as *const [(BlockHash, SavedBlock, BlockHash)],
+                    accounts: accounts_slice as *const [(Account, (AccountInfo, AccountInfo))],
+                    shard_start: 32,
+                    shard_end: 64,
+                };
+                let job_b_addr = &job_b as *const LedgerStripeFlushJob as usize;
+                LEDGER_B_JOB_DONE.store(false, Ordering::Release);
+                LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+
+                flush_shard_range(
                     &self.store,
                     ext_succ_slice,
                     pending_slice,
                     &sorted_blocks,
                     &sorted_blocks[..mid],
                     accounts_slice,
-                    false,
+                    0,
+                    32,
                 );
 
-                // If Hart 5 was busy and hasn't claimed the job yet, steal it back and run Shards 8..15
-                // on Hart 6 immediately; otherwise wait for Hart 5 to finish Shards 8..15.
                 if LEDGER_B_JOB_PTR
-                    .compare_exchange(job_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
-                    flush_shard_half(
+                    flush_shard_range(
                         &self.store,
                         ext_succ_slice,
                         pending_slice,
                         &sorted_blocks,
                         &sorted_blocks[mid..],
                         accounts_slice,
-                        true,
+                        32,
+                        64,
                     );
                 } else {
                     while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
@@ -1128,23 +1272,15 @@ impl Ledger {
                     }
                 }
             } else {
-                flush_shard_half(
+                flush_shard_range(
                     &self.store,
                     ext_succ_slice,
                     pending_slice,
                     &sorted_blocks,
-                    &sorted_blocks[..mid],
-                    accounts_slice,
-                    false,
-                );
-                flush_shard_half(
-                    &self.store,
-                    ext_succ_slice,
-                    pending_slice,
                     &sorted_blocks,
-                    &sorted_blocks[mid..],
                     accounts_slice,
-                    true,
+                    0,
+                    64,
                 );
             }
 
@@ -1622,7 +1758,7 @@ mod slotted_btree_tests {
 
     #[test]
     fn embedded_block_successor_roundtrip() {
-        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(32)));
         for i in 0..kernel_common::storage::SHARD_COUNT {
             let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 64);
             *kernel_common::storage::SHARDS[i].lock() = Some(BTree::new(bpm));

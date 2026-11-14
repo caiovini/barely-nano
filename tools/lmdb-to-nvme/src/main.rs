@@ -92,7 +92,7 @@ impl Drop for MmapFile {
 // ── Barely-Nano NVMe Physical Layout Constants ───────────────────────────────
 const SECTOR_SIZE: u64 = 512;
 const BLOCK_SIZE: usize = 4096;
-const SHARD_COUNT: usize = 16;
+const SHARD_COUNT: usize = 64;
 
 const BLOOM_HEADER_LBA: u64 = 524_288; // 256 MB offset
 const BLOOM_DATA_LBA: u64 = 524_296; // 256 MB + 4 KB offset
@@ -766,10 +766,10 @@ impl BlockBloom {
 // ── LMDB Leaf Page Classifier & Entry Extractor ──────────────────────────────
 
 /// Classifies an LMDB 4KB page if it is a valid `P_LEAF` page belonging to one of our 7 tables.
-/// Returns `Some((table_ord, shard_mask: u16))` where bit `s` in `shard_mask` is set if the leaf
-/// page contains at least one entry belonging to shard `s` (`0..16`).
+/// Returns `Some((table_ord, shard_mask: u64))` where bit `s` in `shard_mask` is set if the leaf
+/// page contains at least one entry belonging to shard `s` (`0..64`).
 #[inline]
-fn classify_lmdb_leaf_page(page: &[u8; 4096], expected_pgno: usize) -> Option<(usize, u16)> {
+fn classify_lmdb_leaf_page(page: &[u8; 4096], expected_pgno: usize) -> Option<(usize, u64)> {
     let mp_pgno = u64::from_le_bytes(page[0..8].try_into().unwrap()) as usize;
     if mp_pgno != expected_pgno {
         return None;
@@ -832,22 +832,22 @@ fn classify_lmdb_leaf_page(page: &[u8; 4096], expected_pgno: usize) -> Option<(u
         _ => return None,
     };
 
-    let first_shard = (page[ptr0 + 8] >> 4) as usize;
+    let first_shard = (page[ptr0 + 8] >> 2) as usize;
     let last_ptr_off = 16 + (num_keys - 1) * 2;
     let last_ptr = u16::from_le_bytes([page[last_ptr_off], page[last_ptr_off + 1]]) as usize;
     if last_ptr < mp_upper || last_ptr + 8 + ksize > 4096 {
         return None;
     }
-    let last_shard = (page[last_ptr + 8] >> 4) as usize;
+    let last_shard = (page[last_ptr + 8] >> 2) as usize;
 
-    let mut mask = (1u16 << first_shard) | (1u16 << last_shard);
+    let mut mask = (1u64 << first_shard) | (1u64 << last_shard);
     if first_shard != last_shard {
         for i in 1..(num_keys - 1) {
             let p_off = 16 + i * 2;
             let p = u16::from_le_bytes([page[p_off], page[p_off + 1]]) as usize;
             if p >= mp_upper && p + 8 + ksize <= 4096 {
-                let s = (page[p + 8] >> 4) as usize;
-                mask |= 1u16 << s;
+                let s = (page[p + 8] >> 2) as usize;
+                mask |= 1u64 << s;
             }
         }
     }
@@ -1297,7 +1297,7 @@ impl ConfHeightIndex {
                                     continue;
                                 }
                                 let kslice = &p[ptr + 8..ptr + 8 + 32];
-                                if ((kslice[0] >> 4) as usize) != shard_idx {
+                                if ((kslice[0] >> 2) as usize) != shard_idx {
                                     continue;
                                 }
                                 let vslice = &p[ptr + 8 + 32..ptr + 8 + 32 + 40];
@@ -1307,8 +1307,8 @@ impl ConfHeightIndex {
                                     u64::from_be_bytes(vslice[8..16].try_into().unwrap());
                                 let mut account = [0u8; 32];
                                 account.copy_from_slice(kslice);
-                                let sub_idx = (((account[0] & 0x0F) as usize) << 4)
-                                    | ((account[1] >> 4) as usize);
+                                let sub_idx = (((account[0] & 0x03) as usize) << 6)
+                                    | ((account[1] >> 2) as usize);
                                 raw_subs[sub_idx].push(RawConf {
                                     account,
                                     height,
@@ -1361,7 +1361,7 @@ impl ConfHeightIndex {
                 handles.into_iter().map(|h| h.join().unwrap()).collect()
             });
 
-        let mut buckets = Vec::with_capacity(4096);
+        let mut buckets = Vec::with_capacity(SHARD_COUNT * 256);
         let mut total_acc = 0u64;
         let mut total_multi = 0u64;
         let mut total_sum = 0u64;
@@ -1376,7 +1376,7 @@ impl ConfHeightIndex {
 
     #[inline(always)]
     fn lookup(&self, account: &[u8; 32]) -> Option<(u64, u64)> {
-        let b_idx = ((account[0] as usize) << 4) | ((account[1] >> 4) as usize);
+        let b_idx = ((account[0] as usize) << 6) | ((account[1] >> 2) as usize);
         let bucket = &self.buckets[b_idx];
         bucket
             .binary_search_by(|e| e.account.cmp(account))
@@ -1496,12 +1496,12 @@ fn process_table_32<S: PageSink>(
                 continue;
             }
             let kslice = &p[ptr + 8..ptr + 8 + ksize];
-            if ((kslice[0] >> 4) as usize) != shard_idx {
+            if ((kslice[0] >> 2) as usize) != shard_idx {
                 continue;
             }
             let mut key = [0u8; 32];
             key[..ksize].copy_from_slice(kslice);
-            let sub_idx = (((key[0] & 0x0F) as usize) << 4) | ((key[1] >> 4) as usize);
+            let sub_idx = (((key[0] & 0x03) as usize) << 6) | ((key[1] >> 2) as usize);
             sub_buckets[sub_idx].push(EntryRef32 {
                 key,
                 pgno,
@@ -1643,12 +1643,12 @@ fn process_pruned_table<S: PageSink>(
                     continue;
                 }
                 let kslice = &p[ptr + 8..ptr + 8 + 32];
-                if ((kslice[0] >> 4) as usize) != shard_idx {
+                if ((kslice[0] >> 2) as usize) != shard_idx {
                     continue;
                 }
                 let mut key = [0u8; 32];
                 key.copy_from_slice(kslice);
-                let sub_idx = (((key[0] & 0x0F) as usize) << 4) | ((key[1] >> 4) as usize);
+                let sub_idx = (((key[0] & 0x03) as usize) << 6) | ((key[1] >> 2) as usize);
                 sub_buckets[sub_idx].push(key);
             }
         }
@@ -1757,12 +1757,12 @@ fn process_table_64<S: PageSink>(
                 continue;
             }
             let kslice = &p[ptr + 8..ptr + 8 + 64];
-            if ((kslice[0] >> 4) as usize) != shard_idx {
+            if ((kslice[0] >> 2) as usize) != shard_idx {
                 continue;
             }
             let mut key = [0u8; 64];
             key.copy_from_slice(kslice);
-            let sub_idx = (((key[0] & 0x0F) as usize) << 4) | ((key[1] >> 4) as usize);
+            let sub_idx = (((key[0] & 0x03) as usize) << 6) | ((key[1] >> 2) as usize);
             sub_buckets[sub_idx].push(EntryRef64 {
                 key,
                 pgno,
@@ -2150,7 +2150,11 @@ fn run() -> Result<(), String> {
     let mut global_rep_weight_count = 0u64;
     let mut total_btree_pages_written = 0u64;
 
-    let shard_order: [usize; SHARD_COUNT] = [0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 4];
+    let shard_order: [usize; SHARD_COUNT] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+        26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+        49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 16,
+    ];
 
     for (step_idx, &shard_idx) in shard_order.iter().enumerate() {
         let shard_t0 = Instant::now();
@@ -2274,8 +2278,8 @@ fn run() -> Result<(), String> {
         )?;
         shard_table_pages[shard_idx][ORD_ONLINE_WEIGHT] = Vec::new();
 
-        // 8. TABLE_VERSION (11) - CACHCNTS in Shard 4 (b'C' >> 4 == 4), REPTBL in Shard 5 (b'R' >> 4 == 5)
-        if shard_idx == 4 {
+        // 8. TABLE_VERSION (11) - CACHCNTS in Shard 16 (b'C' >> 2 == 16), REPTBL in Shard 20 (b'R' >> 2 == 20)
+        if shard_idx == (b'C' >> 2) as usize {
             let mut counts_key = [0u8; KEY_SIZE];
             counts_key[0] = TABLE_VERSION;
             counts_key[1..9].copy_from_slice(b"CACHCNTS");
@@ -2290,7 +2294,7 @@ fn run() -> Result<(), String> {
             counts_val[24..32].copy_from_slice(&global_confirmed_count.to_le_bytes());
             counts_val[32..40].copy_from_slice(&global_pruned_count.to_le_bytes());
             builder.push(&counts_key, &counts_val)?;
-        } else if shard_idx == 5 {
+        } else if shard_idx == (b'R' >> 2) as usize {
             let active_reps = get_active_compact_reps();
             let count = active_reps.len().min(256);
             if count > 0 {

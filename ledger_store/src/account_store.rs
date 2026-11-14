@@ -62,7 +62,7 @@ static HOT_ACCOUNTS: [spin::Mutex<[Option<HotAccountEntry>; HOT_ACCOUNT_SLOTS]>;
 #[inline]
 fn hot_account_slot(account: &Account) -> (usize, usize) {
     let b = account.as_bytes();
-    let shard = (b[0] >> 4) as usize;
+    let shard = (b[0] >> 2) as usize;
     let slot = (u16::from_ne_bytes([b[1], b[2]]) as usize) & (HOT_ACCOUNT_SLOTS - 1);
     (shard, slot)
 }
@@ -304,7 +304,7 @@ impl BtreeAccountStore {
                 } else {
                     let mut k = [0u8; KEY_SIZE];
                     k[0] = Self::TABLE_ID;
-                    k[1] = (i as u8) << 4;
+                    k[1] = (i as u8) << 2;
                     k
                 };
                 let mut it = db.iter(seek_key);
@@ -345,7 +345,7 @@ impl BtreeAccountStore {
                 } else {
                     let mut k = [0u8; KEY_SIZE];
                     k[0] = Self::TABLE_ID;
-                    k[1] = (i as u8) << 4;
+                    k[1] = (i as u8) << 2;
                     k
                 };
                 let mut it = db.iter(seek_key);

@@ -7,7 +7,7 @@ pub mod clint;
 pub mod crypto;
 pub mod logger;
 pub mod net;
-pub mod oled;
+pub mod hdmi_fb;
 pub mod pmic_wdt;
 pub mod sbi;
 pub mod soc;

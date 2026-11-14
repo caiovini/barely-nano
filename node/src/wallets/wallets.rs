@@ -1270,7 +1270,7 @@ mod tests {
         let _storage_guard = TEST_STORAGE_LOCK.lock();
         use kernel_common::storage::{init_wallet_storage, WALLET_SHARD};
 
-        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(32)));
         for i in 0..SHARD_COUNT {
             let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 64);
             *SHARDS[i].lock() = Some(BTree::new(bpm));

@@ -1,77 +1,44 @@
-//! SoC-specific hardware constants for SpacemiT K1 (8 GB LPDDR4X) and SpacemiT K3 (32 GB LPDDR5).
-//!
-//! Selected at compile time via Cargo features:
-//! - `--features k1` (default): SpacemiT K1 / Ky X1 (Orange Pi RV2, 8× X60 harts, 8 GB LPDDR4X)
-//! - `--features k3`: SpacemiT K3 (8/16× X100 harts, 32 GB LPDDR5)
+//! SoC-specific hardware constants for SpacemiT K3 Pico-ITX (16 GB LPDDR5, 8× X100 + 8× A100).
 
-#[cfg(feature = "k3")]
-mod platform {
-    /// Human-readable SoC identifier logged at boot.
-    pub const SOC_NAME: &str = "SpacemiT K3 (32 GB LPDDR5)";
+/// Human-readable SoC identifier logged at boot.
+pub const SOC_NAME: &str = "SpacemiT K3 Pico-ITX (16 GB LPDDR5, 8x X100 + 8x A100)";
 
-    /// Maximum hardware hart count supported by per-hart arrays and SMP dispatch.
-    pub const MAX_HARTS: usize = 16;
+/// Maximum hardware hart count supported by per-hart arrays and SMP dispatch
+/// (Cluster 0..1: 8× X100 @ 2.4 GHz VLEN=256; Cluster 2..3: 8× A100 @ 2.0 GHz VLEN=1024).
+pub const MAX_HARTS: usize = 16;
 
-    /// Base physical address of Upper DRAM Bank 1 (`0x1_0000_0000 ..`).
-    pub const HIGH_DRAM_BASE: usize = 0x1_0000_0000;
+/// Base physical address of the 3.00 GB global allocator heap (`0x1_1800_0000 .. 0x1_D800_0000`).
+pub const HEAP_START: usize = 0x1_1800_0000;
 
-    /// Target resident 4 KB frames per shard in DRAM Bank 1:
-    /// `409,600 * 4 KB = 1,600 MB/shard` = `25,600 MB (25.00 GB)` across 16 shards.
-    pub const HIGH_DRAM_TARGET_FRAMES: usize = 409_600;
+/// End physical address of the 3.00 GB global allocator heap (`0x1_D800_0000`).
+pub const HEAP_END: usize = 0x1_D800_0000;
 
-    /// Maximum 4 KB frames per shard in DRAM Bank 1:
-    /// `425,984 * 4 KB = 1,664 MB/shard` = `26,624 MB (26.00 GB)` across 16 shards.
-    pub const HIGH_DRAM_MAX_FRAMES: usize = 425_984;
+/// Base physical address of the 64-Shard B-Tree Buffer Pool in K3 LPDDR5 DRAM (`0x1_E000_0000 .. 0x4_E000_0000`).
+/// Located above the kernel (`0x1_0400_0000`), 256 MB per-hart stacks (`0x1_0800_0000`),
+/// and 3.0 GB global heap (`0x1_1800_0000 .. 0x1_D800_0000`), while leaving the top 512 MB
+/// (`0x4_E000_0000 .. 0x5_0000_0000`) untouched for U-Boot's relocated monitor, malloc arena,
+/// PCIe DMA rings, and SimpleFB HDMI framebuffer.
+pub const HIGH_DRAM_BASE: usize = 0x1_E000_0000;
 
-    /// CLINT `rdtime` counter frequency in Hz (verify `timebase-frequency` in K3 DTB on bring-up).
-    pub const CLINT_FREQ: u64 = 24_000_000;
+/// Target resident 4 KB frames per shard in K3 LPDDR5 DRAM:
+/// `49,152 * 4 KB = 192 MB/shard` = `12,288 MB (12.00 GB)` across 64 shards.
+pub const HIGH_DRAM_TARGET_FRAMES: usize = 49_152;
 
-    /// Debug UART0 MMIO base address (verify in K3 TRM / DTB on bring-up).
-    pub const UART0_BASE: usize = 0xD401_7000;
+/// Maximum 4 KB frames per shard in K3 LPDDR5 DRAM:
+/// `51,200 * 4 KB = 200 MB/shard` = `12,800 MB (12.50 GB)` across 64 shards.
+pub const HIGH_DRAM_MAX_FRAMES: usize = 51_200;
 
-    /// SoC hardware watchdog MMIO base address (verify in K3 TRM / DTB on bring-up).
-    pub const WDT_BASE: usize = 0xD408_0000;
+/// CLINT `rdtime` counter frequency in Hz on SpacemiT K3 (`24 MHz` `vctcxo_24m`).
+pub const CLINT_FREQ: u64 = 24_000_000;
 
-    /// Power management I2C bus 8 MMIO base address (verify in K3 TRM / DTB on bring-up).
-    pub const I2C8_BASE: usize = 0xD401_D800;
+/// SpacemiT K3 Debug UART0 MMIO base address (`serial@d4017000`).
+pub const UART0_BASE: usize = 0xD401_7000;
 
-    /// External header I2C4 MMIO base address for SSD1306/SH1106 OLED display.
-    pub const I2C4_BASE: usize = 0xD401_2800;
-}
+/// SpacemiT K3 SoC Watchdog MMIO base address (probed trap-safely at boot).
+pub const WDT_BASE: usize = 0xD408_0000;
 
-#[cfg(not(feature = "k3"))]
-mod platform {
-    /// Human-readable SoC identifier logged at boot.
-    pub const SOC_NAME: &str = "SpacemiT K1 / Ky X1 (8 GB LPDDR4X)";
+/// SpacemiT K3 PWR I2C8 MMIO base address (`i2c@d401d800`, connected to SpacemiT P1 PMIC at `0x41`).
+pub const I2C8_BASE: usize = 0xD401_D800;
 
-    /// Maximum hardware hart count on SpacemiT K1 (8× X60 harts across 2 clusters).
-    pub const MAX_HARTS: usize = 8;
-
-    /// Base physical address of Ky X1 DRAM Bank 1 (6 GB region: `0x1_0000_0000 .. 0x2_8000_0000`).
-    pub const HIGH_DRAM_BASE: usize = 0x1_0000_0000;
-
-    /// Target resident 4 KB frames per shard in DRAM Bank 1:
-    /// `81,920 * 4 KB = 320 MB/shard` = `5,120 MB (5.00 GB)` across 16 shards.
-    pub const HIGH_DRAM_TARGET_FRAMES: usize = 81_920;
-
-    /// Maximum 4 KB frames per shard in DRAM Bank 1:
-    /// `86,016 * 4 KB = 336 MB/shard` = `5,376 MB (5.25 GB)` across 16 shards.
-    pub const HIGH_DRAM_MAX_FRAMES: usize = 86_016;
-
-    /// CLINT `rdtime` counter frequency in Hz on SpacemiT K1 (24 MHz).
-    pub const CLINT_FREQ: u64 = 24_000_000;
-
-    /// SpacemiT K1 UART0 MMIO base address.
-    pub const UART0_BASE: usize = 0xD401_7000;
-
-    /// SpacemiT K1 SoC Watchdog MMIO base address.
-    pub const WDT_BASE: usize = 0xD408_0000;
-
-    /// SpacemiT K1 PWR I2C8 MMIO base address (connected to SPM8821 PMIC).
-    pub const I2C8_BASE: usize = 0xD401_D800;
-
-    /// SpacemiT K1 I2C4 MMIO base address (26-pin GPIO header Pins 3 & 5).
-    pub const I2C4_BASE: usize = 0xD401_2800;
-}
-
-pub use platform::*;
+/// SpacemiT K3 I2C4 MMIO base address (`i2c@d4012800`, HDMI DDC/EDID bus).
+pub const I2C4_BASE: usize = 0xD401_2800;

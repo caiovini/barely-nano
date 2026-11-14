@@ -57,7 +57,7 @@ impl Wake for Task {
             if !ptr.is_null() {
                 let executor = unsafe { &*ptr };
                 let hart_id = self.assigned_hart.load(Ordering::Relaxed) as usize;
-                if hart_id < 8 {
+                if hart_id < 16 {
                     executor.local_queues[hart_id].lock().push_back(self.clone());
                 } else {
                     executor.injector_queue.lock().push_back(self.clone());
@@ -75,7 +75,7 @@ pub struct TimerEntry {
 /// A minimal multicore-safe executor for bare-metal.
 #[derive(Clone)]
 pub struct Executor {
-    pub local_queues: Arc<[Mutex<VecDeque<Arc<Task>>>; 8]>,
+    pub local_queues: Arc<[Mutex<VecDeque<Arc<Task>>>; 16]>,
     pub injector_queue: Arc<Mutex<VecDeque<Arc<Task>>>>,
     pub timers: Arc<Mutex<alloc::vec::Vec<TimerEntry>>>,
     pub spawned_count: Arc<core::sync::atomic::AtomicUsize>,
@@ -86,6 +86,10 @@ pub struct Executor {
 impl Executor {
     pub fn new() -> Self {
         let queues = [
+            Mutex::new(VecDeque::new()), Mutex::new(VecDeque::new()),
+            Mutex::new(VecDeque::new()), Mutex::new(VecDeque::new()),
+            Mutex::new(VecDeque::new()), Mutex::new(VecDeque::new()),
+            Mutex::new(VecDeque::new()), Mutex::new(VecDeque::new()),
             Mutex::new(VecDeque::new()), Mutex::new(VecDeque::new()),
             Mutex::new(VecDeque::new()), Mutex::new(VecDeque::new()),
             Mutex::new(VecDeque::new()), Mutex::new(VecDeque::new()),
@@ -139,7 +143,7 @@ impl Executor {
         // Hart 1 is dedicated to Network/RPC polling, Harts 2 & 3 are dedicated to lock-free
         // Crypto (Ed25519) & MessageProcessor draining, and Harts 5 & 6 are dedicated to
         // Sharded Ledger Commit (Ledger-B / Ledger-A), so schedule async tasks across worker harts [0, 4, 7].
-        const WORKER_HARTS: [u8; 3] = [0, 4, 7];
+        const WORKER_HARTS: [u8; 4] = [0, 3, 4, 7];
         let idx = (self.next_spawn_hart.fetch_add(1, Ordering::Relaxed) as usize) % WORKER_HARTS.len();
         let hart_id = WORKER_HARTS[idx];
         
@@ -214,7 +218,7 @@ impl Executor {
         }
 
         // 3. Work Stealing: Try other worker queues
-        const WORKER_HARTS: [usize; 3] = [0, 4, 7];
+        const WORKER_HARTS: [usize; 4] = [0, 3, 4, 7];
         for &victim_id in &WORKER_HARTS {
             if victim_id == hart_id {
                 continue;

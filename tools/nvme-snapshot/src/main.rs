@@ -38,7 +38,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 // ── Bare-Metal NVMe Layout Constants (from `common/src/storage/mod.rs`) ──────
 const SECTOR_SIZE: u64 = 512;
 const BLOCK_SIZE: usize = 4096;
-const SHARD_COUNT: usize = 16;
+const SHARD_COUNT: usize = 64;
 
 const BLOOM_HEADER_LBA: u64 = 524_288; // 256 MB mark (1 page = 4 KB)
 const BLOOM_DATA_LBA: u64 = 524_296; // 64 MB = 16,384 pages = 131,072 sectors

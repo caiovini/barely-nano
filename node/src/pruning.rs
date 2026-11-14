@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn merchant_and_stealth_accounts_exempt_from_pruning() {
         let _storage_guard = crate::wallets::TEST_STORAGE_LOCK.lock();
-        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(32)));
         for i in 0..SHARD_COUNT {
             let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 64);
             *SHARDS[i].lock() = Some(BTree::new(bpm));
