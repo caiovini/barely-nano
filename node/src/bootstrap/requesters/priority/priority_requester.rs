@@ -117,6 +117,33 @@ impl PriorityRequester {
                     }
 
                     #[cfg(not(test))]
+                    if next.target_hash.is_zero() {
+                        let dep_opt = state_mutex
+                            .lock()
+                            .candidate_accounts
+                            .next_dependency_for_account(&next.account);
+                        if let Some(dep_hash) = dep_opt {
+                            if self.query_factory.block_exists(&dep_hash) {
+                                let mut state = state_mutex.lock();
+                                state.candidate_accounts.unblock_hash(&dep_hash);
+                                if state
+                                    .candidate_accounts
+                                    .count_by_dependency_account(&next.account)
+                                    > 0
+                                {
+                                    state.candidate_accounts.reset_last_request(&next.account);
+                                    state.candidate_accounts.priority_set_safe(&next.account);
+                                } else {
+                                    state.candidate_accounts.priority_erase(&next.account);
+                                }
+                                state.scoring.request_finished(channel.channel_id());
+                                self.state = PriorityState::Initial;
+                                continue;
+                            }
+                        }
+                    }
+
+                    #[cfg(not(test))]
                     if !next.target_hash.is_zero() {
                         if self.query_factory.block_exists(&next.target_hash) {
                             let is_fulfilled_dep = {

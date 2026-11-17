@@ -1277,6 +1277,23 @@ impl Ledger {
 
         #[cfg(not(test))]
         {
+            let old_conf_height = conf_info.as_ref().map(|c| c.height).unwrap_or(0);
+            let adjust_confirmed_count = |old_h: u64, new_h: u64| {
+                if new_h > old_h {
+                    self.store
+                        .cache
+                        .confirmed_count
+                        .fetch_add(new_h - old_h, Ordering::SeqCst);
+                } else if old_h > new_h {
+                    let diff = old_h - new_h;
+                    let _ = self.store.cache.confirmed_count.fetch_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |c| Some(c.saturating_sub(diff)),
+                    );
+                }
+            };
+
             let mut conf_missing = false;
             if !confirmed_frontier.is_zero() && !self.store.block.exists(&confirmed_frontier) {
                 confirmed_frontier = BlockHash::zero();
@@ -1319,6 +1336,7 @@ impl Ledger {
                         self.store.cache.account_count.fetch_sub(1, Ordering::SeqCst);
                         if conf_info.is_some() {
                             self.store.confirmation_height.del(account);
+                            adjust_confirmed_count(old_conf_height, 0);
                         }
                     } else if let Some(healed) = self.heal_account_from_block(
                         account,
@@ -1339,6 +1357,7 @@ impl Ledger {
                                     healed.head,
                                 ),
                             );
+                            adjust_confirmed_count(old_conf_height, healed.block_count);
                             confirmed_frontier = healed.head;
                         }
                     }
@@ -1349,13 +1368,16 @@ impl Ledger {
                             account,
                             &rsnano_core::ConfirmationHeightInfo::new(tip.height(), tip.hash()),
                         );
+                        adjust_confirmed_count(old_conf_height, tip.height());
                         confirmed_frontier = tip.hash();
                     } else {
                         self.store.confirmation_height.del(account);
+                        adjust_confirmed_count(old_conf_height, 0);
                     }
                 }
             } else if conf_missing {
                 self.store.confirmation_height.del(account);
+                adjust_confirmed_count(old_conf_height, 0);
             }
         }
 
@@ -1379,7 +1401,7 @@ impl Ledger {
         curr
     }
 
-    pub fn find_forward_gap_start(&self, account: &Account, _exclude_head: bool) -> BlockHash {
+    pub fn find_forward_gap_start(&self, account: &Account, exclude_head: bool) -> BlockHash {
         let (head, confirmed_frontier) = self.get_healed_account_frontiers(account);
         if !confirmed_frontier.is_zero() && confirmed_frontier != head {
             let walked = self.advance_existing_chain(confirmed_frontier, 16384);
@@ -1387,10 +1409,10 @@ impl Ledger {
                 return walked;
             }
         }
-        if !head.is_zero() {
+        if !exclude_head && !head.is_zero() {
             return self.advance_existing_chain(head, 4096);
         }
-        if !confirmed_frontier.is_zero() {
+        if !confirmed_frontier.is_zero() && (!exclude_head || confirmed_frontier != head) {
             return self.advance_existing_chain(confirmed_frontier, 4096);
         }
         let open_block = self
@@ -1401,7 +1423,10 @@ impl Ledger {
             .filter(|h| !h.is_zero() && self.store.block.exists(h))
             .unwrap_or_default();
         if !open_block.is_zero() {
-            return self.advance_existing_chain(open_block, 16384);
+            let walked = self.advance_existing_chain(open_block, 16384);
+            if !exclude_head || walked != head {
+                return walked;
+            }
         }
         BlockHash::zero()
     }

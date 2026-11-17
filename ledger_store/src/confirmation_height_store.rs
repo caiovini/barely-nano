@@ -152,8 +152,12 @@ impl BtreeConfirmationHeightStore {
                     if key[0] != Self::TABLE_ID {
                         return Err(());
                     }
-                    let mut stream = BufferReader::new(value);
-                    Ok(ConfirmationHeightInfo::deserialize(&mut stream).ok().map(|info| info.height))
+                    let h = if value.len() >= 8 {
+                        Some(u64::from_ne_bytes(value[0..8].try_into().unwrap()))
+                    } else {
+                        None
+                    };
+                    Ok(h)
                 }) {
                     match step {
                         Ok(Some(h)) => {

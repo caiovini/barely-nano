@@ -90,11 +90,6 @@ impl BootstrapState {
         {
             if let Some(gap_hash) = self.candidate_accounts.gap_target(&next.account) {
                 next.target_hash = gap_hash;
-            } else if let Some(dep_hash) = self
-                .candidate_accounts
-                .next_dependency_for_account(&next.account)
-            {
-                next.target_hash = dep_hash;
             }
         }
 

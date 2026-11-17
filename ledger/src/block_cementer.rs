@@ -157,10 +157,12 @@ impl<'a> BlockCementer<'a> {
 
                     conf_heights.insert(account, Some(conf_height.clone()));
                     dirty_heights.insert(account, conf_height);
-                    self.store
-                        .cache
-                        .confirmed_count
-                        .fetch_add(1, Ordering::SeqCst);
+                    let max_conf = self.store.cache.block_count.load(Ordering::Relaxed);
+                    let _ = self.store.cache.confirmed_count.fetch_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |c| Some((c + 1).min(max_conf)),
+                    );
 
                     self.stats.add_dir(
                         StatType::ConfirmationHeight,
