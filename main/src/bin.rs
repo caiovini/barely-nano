@@ -1625,9 +1625,32 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
     let wal_ms = (ws[3].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
 
     let h1_ms = |i: usize| (HART1_PROF[i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    let tick_ms = |c: &core::sync::atomic::AtomicU64| (c.load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    let io = &kernel_common::uboot::DEV_IO_PROF;
+    let io_n = |i: usize| io[i].load(Ordering::Relaxed);
+    let io_ms = |i: usize| tick_ms(&io[i]);
+    let sp = &kernel_common::storage::bpm::STORAGE_PROF;
+    let sp_n = |i: usize| sp[i].load(Ordering::Relaxed);
+    let sp_ms = |i: usize| tick_ms(&sp[i]);
+    let hart_arr = |arr: &[core::sync::atomic::AtomicU64; 8], as_ms: bool| {
+        let v = |i: usize| {
+            if as_ms {
+                tick_ms(&arr[i]) as u64
+            } else {
+                arr[i].load(Ordering::Relaxed)
+            }
+        };
+        alloc::format!(
+            "[{},{},{},{},{},{},{},{}]",
+            v(0), v(1), v(2), v(3), v(4), v(5), v(6), v(7)
+        )
+    };
+    let miss_n_hart = hart_arr(&kernel_common::storage::bpm::MISS_N_HART, false);
+    let miss_ms_hart = hart_arr(&kernel_common::storage::bpm::MISS_TICKS_HART, true);
+    let shard_hold_ms_hart = hart_arr(&kernel_common::storage::LOCK_HOLD, true);
 
     let body = alloc::format!(
-        "{{\"network\":\"{}\",\"uptime_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{}}}",
+        "{{\"network\":\"{}\",\"uptime_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{}}}",
         node.network_params.network.current_network.as_str(),
         uptime_sec,
         blocks_stored,
@@ -1661,6 +1684,25 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
         h1_ms(1),
         h1_ms(2),
         h1_ms(3),
+        io_n(0),
+        io_n(1),
+        io_ms(2),
+        io_ms(3),
+        io_n(4),
+        io_n(5),
+        io_ms(6),
+        io_ms(7),
+        sp_n(0),
+        sp_ms(1),
+        tick_ms(&kernel_common::storage::LOCK_WAIT[5]),
+        tick_ms(&kernel_common::storage::LOCK_HOLD[5]),
+        tick_ms(&kernel_common::storage::LOCK_WAIT[6]),
+        tick_ms(&kernel_common::storage::LOCK_HOLD[6]),
+        tick_ms(&rsnano_ledger::LEDGER_PROF[1]),
+        tick_ms(&rsnano_ledger::LEDGER_PROF[2]),
+        miss_n_hart,
+        miss_ms_hart,
+        shard_hold_ms_hart,
     );
 
     alloc::format!(

@@ -101,7 +101,7 @@ impl PriorityRequester {
                     }
                 }
                 PriorityState::WaitPriority(ref channel) => {
-                    let next = {
+                    let mut next = {
                         let mut state = state_mutex.lock();
                         let next = state.next_priority(now);
                         if next.account.is_zero() {
@@ -139,6 +139,8 @@ impl PriorityRequester {
                                 state.scoring.request_finished(channel.channel_id());
                                 self.state = PriorityState::Initial;
                                 continue;
+                            } else if next.fails > 0 {
+                                next.target_hash = dep_hash;
                             }
                         }
                     }

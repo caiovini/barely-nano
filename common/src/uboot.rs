@@ -528,17 +528,31 @@ pub fn dev_close(info: &mut DeviceInfo) -> i32 {
     }
 }
 
+/// Block-device I/O profiling (CLINT ticks unless noted):
+/// [0]=read calls, [1]=read sectors, [2]=read UBOOT_LOCK wait, [3]=read device time,
+/// [4]=write calls, [5]=write sectors, [6]=write UBOOT_LOCK wait, [7]=write device time.
+pub static DEV_IO_PROF: [core::sync::atomic::AtomicU64; 8] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 8];
+
 pub fn dev_read(info: &DeviceInfo, start_block: u64, blocks: u64, buffer: *mut u8) -> i32 {
     let api = UBOOT_API.load(Ordering::Relaxed);
     if !api.is_null() {
+        let t0 = crate::clint::mtime();
         let _lock = UBOOT_LOCK.lock();
+        let t1 = crate::clint::mtime();
         let _ctx = UBootContext::enter();
-        unsafe {
+        let res = unsafe {
             let mut ret = 0;
             let mut actual_blocks = 0u64;
             ((*api).syscall)(API_DEV_READ, &mut ret, info as *const DeviceInfo, buffer, &blocks, &start_block, &mut actual_blocks);
             if ret == 0 { actual_blocks as i32 } else { -ret }
-        }
+        };
+        let t2 = crate::clint::mtime();
+        DEV_IO_PROF[0].fetch_add(1, Ordering::Relaxed);
+        DEV_IO_PROF[1].fetch_add(blocks, Ordering::Relaxed);
+        DEV_IO_PROF[2].fetch_add(t1.wrapping_sub(t0), Ordering::Relaxed);
+        DEV_IO_PROF[3].fetch_add(t2.wrapping_sub(t1), Ordering::Relaxed);
+        res
     } else {
         -1
     }
@@ -547,13 +561,21 @@ pub fn dev_read(info: &DeviceInfo, start_block: u64, blocks: u64, buffer: *mut u
 pub fn dev_write(info: &DeviceInfo, start_block: u64, blocks: u64, buffer: *const u8) -> i32 {
     let api = UBOOT_API.load(Ordering::Relaxed);
     if !api.is_null() {
+        let t0 = crate::clint::mtime();
         let _lock = UBOOT_LOCK.lock();
+        let t1 = crate::clint::mtime();
         let _ctx = UBootContext::enter();
-        unsafe {
+        let res = unsafe {
             let mut ret = 0;
             ((*api).syscall)(API_DEV_WRITE, &mut ret, info as *const DeviceInfo, buffer, &blocks, &start_block);
             if ret == 0 { blocks as i32 } else { -ret }
-        }
+        };
+        let t2 = crate::clint::mtime();
+        DEV_IO_PROF[4].fetch_add(1, Ordering::Relaxed);
+        DEV_IO_PROF[5].fetch_add(blocks, Ordering::Relaxed);
+        DEV_IO_PROF[6].fetch_add(t1.wrapping_sub(t0), Ordering::Relaxed);
+        DEV_IO_PROF[7].fetch_add(t2.wrapping_sub(t1), Ordering::Relaxed);
+        res
     } else {
         -1
     }

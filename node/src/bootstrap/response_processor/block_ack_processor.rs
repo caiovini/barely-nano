@@ -310,8 +310,7 @@ impl BlockAckProcessor {
                     } else {
                         prev_existing_hash
                     };
-                    let (head, _) = self.ledger.get_healed_account_frontiers(&account);
-                    if next_target != head {
+                    if next_target != query.hash {
                         let mut guard = self.state.lock();
                         guard
                             .candidate_accounts

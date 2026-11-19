@@ -76,7 +76,7 @@ pub static LOCK_HOLD: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::
 pub static LOCK_ACQ: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::atomic::AtomicU64::new(0) }; 8];
 
 #[inline]
-fn current_hart() -> usize {
+pub(crate) fn current_hart() -> usize {
     #[cfg(target_arch = "riscv64")]
     {
         let id: usize;

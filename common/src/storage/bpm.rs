@@ -26,6 +26,11 @@ pub static STORAGE_PROF: [AtomicU64; 13] = [
 /// The fundamental unit of storage and caching. Matches typical SSD block sizes.
 pub const BLOCK_SIZE: usize = 4096;
 
+/// Per-hart Buffer Pool miss attribution: number of misses that went to NVMe, and their
+/// total cost in CLINT ticks (victim selection + device read), indexed by hart id.
+pub static MISS_N_HART: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+pub static MISS_TICKS_HART: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
 /// A container for a single cached block of data.
 pub struct Frame {
     pub data: crate::storage::AlignedBlock,
@@ -527,6 +532,9 @@ impl BufferPool {
         STORAGE_PROF[1].fetch_add(now - t0, Ordering::Relaxed);
         STORAGE_PROF[2].fetch_add(1, Ordering::Relaxed);
         STORAGE_PROF[3].fetch_add(now - tr, Ordering::Relaxed);
+        let hart = crate::storage::current_hart();
+        MISS_N_HART[hart].fetch_add(1, Ordering::Relaxed);
+        MISS_TICKS_HART[hart].fetch_add(now - t0, Ordering::Relaxed);
 
         self.set_page_frame(page_id, victim_frame_id as u32);
         Ok(victim_frame_id)
