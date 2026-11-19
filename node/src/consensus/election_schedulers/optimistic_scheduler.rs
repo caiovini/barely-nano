@@ -147,6 +147,11 @@ impl OptimisticScheduler {
     }
 
     pub fn container_info(&self) -> ContainerInfo {
+        #[cfg(not(test))]
+        let Some(guard) = self.candidates.try_lock() else {
+            return ContainerInfo::new();
+        };
+        #[cfg(test)]
         let guard = self.candidates.lock();
         [(
             "candidates",
@@ -197,7 +202,7 @@ impl OptimisticScheduler {
         if let Some(block) = any.get_block(&head) {
             // Ensure block is not already confirmed
             if !self.confirming_set.contains(&block.hash())
-                || any.confirmed().block_exists_or_pruned(&block.hash())
+                && !any.confirmed().block_exists_or_pruned(&block.hash())
             {
                 // Try to insert it into AEC
                 // We check for AEC vacancy inside our predicate

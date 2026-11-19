@@ -942,6 +942,7 @@ fn boot_hart_main(hart_id: usize) {
                 wake_val
             );
         }
+        kernel_common::watchdog::enable();
     } else {
         // Other harts wait for the leader to finish node setup
         while !NODE_INIT_COMPLETE.load(Ordering::SeqCst) {
@@ -1078,7 +1079,9 @@ fn run_consensus_and_elections_loop(
         let mut worked = false;
 
         // 2. Drive priority & periodic election schedulers (co-located in Cluster 1 L2)
-        node_arc.election_schedulers.priority.run_one();
+        if node_arc.election_schedulers.priority.run_if_notified() {
+            worked = true;
+        }
         if mtime - last_scheduler_tick > millis(100) {
             if node_arc.active.read().len() < 4096 && node_arc.ledger.backlog_count() > 0 {
                 if let Some(mut guard) = node_arc.backlog_scan.try_lock() {
@@ -1131,6 +1134,7 @@ fn run_vote_processor_loop(
         let mtime = kernel_common::clint::mtime();
 
         if mtime - last_watchdog > seconds(1) {
+            kernel_common::watchdog::heartbeat_hart0(mtime);
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
         }
@@ -1148,24 +1152,22 @@ fn run_vote_processor_loop(
         if node_arc.vote_cache_processor.run_once() {
             worked = true;
         }
-        if node_arc.vote_processor.run_once() {
-            worked = true;
-        }
-        if node_arc.config.enable_vote_rebroadcast && node_arc.vote_rebroadcaster.run_once() {
-            worked = true;
-        }
-        for _ in 0..8 {
-            if exec.run_once(hart_id) {
+        for _ in 0..4 {
+            if node_arc.vote_processor.run_once() {
                 worked = true;
             } else {
                 break;
             }
         }
-        if !node_arc.signature_checker.is_empty_relaxed() {
+        if node_arc.config.enable_vote_rebroadcast && node_arc.vote_rebroadcaster.run_once() {
+            worked = true;
+        }
+        if !worked && !node_arc.signature_checker.is_empty_relaxed() {
             if node_arc.signature_checker.help_verify() > 0 {
                 worked = true;
             }
         }
+        let _ = (&exec, hart_id);
         adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
@@ -1450,10 +1452,10 @@ fn is_http_request_complete(req: &str) -> bool {
 
 static RPC_ACTIVE_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Node>) {
+fn poll_rpc_request(ctx: &mut kernel_common::net::NetworkContext) -> Option<(alloc::string::String, bool)> {
     let net_cfg = kernel_common::net::get_net_config();
     if !net_cfg.rpc_enable {
-        return;
+        return None;
     }
     use smoltcp::socket::tcp::{Socket as SmolTcpSocket, State as SmolTcpState};
     let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handle);
@@ -1489,38 +1491,36 @@ fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Nod
                 RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
                 socket.abort();
                 let _ = socket.listen(net_cfg.rpc_port);
-                return;
+                return None;
             }
 
             if socket.can_recv() {
-                let mut response: Option<alloc::string::String> = None;
+                let mut extracted: Option<alloc::string::String> = None;
                 let enable_control = net_cfg.rpc_enable_control;
                 let _ = socket.recv(|buffer| {
                     let request = core::str::from_utf8(buffer).unwrap_or("");
                     if !is_http_request_complete(request) && buffer.len() < 60_000 {
                         return (0, ());
                     }
-                    let handler = RpcCommandHandler::new(node.clone(), enable_control);
-                    let server = BareMetalRpcServer::new(handler);
-
-                    if let Some(resp_str) = server.handle_request(request) {
-                        response = Some(resp_str);
-                    } else {
-                        response = Some(alloc::string::String::from(
-                            "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n",
-                        ));
-                    }
+                    extracted = Some(alloc::string::String::from(request));
                     (buffer.len(), ())
                 });
-                if let Some(resp_str) = response {
-                    RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                    let _ = socket.send_slice(resp_str.as_bytes());
-                    socket.close();
+                if let Some(req_str) = extracted {
+                    return Some((req_str, enable_control));
                 }
             }
         }
         _ => {}
     }
+    None
+}
+
+fn send_rpc_response(ctx: &mut kernel_common::net::NetworkContext, resp_str: &str) {
+    use smoltcp::socket::tcp::Socket as SmolTcpSocket;
+    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handle);
+    RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+    let _ = socket.send_slice(resp_str.as_bytes());
+    socket.close();
 }
 
 static DASHBOARD_HTML: &[u8] = include_bytes!("dashboard.html");
@@ -1610,8 +1610,8 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
     let blocks_stored = node.ledger.block_count();
     let blocks_confirmed = node.ledger.confirmed_count();
     let unchecked = node.unchecked.len();
-    let bpq_len = node.block_processor.total_queue_len();
-    let confirming_set_len = node.confirming_set.len();
+    let bpq_len = node.block_processor.try_total_queue_len().unwrap_or(0);
+    let confirming_set_len = node.confirming_set.try_len().unwrap_or(0);
     let active_elections = node.active.try_read().map(|a| a.len()).unwrap_or(0);
 
     let bp = &rsnano_node::block_processing::BLOCK_PROF;
@@ -2331,6 +2331,7 @@ fn run_storage_flush_and_monitor_loop(
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    kernel_common::watchdog::mark_fatal_stall();
     let hart_id: usize;
     unsafe {
         core::arch::asm!("mv {0}, tp", out(reg) hart_id);
@@ -2927,6 +2928,7 @@ fn run_maintenance_and_network_loop(
 
         let mut retry_net = false;
         let mut net_active = false;
+        let mut pending_rpc = None;
         let hp0 = kernel_common::clint::mtime();
         {
             let _intr = kernel_common::uart::InterruptGuard::new();
@@ -2934,7 +2936,7 @@ fn run_maintenance_and_network_loop(
             let mut ctx = kernel_common::net::NET.lock();
             if let Some(ref mut ctx_val) = *ctx {
                 net_active = ctx_val.poll(mtime);
-                handle_rpc_server(ctx_val, node_arc.clone());
+                pending_rpc = poll_rpc_request(ctx_val);
                 handle_dashboard_server(ctx_val, node_arc.clone());
 
                 if mtime - last_ping > seconds(5) {
@@ -2949,6 +2951,22 @@ fn run_maintenance_and_network_loop(
                     retry_net = true;
                     last_ping = mtime;
                 }
+            }
+            drop(ctx);
+            kernel_common::net::HART1_WANTS_NET.store(false, Ordering::Release);
+        }
+
+        if let Some((req_str, enable_control)) = pending_rpc {
+            let handler = RpcCommandHandler::new(node_arc.clone(), enable_control);
+            let server = BareMetalRpcServer::new(handler);
+            let resp_str = server.handle_request(&req_str).unwrap_or_else(|| {
+                alloc::string::String::from("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+            });
+            let _intr = kernel_common::uart::InterruptGuard::new();
+            kernel_common::net::HART1_WANTS_NET.store(true, Ordering::Release);
+            let mut ctx = kernel_common::net::NET.lock();
+            if let Some(ref mut ctx_val) = *ctx {
+                send_rpc_response(ctx_val, &resp_str);
             }
             drop(ctx);
             kernel_common::net::HART1_WANTS_NET.store(false, Ordering::Release);
@@ -2971,7 +2989,11 @@ fn run_maintenance_and_network_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            let processed = node_arc.message_processor.lock().total_processed();
+            let processed = node_arc
+                .message_processor
+                .try_lock()
+                .map(|m| m.total_processed())
+                .unwrap_or(0);
             tracing::debug!(
                 "[heartbeat] Hart 1 (Maint+Net) | Iters: {} | Msgs: {} | ms net={} msgproc={} sig={} exec={}",
                 iterations,

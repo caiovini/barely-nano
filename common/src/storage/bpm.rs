@@ -369,13 +369,26 @@ impl BufferPool {
     fn page_priority(page_id: usize, bytes: &[u8; BLOCK_SIZE]) -> u8 {
         if page_id == 0 || bytes[0] == 0 {
             // Shard metadata (page 0) or internal B-Tree routing node (`is_leaf == 0`)
-            3
-        } else if matches!(bytes[4], 2..=5) {
-            // Hot Account (2), ConfirmationHeight (3), Pending (4), or RepWeight (5) leaf
-            2
+            4
         } else {
-            // Cold Block (1) or Successor (8) leaf
-            1
+            let num_keys = u16::from_le_bytes([bytes[1], bytes[2]]) as usize;
+            let table_id = if num_keys > 0 {
+                let cell_off = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+                if cell_off + 3 < BLOCK_SIZE {
+                    bytes[cell_off + 3]
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            if matches!(table_id, 1 | 3 | 7 | 11 | 12) {
+                // Hot Account (1), ConfirmationHeight (3), Pending (7), Version (11), or RepWeight (12) leaf
+                2
+            } else {
+                // Cold Block/Successor (2), Pruned (5), Peer (6), FinalVote (8), or OnlineWeight (9) leaf
+                1
+            }
         }
     }
 

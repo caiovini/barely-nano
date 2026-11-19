@@ -1,5 +1,3 @@
-use core::sync::atomic::Ordering;
-
 use rsnano_core::{Amount, PublicKey};
 use rsnano_stats::StatType;
 
@@ -29,11 +27,6 @@ impl<'a> RollbackInstructionsExecutor<'a> {
         self.update_account_table();
         self.update_block_table();
         self.roll_back_representative_cache();
-        self.ledger
-            .store
-            .cache
-            .block_count
-            .fetch_sub(1, Ordering::SeqCst);
 
         self.ledger
             .stats

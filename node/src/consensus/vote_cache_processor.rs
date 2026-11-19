@@ -113,7 +113,11 @@ impl VoteCacheProcessor {
 
 impl ContainerInfoProvider for VoteCacheProcessor {
     fn container_info(&self) -> ContainerInfo {
-        [("triggered", self.len(), core::mem::size_of::<BlockHash>())].into()
+        #[cfg(test)]
+        let len = self.len();
+        #[cfg(not(test))]
+        let len = self.state.try_lock().map(|g| g.triggered.len()).unwrap_or(0);
+        [("triggered", len, core::mem::size_of::<BlockHash>())].into()
     }
 }
 

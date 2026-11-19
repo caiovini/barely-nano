@@ -1302,6 +1302,18 @@ impl Ledger {
 
             if !head.is_zero() {
                 let head_exists = self.store.block.exists(&head);
+                if head_exists && !conf_missing {
+                    let has_valid_succ = self
+                        .store
+                        .successors
+                        .get(&head)
+                        .filter(|s| !s.is_zero() && *s != head)
+                        .map(|s| self.store.block.exists(&s))
+                        .unwrap_or(false);
+                    if !has_valid_succ {
+                        return (head, confirmed_frontier);
+                    }
+                }
                 let mut start = if head_exists {
                     head
                 } else if !confirmed_frontier.is_zero() {
@@ -1344,11 +1356,19 @@ impl Ledger {
                         account_info,
                         rsnano_core::utils::UnixMillisTimestamp::now(),
                     ) {
-                        if conf_missing
-                            || conf_info
-                                .as_ref()
-                                .map(|c| c.height > healed.block_count)
-                                .unwrap_or(false)
+                        let chain_ended = self
+                            .store
+                            .successors
+                            .get(&healed.head)
+                            .filter(|s| !s.is_zero() && *s != healed.head)
+                            .map(|s| !self.store.block.exists(&s))
+                            .unwrap_or(true);
+                        if (conf_missing && (chain_ended || healed.block_count >= old_conf_height))
+                            || (chain_ended
+                                && conf_info
+                                    .as_ref()
+                                    .map(|c| c.height > healed.block_count)
+                                    .unwrap_or(false))
                         {
                             self.store.confirmation_height.put(
                                 account,
@@ -1401,11 +1421,24 @@ impl Ledger {
         curr
     }
 
+    fn is_chain_break(&self, hash: &BlockHash) -> bool {
+        if hash.is_zero() {
+            return false;
+        }
+        match self.store.successors.get(hash) {
+            Some(succ) if !succ.is_zero() && succ != *hash => !self.store.block.exists(&succ),
+            _ => true,
+        }
+    }
+
     pub fn find_forward_gap_start(&self, account: &Account, exclude_head: bool) -> BlockHash {
         let (head, confirmed_frontier) = self.get_healed_account_frontiers(account);
         if !confirmed_frontier.is_zero() && confirmed_frontier != head {
             let walked = self.advance_existing_chain(confirmed_frontier, 16384);
-            if !walked.is_zero() && walked != head {
+            if !walked.is_zero()
+                && walked != head
+                && (!exclude_head || self.is_chain_break(&walked))
+            {
                 return walked;
             }
         }
@@ -1413,7 +1446,10 @@ impl Ledger {
             return self.advance_existing_chain(head, 4096);
         }
         if !confirmed_frontier.is_zero() && (!exclude_head || confirmed_frontier != head) {
-            return self.advance_existing_chain(confirmed_frontier, 4096);
+            let walked = self.advance_existing_chain(confirmed_frontier, 4096);
+            if !exclude_head || (walked != head && self.is_chain_break(&walked)) {
+                return walked;
+            }
         }
         let open_block = self
             .store
@@ -1424,7 +1460,7 @@ impl Ledger {
             .unwrap_or_default();
         if !open_block.is_zero() {
             let walked = self.advance_existing_chain(open_block, 16384);
-            if !exclude_head || walked != head {
+            if !exclude_head || (walked != head && self.is_chain_break(&walked)) {
                 return walked;
             }
         }

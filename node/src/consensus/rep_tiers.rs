@@ -100,7 +100,14 @@ impl Deref for CurrentRepTiers {
 
 impl ContainerInfoProvider for CurrentRepTiers {
     fn container_info(&self) -> ContainerInfo {
-        let tiers = self.lock();
+        #[cfg(test)]
+        let Some(tiers) = Some(self.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(tiers) = self.0.try_lock() else {
+            return ContainerInfo::default();
+        };
         [
             ("tier_1", tiers.tier1.len(), size_of::<PublicKey>()),
             ("tier_2", tiers.tier2.len(), size_of::<PublicKey>()),

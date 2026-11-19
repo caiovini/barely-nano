@@ -127,7 +127,7 @@ impl Requesters {
                     }
 
                     let mut sent_any = false;
-                    for _ in 0..64 {
+                    for _ in 0..8 {
                         let now = clock.now();
                         let result = requester.poll_step(&state_arc, now);
 
@@ -177,7 +177,7 @@ impl Requesters {
                     }
 
                     let mut sent_any = false;
-                    for _ in 0..32 {
+                    for _ in 0..8 {
                         let now = clock.now();
                         let result = {
                             let mut state = state_arc.lock();

@@ -109,7 +109,14 @@ impl ManualScheduler {
     }
 
     pub fn container_info(&self) -> ContainerInfo {
-        let guard = self.mutex.lock();
+        #[cfg(test)]
+        let Some(guard) = Some(self.mutex.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.mutex.try_lock() else {
+            return ContainerInfo::default();
+        };
         [(
             "queue",
             guard.queue.len(),

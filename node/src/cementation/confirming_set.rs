@@ -184,6 +184,10 @@ impl ConfirmingSet {
         self.thread.len()
     }
 
+    pub fn try_len(&self) -> Option<usize> {
+        self.thread.try_len()
+    }
+
     pub fn info(&self) -> ConfirmingSetInfo {
         let guard = self.thread.mutex.lock();
         ConfirmingSetInfo {
@@ -226,7 +230,14 @@ impl ConfirmingSet {
 
 impl ContainerInfoProvider for ConfirmingSet {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.thread.mutex.lock();
+        #[cfg(test)]
+        let Some(guard) = Some(self.thread.mutex.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.thread.mutex.try_lock() else {
+            return ContainerInfo::default();
+        };
         [
             ("set", guard.set.len(), 0),
             ("deferred", guard.deferred.len(), 0),
@@ -310,6 +321,11 @@ impl ConfirmingSetThread {
     fn len(&self) -> usize {
         let guard = self.mutex.lock();
         guard.set.len() + guard.current.len()
+    }
+
+    fn try_len(&self) -> Option<usize> {
+        let guard = self.mutex.try_lock()?;
+        Some(guard.set.len() + guard.current.len())
     }
 
     fn run_once(&self) {

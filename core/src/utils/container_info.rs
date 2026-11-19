@@ -211,7 +211,16 @@ where
     T: ContainerInfoProvider,
 {
     fn container_info(&self) -> ContainerInfo {
-        self.lock().container_info()
+        #[cfg(not(test))]
+        {
+            self.try_lock()
+                .map(|g| g.container_info())
+                .unwrap_or_default()
+        }
+        #[cfg(test)]
+        {
+            self.lock().container_info()
+        }
     }
 }
 
@@ -220,7 +229,16 @@ where
     T: ContainerInfoProvider,
 {
     fn container_info(&self) -> ContainerInfo {
-        self.read().container_info()
+        #[cfg(not(test))]
+        {
+            self.try_read()
+                .map(|g| g.container_info())
+                .unwrap_or_default()
+        }
+        #[cfg(test)]
+        {
+            self.read().container_info()
+        }
     }
 }
 

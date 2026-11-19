@@ -126,6 +126,11 @@ impl HintedScheduler {
     }
 
     pub fn container_info(&self) -> ContainerInfo {
+        #[cfg(not(test))]
+        let Some(guard) = self.cooldowns.try_lock() else {
+            return ContainerInfo::new();
+        };
+        #[cfg(test)]
         let guard = self.cooldowns.lock();
         [(
             "cooldowns",

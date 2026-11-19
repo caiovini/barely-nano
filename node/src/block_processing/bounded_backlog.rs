@@ -211,7 +211,14 @@ impl BoundedBacklog {
 
 impl ContainerInfoProvider for BoundedBacklog {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.backlog_impl.mutex.lock();
+        #[cfg(test)]
+        let Some(guard) = Some(self.backlog_impl.mutex.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.backlog_impl.mutex.try_lock() else {
+            return ContainerInfo::default();
+        };
         ContainerInfo::builder()
             .leaf("backlog", guard.index.len(), 0)
             .node("index", guard.index.container_info())

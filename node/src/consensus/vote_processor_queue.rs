@@ -169,7 +169,14 @@ impl VoteProcessorQueue {
 
 impl ContainerInfoProvider for VoteProcessorQueue {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.data.lock();
+        #[cfg(test)]
+        let Some(guard) = Some(self.data.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.data.try_lock() else {
+            return ContainerInfo::default();
+        };
         ContainerInfo::builder()
             .leaf(
                 "votes",

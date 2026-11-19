@@ -18,6 +18,7 @@ struct Args {
     rpc: String,
     network: String,
     blocks: usize,
+    duration_secs: Option<u64>,
     rate: usize,
     accounts: usize,
     batch_size: usize,
@@ -33,6 +34,7 @@ impl Default for Args {
             rpc: "http://192.168.1.200:7076".to_string(),
             network: "dev".to_string(),
             blocks: 1000,
+            duration_secs: None,
             rate: 500,
             accounts: 1,
             batch_size: 200,
@@ -65,6 +67,14 @@ impl Args {
                         .context("Missing value for --blocks")?
                         .parse()
                         .context("Invalid number for --blocks")?;
+                }
+                "-d" | "--duration" => {
+                    args.duration_secs = Some(
+                        iter.next()
+                            .context("Missing value for --duration")?
+                            .parse()
+                            .context("Invalid number for --duration")?,
+                    );
                 }
                 "-r" | "--rate" => {
                     args.rate = iter
@@ -224,26 +234,7 @@ async fn main() -> Result<()> {
         .target
         .parse()
         .with_context(|| format!("Invalid target socket address '{}'", args.target))?;
-
-    println!(
-        "\n[2/4] Connecting to Nano node peering socket on {}...",
-        target_addr
-    );
     let genesis_hash: BlockHash = DEV_GENESIS_BLOCK.hash();
-
-    let mut session = PeerSession::connect(target_addr, network, genesis_hash)
-        .await
-        .context("P2P Connection or Handshake Failed")?;
-
-    println!(
-        "\n[3/4] Streaming {} blocks at {}...",
-        args.blocks,
-        if args.rate == 0 {
-            "unlimited burst".to_string()
-        } else {
-            format!("{} bps", args.rate)
-        }
-    );
 
     let mut generator = if args.zero_pow {
         BlockGenerator::with_zero_pow()
@@ -267,6 +258,132 @@ async fn main() -> Result<()> {
     }
     generator.init_accounts(args.accounts);
 
+    if let Some(duration_secs) = args.duration_secs {
+        println!(
+            "\n[2/4] Connecting to Nano node peering socket on {}...",
+            target_addr
+        );
+        let mut session = PeerSession::connect(target_addr, network, genesis_hash)
+            .await
+            .context("P2P Connection or Handshake Failed")?;
+        let target_duration = std::time::Duration::from_secs(duration_secs);
+        let init_c: u64 = initial_count
+            .as_ref()
+            .and_then(|c| c.count.parse().ok())
+            .unwrap_or(1);
+        println!(
+            "  -> Continuous duration mode: streaming for {}s (batch_size={}, rate={})",
+            duration_secs, args.batch_size, args.rate
+        );
+        let overall_start = Instant::now();
+        let mut last_log = Instant::now();
+        let mut last_logged_count = init_c;
+        let mut expected_count = init_c;
+        let mut total_sent: u64 = 0;
+
+        while overall_start.elapsed() < target_duration {
+            let batch = generator.generate_batch(args.batch_size, args.strategy);
+            match session.send_blocks(&batch.blocks, args.rate).await {
+                Ok((sent, _dur)) => {
+                    total_sent += sent as u64;
+                    expected_count += sent as u64;
+                }
+                Err(e) => {
+                    println!("  [!] Send error ({}), reconnecting P2P session...", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if let Ok(new_sess) = PeerSession::connect(target_addr, network, genesis_hash).await {
+                        session = new_sess;
+                    }
+                    if let Ok(info) = rpc.get_account_info(&genesis_acc).await {
+                        if let (Ok(fh), Ok(bal)) = (
+                            BlockHash::decode_hex(&info.frontier),
+                            info.balance.parse::<u128>(),
+                        ) {
+                            generator.set_frontier(fh, Amount::raw(bal));
+                            if let Ok(bc) = info.block_count.parse::<u64>() {
+                                expected_count = bc;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // Backpressure check: keep in-flight blocks <= batch_size so queues never overflow
+            let wait_bp = Instant::now();
+            let mut synced = false;
+            while wait_bp.elapsed() < std::time::Duration::from_secs(5) {
+                if let Ok(c) = rpc.get_block_count().await {
+                    let current_c: u64 = c.count.parse().unwrap_or(0);
+                    if current_c + (args.batch_size as u64) >= expected_count {
+                        synced = true;
+                        if last_log.elapsed() >= std::time::Duration::from_secs(30) {
+                            let dt = last_log.elapsed().as_secs_f64();
+                            let window_bps = (current_c.saturating_sub(last_logged_count)) as f64 / dt;
+                            let avg_bps = (current_c.saturating_sub(init_c)) as f64
+                                / overall_start.elapsed().as_secs_f64().max(0.001);
+                            println!(
+                                "  [t={:4}s / {}s] sent={} | ledger={} (cemented={}, unchecked={}) | window={:.1} bps | avg={:.1} bps",
+                                overall_start.elapsed().as_secs(),
+                                duration_secs,
+                                total_sent,
+                                current_c,
+                                c.cemented,
+                                c.unchecked,
+                                window_bps,
+                                avg_bps
+                            );
+                            last_log = Instant::now();
+                            last_logged_count = current_c;
+                        }
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            if !synced {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if let Ok(info) = rpc.get_account_info(&genesis_acc).await {
+                    if let (Ok(fh), Ok(bal)) = (
+                        BlockHash::decode_hex(&info.frontier),
+                        info.balance.parse::<u128>(),
+                    ) {
+                        generator.set_frontier(fh, Amount::raw(bal));
+                        if let Ok(bc) = info.block_count.parse::<u64>() {
+                            expected_count = bc;
+                        }
+                    }
+                }
+            }
+        }
+
+        println!(
+            "\n[4/4] Duration {}s reached! Waiting for final blocks to commit (total_sent={})...",
+            duration_secs, total_sent
+        );
+        let wait_end = Instant::now();
+        while wait_end.elapsed() < std::time::Duration::from_secs(15) {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Ok(c) = rpc.get_block_count().await {
+                let current_c: u64 = c.count.parse().unwrap_or(0);
+                if current_c >= expected_count {
+                    break;
+                }
+            }
+        }
+        if let Ok(final_count) = rpc.get_block_count().await {
+            let final_c: u64 = final_count.count.parse().unwrap_or(0);
+            let growth = final_c.saturating_sub(init_c);
+            let e2e_dur = overall_start.elapsed();
+            let e2e_bps = (growth as f64) / e2e_dur.as_secs_f64().max(0.001);
+            println!(
+                "  -> Final Block Count: {} (Cemented: {}, Unchecked: {}) | Growth: +{} blocks in {:.1?} ({:.1} bps)",
+                final_count.count, final_count.cemented, final_count.unchecked, growth, e2e_dur, e2e_bps
+            );
+        }
+        return Ok(());
+    }
+
     let gen_start = Instant::now();
     let mut batches = Vec::new();
     let mut rem_gen = args.blocks;
@@ -280,6 +397,24 @@ async fn main() -> Result<()> {
         args.blocks,
         gen_start.elapsed(),
         batches.len()
+    );
+
+    println!(
+        "\n[2/4] Connecting to Nano node peering socket on {}...",
+        target_addr
+    );
+    let mut session = PeerSession::connect(target_addr, network, genesis_hash)
+        .await
+        .context("P2P Connection or Handshake Failed")?;
+
+    println!(
+        "\n[3/4] Streaming {} blocks at {}...",
+        args.blocks,
+        if args.rate == 0 {
+            "unlimited burst".to_string()
+        } else {
+            format!("{} bps", args.rate)
+        }
     );
 
     let overall_start = Instant::now();

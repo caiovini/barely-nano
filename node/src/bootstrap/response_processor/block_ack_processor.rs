@@ -429,30 +429,11 @@ impl BlockAckProcessor {
         self.stats
             .inc(StatType::BootstrapVerifyBlocks, DetailType::NothingNew);
 
-        #[cfg(not(test))]
-        if !query.account.is_zero() {
-            let has_deps = self
-                .state
-                .lock()
-                .candidate_accounts
-                .count_by_dependency_account(&query.account)
-                > 0;
-            if has_deps {
-                let gap_start = self.ledger.find_forward_gap_start(&query.account, true);
-                if !gap_start.is_zero() && gap_start != query.hash {
-                    let mut guard = self.state.lock();
-                    guard
-                        .candidate_accounts
-                        .set_forward_gap_target(query.account, gap_start);
-                    guard.candidate_accounts.reset_last_request(&query.account);
-                    guard.candidate_accounts.priority_set_safe(&query.account);
-                    return;
-                }
-            }
-        }
-
         {
             let mut guard = self.state.lock();
+            if !query.account.is_zero() {
+                guard.candidate_accounts.clear_gap_target(&query.account);
+            }
             match guard.candidate_accounts.priority_down(&query.account) {
                 PriorityDownResult::Deprioritized => {
                     self.stats

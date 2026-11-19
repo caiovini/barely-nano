@@ -442,7 +442,15 @@ impl Drop for Bootstrapper {
 
 impl ContainerInfoProvider for Bootstrapper {
     fn container_info(&self) -> ContainerInfo {
-        self.state.lock().container_info()
+        #[cfg(test)]
+        let Some(guard) = Some(self.state.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.state.try_lock() else {
+            return ContainerInfo::default();
+        };
+        guard.container_info()
     }
 }
 
