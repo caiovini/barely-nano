@@ -1083,7 +1083,10 @@ fn run_consensus_and_elections_loop(
             worked = true;
         }
         if mtime - last_scheduler_tick > millis(100) {
-            if node_arc.active.read().len() < 4096 && node_arc.ledger.backlog_count() > 0 {
+            if node_arc.active.read().len() < 4096
+                && node_arc.election_schedulers.priority.len() < 512
+                && node_arc.ledger.backlog_count() > 0
+            {
                 if let Some(mut guard) = node_arc.backlog_scan.try_lock() {
                     guard.run_once();
                 }

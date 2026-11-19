@@ -1779,6 +1779,40 @@ impl BTree {
         }
     }
 
+    /// Checks whether the children of internal node `parent_id` starting at `start_child_idx`
+    /// form a contiguous run of non-resident page IDs (`c, c+1, c+2, ...`), and if `run_len > 1`,
+    /// prefetches them in a single multi-sector NVMe read via `BufferPool::prefetch_contiguous_scan`.
+    fn prefetch_child_run(&mut self, parent_id: u32, start_child_idx: usize) {
+        let (first_child, run_len) = {
+            let Some(data) = self.bpm.peek_resident_page(parent_id as usize) else {
+                return;
+            };
+            if page_is_leaf(data) {
+                return;
+            }
+            let num_keys = page_num_keys(data);
+            if start_child_idx > num_keys {
+                return;
+            }
+            let first = page_get_child(data, start_child_idx);
+            if first == 0 {
+                return;
+            }
+            let max_k = (num_keys + 1 - start_child_idx).min(crate::storage::DMA_BOUNCE_PAGES);
+            let mut k = 1usize;
+            while k < max_k {
+                if page_get_child(data, start_child_idx + k) != first + (k as u32) {
+                    break;
+                }
+                k += 1;
+            }
+            (first as usize, k)
+        };
+        if run_len > 1 && !self.bpm.is_resident(first_child) {
+            self.bpm.prefetch_contiguous_scan(first_child, run_len);
+        }
+    }
+
     pub fn iter(&mut self, start_key: [u8; KEY_SIZE]) -> RangeIterator<'_> {
         let start_head = key_head(&start_key);
         let mut stack = [(0u32, 0u16); 24];
@@ -1789,7 +1823,7 @@ impl BTree {
             let (is_leaf, lo, equal, child_id) = {
                 let guard = self
                     .bpm
-                    .fetch_page(current_id as usize)
+                    .fetch_page_scan(current_id as usize)
                     .expect("Failed to fetch node");
                 let _ = page_ensure_soa(guard.data_cache_mut());
                 let data = guard.data();
@@ -1807,6 +1841,7 @@ impl BTree {
             if is_leaf || equal {
                 break;
             } else {
+                self.prefetch_child_run(current_id, lo);
                 current_id = child_id;
             }
         }
@@ -1892,7 +1927,7 @@ impl<'tree> RangeIterator<'tree> {
                 let guard = self
                     .tree
                     .bpm
-                    .fetch_page(node_id as usize)
+                    .fetch_page_scan(node_id as usize)
                     .expect("Failed to fetch node");
                 let data = guard.data();
                 let is_leaf = page_is_leaf(data);
@@ -1917,12 +1952,13 @@ impl<'tree> RangeIterator<'tree> {
                 self.push_stack(node_id, index + 1);
 
                 if let Some(mut curr_id) = next_child {
+                    self.tree.prefetch_child_run(node_id, index + 1);
                     loop {
                         let (is_leaf, first_child) = {
                             let guard = self
                                 .tree
                                 .bpm
-                                .fetch_page(curr_id as usize)
+                                .fetch_page_scan(curr_id as usize)
                                 .expect("Failed to fetch node");
                             let data = guard.data();
                             let is_leaf = page_is_leaf(data);
@@ -1937,6 +1973,7 @@ impl<'tree> RangeIterator<'tree> {
                         if is_leaf {
                             break;
                         }
+                        self.tree.prefetch_child_run(curr_id, 0);
                         curr_id = first_child;
                     }
                 }
@@ -1957,7 +1994,7 @@ impl<'tree> RangeIterator<'tree> {
                 let guard = self
                     .tree
                     .bpm
-                    .fetch_page(node_id as usize)
+                    .fetch_page_scan(node_id as usize)
                     .expect("Failed to fetch node");
                 let data = guard.data();
                 let is_leaf = page_is_leaf(data);
@@ -1981,12 +2018,13 @@ impl<'tree> RangeIterator<'tree> {
                 self.push_stack(node_id, index + 1);
 
                 if let Some(mut curr_id) = next_child {
+                    self.tree.prefetch_child_run(node_id, index + 1);
                     loop {
                         let (is_leaf, first_child) = {
                             let guard = self
                                 .tree
                                 .bpm
-                                .fetch_page(curr_id as usize)
+                                .fetch_page_scan(curr_id as usize)
                                 .expect("Failed to fetch node");
                             let data = guard.data();
                             let is_leaf = page_is_leaf(data);
@@ -2001,6 +2039,7 @@ impl<'tree> RangeIterator<'tree> {
                         if is_leaf {
                             break;
                         }
+                        self.tree.prefetch_child_run(curr_id, 0);
                         curr_id = first_child;
                     }
                 }

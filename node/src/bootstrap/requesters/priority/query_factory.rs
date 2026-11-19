@@ -54,12 +54,47 @@ impl QueryFactory {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn get_account_head(&self, account: &Account) -> BlockHash {
-        self.get_account_info(account).0
+    pub(crate) fn get_account_head(&self, account: &Account, heal: bool) -> BlockHash {
+        if heal {
+            self.ledger.get_healed_account_frontiers(account).0
+        } else {
+            self.ledger
+                .store
+                .account
+                .get(account)
+                .map(|i| i.head)
+                .unwrap_or_default()
+        }
     }
 
     pub(crate) fn get_account_info(&self, account: &Account) -> (BlockHash, BlockHash) {
         self.ledger.get_healed_account_frontiers(account)
+    }
+
+    pub(crate) fn get_account_info_for_pull(
+        &self,
+        account: &Account,
+        heal: bool,
+    ) -> (BlockHash, BlockHash) {
+        if heal {
+            self.ledger.get_healed_account_frontiers(account)
+        } else {
+            let head = self
+                .ledger
+                .store
+                .account
+                .get(account)
+                .map(|i| i.head)
+                .unwrap_or_default();
+            let confirmed_frontier = self
+                .ledger
+                .store
+                .confirmation_height
+                .get(account)
+                .map(|c| c.frontier)
+                .unwrap_or_default();
+            (head, confirmed_frontier)
+        }
     }
 
     #[cfg(not(test))]

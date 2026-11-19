@@ -650,7 +650,7 @@ impl<'a> Iterator for AccountRangeIterator<'a> {
     type Item = (Account, AccountInfo);
 
     fn next(&mut self) -> Option<Self::Item> {
-        const BATCH_SIZE: usize = 32;
+        const BATCH_SIZE: usize = 64;
         if self.index >= self.batch.len() {
             let start = self.next_start.take()?;
             self.batch.clear();

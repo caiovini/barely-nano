@@ -189,14 +189,15 @@ impl PriorityRequester {
                     } else {
                         self.query_factory.pull_type_decider.decide_pull_type()
                     };
+                    let heal = next.fails > 0;
                     let (head, confirmed_frontier) = match pull_type {
                         crate::bootstrap::state::PullType::Optimistic => (
-                            self.query_factory.get_account_head(&next.account),
+                            self.query_factory.get_account_head(&next.account, heal),
                             rsnano_core::BlockHash::zero(),
                         ),
-                        crate::bootstrap::state::PullType::Safe => {
-                            self.query_factory.get_account_info(&next.account)
-                        }
+                        crate::bootstrap::state::PullType::Safe => self
+                            .query_factory
+                            .get_account_info_for_pull(&next.account, heal),
                     };
                     let query = self.query_factory.create_priority_query(
                         &next,
