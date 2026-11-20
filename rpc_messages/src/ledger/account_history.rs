@@ -14,6 +14,7 @@ impl RpcCommand {
 pub struct AccountHistoryArgs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<Account>,
+    #[serde(default)]
     pub count: RpcU64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<RpcBool>,

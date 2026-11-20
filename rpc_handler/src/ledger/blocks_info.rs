@@ -16,6 +16,7 @@ impl RpcCommandHandler {
         let source = unwrap_bool_or_false(args.source);
         let include_not_found = unwrap_bool_or_false(args.include_not_found);
         let include_linked_account = unwrap_bool_or_false(args.include_linked_account);
+        let json_block = unwrap_bool_or_false(args.json_block);
 
         let any = self.node.ledger.any();
         let mut blocks: HashMap<BlockHash, BlockInfoResponse> = HashMap::new();
@@ -30,7 +31,12 @@ impl RpcCommandHandler {
                 let local_timestamp = block.timestamp();
                 let successor = any.block_successor(&block.hash()).unwrap_or_default();
                 let confirmed = any.confirmed().block_exists_or_pruned(&hash);
-                let contents = block.json_representation();
+                let repr = block.json_representation();
+                let contents = if json_block {
+                    serde_json::to_value(&repr).unwrap_or(serde_json::Value::Null)
+                } else {
+                    serde_json::Value::String(serde_json::to_string(&repr).unwrap_or_default())
+                };
 
                 let subtype = if block.block_type() == BlockType::State {
                     Some(block.subtype().into())
@@ -58,6 +64,7 @@ impl RpcCommandHandler {
                     contents,
                     subtype,
                     receivable: None,
+                    pending: None,
                     receive_hash: None,
                     source_account: None,
                     linked_account,
@@ -67,6 +74,7 @@ impl RpcCommandHandler {
                     if !block.is_send() {
                         if receivable {
                             block_info.receivable = Some(0.into());
+                            block_info.pending = Some(0.into());
                         }
                         if receive_hash {
                             block_info.receive_hash = Some(BlockHash::zero());
@@ -76,7 +84,8 @@ impl RpcCommandHandler {
                         .is_some()
                     {
                         if receivable {
-                            block_info.receivable = Some(1.into())
+                            block_info.receivable = Some(1.into());
+                            block_info.pending = Some(1.into());
                         }
                         if receive_hash {
                             block_info.receive_hash = Some(BlockHash::zero());
@@ -84,6 +93,7 @@ impl RpcCommandHandler {
                     } else {
                         if receivable {
                             block_info.receivable = Some(0.into());
+                            block_info.pending = Some(0.into());
                         }
                         if receive_hash {
                             let receive_block = any.find_receive_block_by_send_hash(

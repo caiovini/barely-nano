@@ -815,6 +815,11 @@ fn boot_hart_main(hart_id: usize) {
         if let Some(ws) = &websocket_server {
             use rsnano_websocket_server::WebsocketListenerExt;
             ws.start();
+            // Poll the newly spawned `WebsocketListener` task once on the boot hart so
+            // `ctx.tcp_handle` transitions to `State::Listen` before `clean_cache_range`
+            // flushes the heap/executor queues to DRAM for Cluster 1 worker harts.
+            let _ = exec.run_once(4);
+            let _ = exec.run_once(7);
             tracing::info!(
                 "[boot] websocket server started on port {}",
                 ws.listening_port()
@@ -1467,7 +1472,7 @@ fn is_http_request_complete(req: &str) -> bool {
     let Some((headers, body)) = req.split_once("\r\n\r\n").or_else(|| req.split_once("\n\n")) else {
         return false;
     };
-    if headers.starts_with("GET ") {
+    if headers.starts_with("GET ") || headers.starts_with("OPTIONS ") {
         return true;
     }
     for line in headers.lines() {
@@ -1482,75 +1487,110 @@ fn is_http_request_complete(req: &str) -> bool {
     !trimmed.is_empty() && trimmed.ends_with('}')
 }
 
-static RPC_ACTIVE_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RPC_ACTIVE_SINCE: [core::sync::atomic::AtomicU64; kernel_common::net::RPC_SOCKET_COUNT] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; kernel_common::net::RPC_SOCKET_COUNT];
 
-fn poll_rpc_request(ctx: &mut kernel_common::net::NetworkContext) -> Option<(alloc::string::String, bool)> {
+fn poll_rpc_request(
+    ctx: &mut kernel_common::net::NetworkContext,
+) -> Option<(usize, alloc::string::String, bool)> {
     let net_cfg = kernel_common::net::get_net_config();
     if !net_cfg.rpc_enable {
         return None;
     }
     use smoltcp::socket::tcp::{Socket as SmolTcpSocket, State as SmolTcpState};
-    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handle);
     let now = kernel_common::clint::mtime();
-    match socket.state() {
-        SmolTcpState::Closed => {
-            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-            let _ = socket.listen(net_cfg.rpc_port);
-        }
-        SmolTcpState::Listen => {
-            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-        }
-        SmolTcpState::TimeWait | SmolTcpState::CloseWait | SmolTcpState::LastAck | SmolTcpState::Closing => {
-            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-            socket.abort();
-            let _ = socket.listen(net_cfg.rpc_port);
-        }
-        SmolTcpState::SynReceived => {
-            let since = RPC_ACTIVE_SINCE.load(Ordering::Relaxed);
-            if since == 0 {
-                RPC_ACTIVE_SINCE.store(now, Ordering::Relaxed);
-            } else if now.wrapping_sub(since) > seconds(5) {
-                RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+    for sock_idx in 0..kernel_common::net::RPC_SOCKET_COUNT {
+        let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handles[sock_idx]);
+        match socket.state() {
+            SmolTcpState::Closed => {
+                RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                let _ = socket.listen(net_cfg.rpc_port);
+            }
+            SmolTcpState::Listen => {
+                RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+            }
+            SmolTcpState::TimeWait => {
+                RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
                 socket.abort();
                 let _ = socket.listen(net_cfg.rpc_port);
             }
-        }
-        SmolTcpState::Established => {
-            let since = RPC_ACTIVE_SINCE.load(Ordering::Relaxed);
-            if since == 0 {
-                RPC_ACTIVE_SINCE.store(now, Ordering::Relaxed);
-            } else if now.wrapping_sub(since) > seconds(5) {
-                RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                socket.abort();
-                let _ = socket.listen(net_cfg.rpc_port);
-                return None;
-            }
-
-            if socket.can_recv() {
-                let mut extracted: Option<alloc::string::String> = None;
-                let enable_control = net_cfg.rpc_enable_control;
-                let _ = socket.recv(|buffer| {
-                    let request = core::str::from_utf8(buffer).unwrap_or("");
-                    if !is_http_request_complete(request) && buffer.len() < 60_000 {
-                        return (0, ());
+            SmolTcpState::FinWait1
+            | SmolTcpState::FinWait2
+            | SmolTcpState::Closing
+            | SmolTcpState::LastAck
+            | SmolTcpState::CloseWait => {
+                if socket.send_queue() == 0
+                    && matches!(
+                        socket.state(),
+                        SmolTcpState::CloseWait
+                            | SmolTcpState::LastAck
+                            | SmolTcpState::Closing
+                            | SmolTcpState::FinWait2
+                    )
+                {
+                    RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.rpc_port);
+                } else {
+                    let since = RPC_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                    if since > 0 && now.wrapping_sub(since) > seconds(5) {
+                        RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                        socket.abort();
+                        let _ = socket.listen(net_cfg.rpc_port);
                     }
-                    extracted = Some(alloc::string::String::from(request));
-                    (buffer.len(), ())
-                });
-                if let Some(req_str) = extracted {
-                    return Some((req_str, enable_control));
                 }
             }
+            SmolTcpState::SynReceived => {
+                let since = RPC_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                if since == 0 {
+                    RPC_ACTIVE_SINCE[sock_idx].store(now, Ordering::Relaxed);
+                } else if now.wrapping_sub(since) > seconds(5) {
+                    RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.rpc_port);
+                }
+            }
+            SmolTcpState::Established => {
+                let since = RPC_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                if since == 0 {
+                    RPC_ACTIVE_SINCE[sock_idx].store(now, Ordering::Relaxed);
+                } else if now.wrapping_sub(since) > seconds(5) {
+                    RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.rpc_port);
+                    continue;
+                }
+
+                if socket.can_recv() {
+                    let mut extracted: Option<alloc::string::String> = None;
+                    let enable_control = net_cfg.rpc_enable_control;
+                    let _ = socket.recv(|buffer| {
+                        let request = core::str::from_utf8(buffer).unwrap_or("");
+                        if !is_http_request_complete(request) && buffer.len() < 60_000 {
+                            return (0, ());
+                        }
+                        extracted = Some(alloc::string::String::from(request));
+                        (buffer.len(), ())
+                    });
+                    if let Some(req_str) = extracted {
+                        return Some((sock_idx, req_str, enable_control));
+                    }
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
     None
 }
 
-fn send_rpc_response(ctx: &mut kernel_common::net::NetworkContext, resp_str: &str) {
+fn send_rpc_response(
+    ctx: &mut kernel_common::net::NetworkContext,
+    sock_idx: usize,
+    resp_str: &str,
+) {
     use smoltcp::socket::tcp::Socket as SmolTcpSocket;
-    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handle);
-    RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handles[sock_idx]);
+    RPC_ACTIVE_SINCE[sock_idx].store(kernel_common::clint::mtime(), Ordering::Relaxed);
     let _ = socket.send_slice(resp_str.as_bytes());
     socket.close();
 }
@@ -2066,7 +2106,7 @@ fn handle_dashboard_server(ctx: &mut kernel_common::net::NetworkContext, node: A
 
                 if first_line.starts_with("OPTIONS ") {
                     let _ = socket.send_slice(
-                        b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+                        b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Origin, Authorization, X-Requested-With\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n",
                     );
                 } else if first_line.starts_with("GET /favicon.ico") {
                     let _ = socket.send_slice(
@@ -3150,7 +3190,7 @@ fn run_maintenance_and_network_loop(
             kernel_common::net::HART1_WANTS_NET.store(false, Ordering::Release);
         }
 
-        if let Some((req_str, enable_control)) = pending_rpc {
+        if let Some((sock_idx, req_str, enable_control)) = pending_rpc {
             let handler = RpcCommandHandler::new(node_arc.clone(), enable_control);
             let server = BareMetalRpcServer::new(handler);
             let resp_str = server.handle_request(&req_str).unwrap_or_else(|| {
@@ -3160,7 +3200,7 @@ fn run_maintenance_and_network_loop(
             kernel_common::net::HART1_WANTS_NET.store(true, Ordering::Release);
             let mut ctx = kernel_common::net::NET.lock();
             if let Some(ref mut ctx_val) = *ctx {
-                send_rpc_response(ctx_val, &resp_str);
+                send_rpc_response(ctx_val, sock_idx, &resp_str);
             }
             drop(ctx);
             kernel_common::net::HART1_WANTS_NET.store(false, Ordering::Release);

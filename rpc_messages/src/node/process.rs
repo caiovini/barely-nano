@@ -14,9 +14,22 @@ impl From<JsonBlock> for ProcessArgs {
     }
 }
 
+fn deserialize_json_block_or_str<'de, D>(deserializer: D) -> Result<JsonBlock, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = serde_json::Value::deserialize(deserializer)?;
+    match val {
+        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom),
+        other => serde_json::from_value(other).map_err(serde::de::Error::custom),
+    }
+}
+
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ProcessArgs {
+    #[serde(default)]
     pub json_block: RpcBool,
+    #[serde(deserialize_with = "deserialize_json_block_or_str")]
     pub block: JsonBlock,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtype: Option<BlockSubTypeDto>,
