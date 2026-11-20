@@ -10,9 +10,9 @@ It establishes a self-contained operating environment on top of OpenSBI and U-Bo
   - [1. S-Mode Execution on OpenSBI & U-Boot](#1-s-mode-execution-on-opensbi--u-boot)
   - [2. Memory Management](#2-memory-management)
   - [3. Exception and Trap Handling](#3-exception-and-trap-handling)
-  - [4. Hardware Watchdogs & Timers](#4-hardware-watchdogs--timers)
+  - [4. Hardware Watchdogs, Timers & Peer-Calibrated Wall Clock](#4-hardware-watchdogs-timers--peer-calibrated-wall-clock)
   - [5. Hardware Accelerated Cryptography & Optimizations](#5-hardware-accelerated-cryptography--optimizations)
-  - [6. U-Boot Networking, RPC & WebSocket Stack](#6-u-boot-networking-rpc--websocket-stack)
+  - [6. U-Boot Networking, RPC, Nault Wallet Compatibility & WebSocket Stack](#6-u-boot-networking-rpc-nault-wallet-compatibility--websocket-stack)
   - [7. Multi-Hart SMP Architecture](#7-multi-hart-smp-architecture)
   - [8. I2C OLED Status Display (`common/src/oled.rs`)](#8-i2c-oled-status-display-commonsrcoledrs)
 - [Storage Architecture: Bare-Metal NVMe B-Tree + WAL Engine](#storage-architecture-bare-metal-nvme-b-tree--wal-engine)
@@ -57,49 +57,53 @@ The kernel runs in **Supervisor Mode (S-mode)** launched from U-Boot on top of O
 
 ### 2. Memory Management
 - **Boot sequence:** Written in custom assembly (`main/src/entry.S`) to set up stack pointers for all 8 harts, capture U-Boot's Jump Table pointer, zero BSS, and jump into Rust.
-- **Heap Allocator (`DRAM Bank 0`):** Uses `linked_list_allocator` wrapped in `InterruptSafeAllocator` to provide a global dynamic memory allocator (`ALLOCATOR`) configured in `linker-smode.ld` with a **~1.45 GB heap** and **256 MB stack** (32 MB per hart) mapped starting at `0x11000000`.
-- **High DRAM Sector Cache (`DRAM Bank 1`):** Directly utilizes the Ky X1 upper physical memory window (`0x1_0000_0000 .. 0x2_5000_0000`) to host a **5.00 GB B-Tree Buffer Pool** (`81,920` × 4 KB frames per shard across 16 shards).
+- **Heap Allocator (`DRAM Bank 0`):** Uses `linked_list_allocator` wrapped in `InterruptSafeAllocator` to provide a global dynamic memory allocator (`ALLOCATOR`) configured in `linker-smode.ld` with a **~1.45 GB heap** and **256 MB stack** (32 MB per hart) mapped starting at `0x11000000`, plus a 16-page (`64 KB`) DMA bounce buffer in 32-bit addressable Bank 0 (`< 0x8000_0000`).
+- **High DRAM Sector Cache (`DRAM Bank 1`):** Directly utilizes the Ky X1 upper physical memory window (`0x1_0000_0000 .. 0x2_5000_0000`) to host a **5.12 GB (`5,120 MB`) B-Tree Buffer Pool** (`81,920` × 4 KB frames per shard across 16 shards).
 
 ### 3. Exception and Trap Handling
 - **Trap Vector:** Custom S-mode assembly trap vector (`trap_vector`) saves and restores all 31 GPRs upon interrupts and exceptions and enables `sstatus.FS` and `sstatus.VS` for floating-point and RVV vector instructions.
 - **Trap Dispatcher:** Evaluates the `scause` CSR to differentiate between asynchronous interrupts and synchronous exceptions.
 - **Diagnostics:** Exceptions automatically print the hart ID, `scause`, `sepc`, `stval`, and `ra` registers over SpacemiT K1 UART0 (`0xD401_7000`).
 
-### 4. Hardware Watchdogs & Timers
-- **CLINT Timer:** Reads the 24 MHz hardware `time` CSR (`rdtime`) for cooperative async scheduling, profiling, and timestamps.
+### 4. Hardware Watchdogs, Timers & Peer-Calibrated Wall Clock
+- **CLINT Timer:** Reads the 24 MHz hardware `time` CSR (`rdtime`) for cooperative async scheduling, sub-microsecond profiling, and monotonic `SteadyClock` durations.
+- **Peer-Telemetry-Calibrated Unix Wall Clock ([`core/src/utils/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/core/src/utils/mod.rs), [`node/src/telemetry/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/node/src/telemetry/mod.rs)):** Combines monotonic `SteadyClock` elapsed time with an atomic boot-epoch offset (`WALL_CLOCK_OFFSET_MS`) calibrated automatically from the median of up to 32 Ed25519-verified peer `TelemetryAck` timestamps—providing accurate Unix epoch timestamps (`UnixTimestamp::now()`, `UnixMillisTimestamp::now()`) for block sidebands, account modification times, outgoing `TelemetryAck` packets, WebSocket envelopes, and vote generation without an external RTC or NTP daemon.
 - **Watchdog Management:** Disables and periodically kicks both the SpacemiT K1 SoC watchdog (`0xD408_0000`) and the SPM8821 PMIC watchdog over PWR I2C bus 8 (`0xD401_D800`).
 
 ### 5. Hardware Accelerated Cryptography & Optimizations
 To achieve high transaction throughput and maximize CPU efficiency, the node leverages the SpacemiT X60 RISC-V extension set (`+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zihintpause`):
-- **Vector Extension (`V`, `Zvl256b`):** 256-bit SIMD processing (`nullables/sha`) for vectorized Blake2b compression, 4-way batch PoW difficulty evaluation, and Ed25519 verification.
+- **Vector Extension (`V`, `Zvl256b`):** 256-bit SIMD processing (`nullables/sha`) for vectorized Blake2b compression, 4-way batch PoW difficulty evaluation, Ed25519 verification, and 8-wide Structure-of-Arrays (SoA) 32-bit big-endian B-Tree key-head binary searches (`vmsltu.vx`/`vmsleu.vx` + `vcpop.m`) in [`common/src/storage/btree.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs).
 - **Bit-Manipulation (`Zbb`, `Zba`, `Zbs`, `Zbc`):** Scalar bit-manipulation, single-cycle shifted address generation (`sh1add`, `sh2add`, `sh3add`) for B-Tree slot indexing, single-bit operations, and carry-less multiplication (compiling 64-bit Blake2b rotations to single `rori` instructions).
-- **Cache-Block Prefetch (`Zicbop`):** Inline `prefetch.r` and `prefetch.w` hints ([`ledger_store/src/btree/arena.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/btree/arena.rs)) during B-Tree binary search, child page descent, and leaf mutation, plus branchless 8-byte big-endian `u64` prefix comparisons ([`NodePage::search_slot`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/btree/node.rs#L156-L202)) to eliminate branch misprediction stalls on the in-order X60 pipeline.
+- **Cache-Block Prefetch (`Zicbop`):** Inline `prefetch.r` and `prefetch.w` hints ([`common/src/storage/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs), [`common/src/storage/bpm.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/bpm.rs)) during B-Tree binary search, child page descent, and sorted batch insertions.
 - **Cache-Block Zero (`Zicboz`):** Fast 64-byte cache-line zeroing (`cbo.zero`).
 - **Pause Hint (`Zihintpause`):** Adaptive `pause` backoff in spinloops to reduce interconnect contention.
-- **Cache-Block Management (`Zicbom`):** Explicit cache maintenance (`cbo.clean`, `cbo.inval`) for cross-cluster coherency between Cluster 0 (Harts 0–3) and Cluster 1 (Harts 4–7).
+- **Cache-Block Management (`Zicbom`):** Explicit cache maintenance (`cbo.clean`, `cbo.flush`) for cross-cluster coherency between Cluster 0 (Harts 0–3) and Cluster 1 (Harts 4–7).
 
-### 6. U-Boot Networking, RPC & WebSocket Stack
-- **Hardware Probing:** Discovers and initializes the board's Ethernet controller via the U-Boot Standalone API (`UbootNetDevice`) with burst RX draining (up to 64 frames per poll) and TX stall recovery.
-- **TCP/IP Stack (`smoltcp` 0.12):** Full-featured `no_std` TCP/IP/DNS/ICMP stack integrated with the cooperative async executor.
+### 6. U-Boot Networking, RPC, Nault Wallet Compatibility & WebSocket Stack
+- **Hardware Probing:** Discovers and initializes the board's Ethernet controller via the U-Boot Standalone API (`UbootNetDevice`) with burst RX draining (up to 256 frames per poll), 2048-descriptor TX DMA ring, and TX stall recovery.
+- **TCP/IP Stack (`smoltcp` 0.12):** Full-featured `no_std` TCP/IP/DNS/ICMP stack with `128 KB` peering socket buffers integrated with the cooperative async executor, non-blocking Hart 1 maintenance polling, and automatic listener recovery.
 - **Nano Services:**
-  - **Port `7075` (Peering):** Live Nano P2P protocol peering and bootstrap (`96` concurrent peers).
-  - **Port `7076` (HTTP JSON-RPC):** Full `no_std` Nano RPC command handler (`rsnano_rpc_messages`, `rsnano_rpc_handler`, `rsnano_rpc_server`).
-  - **Port `7078` (WebSocket Server):** Full `no_std` WebSocket server and client (`rsnano_websocket_messages`, `rsnano_websocket_client`, `rsnano_websocket_server`) streaming live node events (`confirmation`, `vote`, `started_election`, `stopped_election`, `telemetry`, `bootstrap`, `new_unconfirmed_block`, etc.).
-  - **Port `7080` (Live Web Dashboard & `/api/metrics`):** Built-in HTTP telemetry dashboard ([`main/src/dashboard.rs`](file:///mnt/data/rust-workspace/barely-nano/main/src/dashboard.rs)) serving a real-time web UI and `/api/metrics` JSON endpoint for hardware profiling and WAL/B-Tree monitoring.
+  - **Port `7075` (Peering):** Live Nano P2P protocol peering and bootstrap (`~98` concurrent peers).
+  - **Port `7076` (HTTP JSON-RPC — Nault / Natrium Compatible):** 8-socket concurrent HTTP JSON-RPC pool (`RPC_SOCKET_COUNT = 8`) backed by `rsnano_rpc_messages`, `rsnano_rpc_handler`, and `rsnano_rpc_server`, including legacy wallet action/field aliases (`accounts_pending`, `pending`, `pending_exists`, `search_pending`, `wallet_pending`), both stringified and object `process` blocks, standard `json_block` string-vs-object `contents` serialization, and browser CORS preflight support (`OPTIONS`). To connect **Nault**, configure Custom Server API `http://192.168.1.200:7076`, WebSocket `ws://192.168.1.200:7078`, and set PoW Source to **Client WebGL / Client CPU** (or an external PoW server).
+  - **Port `7078` (WebSocket Server):** Full `no_std` WebSocket server and client (`rsnano_websocket_messages`, `rsnano_websocket_client`, `rsnano_websocket_server`) streaming live node events (`confirmation`, `vote`, `started_election`, `stopped_election`, `telemetry`, `bootstrap`, `new_unconfirmed_block`, and `ping`/`pong` keepalives).
+  - **Port `7080` (Live Web Dashboard, Browser WASM Stress Test & Diagnostic Endpoints):** Built-in 6-socket HTTP server ([`main/src/dashboard.html`](file:///mnt/data/rust-workspace/barely-nano/main/src/dashboard.html), [`main/src/bin.rs`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs)) serving:
+    - Real-time web dashboard UI, embedded wallet, and browser-side WebAssembly stress test (`nano_stress.wasm` + `POST /api/stress_batch`).
+    - `GET /api/metrics`: Real-time JSON telemetry including per-hart Buffer Pool misses (`miss_n_hart`, `miss_ms_hart`), shard lock hold times (`shard_hold_ms_hart`), NVMe device I/O counters (`io_read_*`, `io_write_*`), and ledger recount progress (`recount`).
+    - `GET /api/recount_start` & `GET /api/recount_repair`: Incremental chunked merge-join verification and self-healing of `TABLE_ACCOUNTS` and `TABLE_CONFIRMATION_HEIGHT` ([`ledger/src/ledger_recount.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger/src/ledger_recount.rs)).
 
 ### 7. Multi-Hart SMP Architecture
-All 8 X60 harts on the SpacemiT K1 are pinned by physical CPU cluster (`512 KB` L2 cache per 4-hart cluster) in [`main/src/bin.rs`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs) to maximize L2 cache locality and parallelize B-Tree + WAL storage across two harts:
+All 8 X60 harts on the SpacemiT K1 are pinned by physical CPU cluster (`512 KB` L2 cache per 4-hart cluster) in [`main/src/bin.rs`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs) to maximize L2 cache locality and parallelize B-Tree + WAL storage across Cluster 1:
 
 - **Cluster 0 (Shared 512 KB L2 — Ingress, Signature Verification & Vote Ingestion):**
-  - **Hart 0 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and cooperative async executor tasks (`WORKER_HARTS`).
-  - **Hart 1 (`Maint+Net`):** Boot initialization, `smoltcp` network polling, HTTP JSON-RPC (`7076`), WebSocket (`7078`), Live Web Dashboard (`7080`), gateway ICMP keepalive, and watchdog kicking.
+  - **Hart 0 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and `vote_rebroadcaster`, and assists with Ed25519 signature verification when idle.
+  - **Hart 1 (`Maint+Net`):** Boot initialization, non-blocking `smoltcp` network polling, HTTP JSON-RPC (`7076`), WebSocket (`7078`), Live Web Dashboard (`7080`), gateway ICMP keepalive, watchdog kicking, and idle-window signature verification assistance.
   - **Hart 2 (`Crypto-1`):** Dedicated lock-free SIMD Ed25519 signature verification worker (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainer.
   - **Hart 3 (`Crypto-2`):** Dedicated lock-free SIMD Ed25519 signature verification worker (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainer.
 - **Cluster 1 (Shared 512 KB L2 — Consensus & Parallel Sharded Ledger Storage):**
-  - **Hart 4 (`Consensus`):** Drives `aec_voter` and `aec_ticker` (300 ms ticks), `election_schedulers`, `backlog_scan`, `bootstrap_server`, and cooperative async executor tasks (`WORKER_HARTS`).
-  - **Hart 5 (`Ledger-B`):** Parallel Shards `8–15` B-Tree mutations ([`Ledger::try_run_ledger_b_job`](file:///mnt/data/rust-workspace/barely-nano/ledger/src/ledger.rs#L173-L195)), WAL segments `8–15` ([`wal::try_run_wal_b_job`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wal.rs#L118-L157)), and `unchecked` dependency queue drain.
-  - **Hart 6 (`Ledger-A`):** Primary `block_processor` batch coordinator, Shards `0–7` B-Tree mutations ([`Ledger::flush_shard_half`](file:///mnt/data/rust-workspace/barely-nano/ledger/src/ledger.rs#L712-L819)), WAL segments `0–7`, and `confirming_set` cementation.
-  - **Hart 7 (`Storage+Mon`):** Online weight calculation, NVMe Free-List GC/reclamation (`ledger_pruning`), 2-second I2C OLED status updates, 15-second telemetry/profiling reports, and cooperative async executor tasks (`WORKER_HARTS`).
+  - **Hart 4 (`Consensus`):** Drives `aec_voter` and `aec_ticker` (300 ms ticks), event-driven `PriorityScheduler::run_if_notified()`, `election_schedulers`, throttled `backlog_scan`, `request_aggregator`, `vote_generators`, incremental `LEDGER_RECOUNT`, and cooperative async executor tasks (`WORKER_HARTS`).
+  - **Hart 5 (`Ledger-B`):** Parallel Shards `8–15` B-Tree mutations ([`Ledger::try_run_ledger_b_job`](file:///mnt/data/rust-workspace/barely-nano/ledger/src/ledger.rs#L94-L119)), parallel WAL dirty-page snapshotting (`wal::try_run_wal_b_job`), `unchecked` dependency queue drain, synchronous Cluster 1 signature verification assistance (`signature_checker.help_verify_sync()`), and `bootstrap_server.run_once()` when idle.
+  - **Hart 6 (`Ledger-A`):** Primary `block_processor` batch coordinator, topological batch validator (`HOT_ACCOUNTS` / `HOT_BLOCKS` direct-mapped caches), Shards `0–7` B-Tree mutations, parallel WAL dirty-page snapshotting (`wal::checkpoint_nonblocking()`), and batch-coalesced `confirming_set` cementation.
+  - **Hart 7 (`Storage+Mon`):** Asynchronous background NVMe WAL checkpoint flusher (`wal::run_background_wal_flush()`), online weight calculation, NVMe Free-List GC/reclamation (`ledger_pruning`), 2-second I2C OLED status updates, 15-second telemetry/profiling reports, and cooperative async executor tasks (`WORKER_HARTS`).
 
 ### 8. I2C OLED Status Display (`common/src/oled.rs`)
 - **Zero-Allocation `no_std` Driver:** Supports 4-pin I2C **SSD1306** and **SH1106** 128×64 OLED displays (at `0x3C` or `0x3D`) over hardware `I2C4` (`0xD401_2800`), with automatic GPIO I2C fallback if `SCK`/`SDA` are swapped or wired to `I2C3` (Pins 8 & 10).
@@ -133,12 +137,17 @@ Uses a high-contrast 8×16 bold font (4 lines × 15 characters):
 
 ## Storage Architecture: Bare-Metal NVMe B-Tree + WAL Engine
 
-Without an OS filesystem or traditional database (LMDB/RocksDB), `barely-nano` implements a crash-resilient **16-Shard B-Tree + 5 GB DRAM Bank 1 Buffer Pool + Atomic Write-Ahead Log (WAL)** directly on the 1 TB NVMe SSD:
+Without an OS filesystem or traditional database (LMDB/RocksDB), `barely-nano` implements a crash-resilient **16-Shard B-Tree + 5.12 GB DRAM Bank 1 Buffer Pool + Atomic Write-Ahead Log (WAL)** directly on the 1 TB NVMe SSD:
 
-1. **Physical Layer (`StorageBackend::UBoot`):** Transfers raw 4 KB pages (`8 × 512 B` sectors, batched up to 64 pages / 256 KB per command via zero-copy 64-bit NVMe PRP DMA) over U-Boot's block syscall interface directly from High DRAM Bank 1 (`0x1_0000_0000+`) to the NVMe SSD. (`STORAGE_BASE_LBA = 1,048,576` leaves a 512 MB safety margin at the start of the drive, with a 64 MB persistent Bloom filter at `BLOOM_HEADER_LBA = 524,288`.)
-2. **5 GB High-DRAM Buffer Pool Manager (`common/src/storage/bpm.rs`):** Manages `81,920` × 4 KB frames per shard (`320 MB/shard` = `5.00 GB` total) in Ky X1 DRAM Bank 1 (`0x1_0000_0000`), paired with compact 24-byte `FrameMeta` entries in Bank 0 L2-friendly memory, an open-addressed page hash table, and a **Clock (second-chance)** eviction policy. Dirty frames are **never written during eviction**, preventing partial cross-shard updates from reaching disk.
-3. **Atomic Dual-Area Write-Ahead Log (`common/src/storage/wal.rs`):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. Between block batches on Cluster 1, `wal::checkpoint()` snapshots dirty pages across Shards `0..7` (Hart 6) and Shards `8..15` (Hart 5) in parallel, writes `[descriptor pages][data pages][commit page]` sequentially with a 64-bit checksum and boot epoch, and then writes the pages to their home shard locations sorted by LBA. On boot, `wal::recover()` idempotently replays the latest committed batch.
-4. **16-Shard B-Tree Engine (`ledger_store/src/btree/` & `common/src/storage/btree.rs`):** Prefix-partitioned across 16 shards by the high nibble of `key[1]` (`0x00..0x7F` on Hart 6 `Ledger-A`, `0x80..0xFF` on Hart 5 `Ledger-B`), supporting `Zicbop`-prefetched (`prefetch.r`/`prefetch.w`) branchless 8-byte `u64` prefix binary search, proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and stack-cached range iterators.
+1. **Physical Layer (`StorageBackend::UBoot`):** Transfers raw 4 KB pages (`8 × 512 B` sectors, batched up to 64 pages / 256 KB per write command via zero-copy 64-bit NVMe PRP DMA, and up to 16 contiguous pages / 64 KB per B-Tree range-scan read via `StorageContext::read_contiguous_into_frames`) over U-Boot's block syscall interface. (`STORAGE_BASE_LBA = 1,048,576` leaves a 512 MB safety margin at the start of the drive, with a 64 MB persistent Bloom filter at `BLOOM_HEADER_LBA = 524,288`.)
+2. **5.12 GB High-DRAM Buffer Pool Manager ([`common/src/storage/bpm.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/bpm.rs)):** Manages `81,920` × 4 KB frames per shard (`320 MB/shard` = `5,120 MB` total) in Ky X1 DRAM Bank 1 (`0x1_0000_0000`), paired with compact `FrameMeta` entries and a two-level chunked page directory (`page_to_frame`) in Bank 0, a `8,192`-page/shard dirty capacity (`32 MB/shard`), and a **Table-ID-Aware Clock (second-chance)** eviction policy:
+   - Priority **`4`**: Shard metadata (`page_id == 0`) and internal B-Tree routing nodes (`is_leaf == 0`).
+   - Priority **`2`**: Hot point-lookup leaf pages (`Account (1)`, `ConfirmationHeight (3)`, `Pending (7)`, `Version (11)`, `RepWeight (12)`).
+   - Priority **`1`**: Cold `Block/Successor (2)` leaf pages.
+   - Priority **`0` (`fetch_page_scan` / `prefetch_contiguous_scan`)**: Sequentially scanned leaf pages during full-table range scans (`FrontierChecker`, `BacklogScan`, `LEDGER_RECOUNT`), ensuring background scans are reclaimed immediately on the Clock hand's first pass without evicting hot point-lookup pages used by Hart 6 (`Ledger-A`).
+   - Dirty frames are **never written during eviction**, preventing partial cross-shard updates from reaching disk.
+3. **Asynchronous Hart 7 Dual-Area Write-Ahead Log ([`common/src/storage/wal.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wal.rs)):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. When a checkpoint is triggered (`wal::checkpoint_nonblocking()`), Hart 6 (Shards `0..7`) and Hart 5 (Shards `8..15`) sort and copy dirty pages in parallel into staging buffers in RAM and immediately resume processing blocks while **Hart 7 (`Storage+Mon`)** asynchronously writes `[descriptor pages][data pages][commit page]` with a 64-bit checksum and boot epoch, followed by zero-copy contiguous LBA home-page runs (`apply_sorted_home_runs`). On boot, `wal::recover()` idempotently replays the latest committed batch.
+4. **16-Shard Slotted-Page B-Tree Engine ([`common/src/storage/btree.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs)):** Prefix-partitioned across 16 shards by the high nibble of `key[1]` (`0x00..0x7F` on Hart 6 `Ledger-A`, `0x80..0xFF` on Hart 5 `Ledger-B`), featuring RVV 1.0 (`+v,+zvl256b`) 8-wide Structure-of-Arrays (SoA) 32-bit key-head vector searches, direct-mapped `HOT_ACCOUNTS` / `HOT_BLOCKS` L1/L2 caches ([`ledger_store/src/account_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/account_store.rs), [`ledger_store/src/block_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/block_store.rs)), `Zicbop`-prefetched (`prefetch.r`/`prefetch.w`) binary searches, 16-page contiguous sibling read-ahead (`BTree::prefetch_child_run`), proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and zero-allocation range iterators (`next_kv_with`).
 5. **Isolated Wallet B-Tree & Atomic Redo Journal (`WALLET_SHARD` at `WALLET_STORAGE_LBA = 786,432`):** Wallet and representative keys live in a dedicated B-Tree partition at the `384 MB` NVMe mark (`LBA 786,432 .. 819,712`, `16 MB` B-Tree + `256 KB` checksummed redo journal), strictly below `STORAGE_BASE_LBA` (`512 MB`) and enforced by compile-time assertions and runtime LBA bounds guards so wallet mutations can never overwrite or contend with a synced ledger.
 
 ### Why the Bare-Metal NVMe Ledger is ~68–86 GB vs. ~123 GB in LMDB (& Architectural Advantages)
@@ -156,7 +165,7 @@ On the exact same unpruned Nano mainnet ledger (**220.89M blocks**, **37.44M acc
 | **SSD Write Amplification & Filesystem Overhead** | High (every commit writes COW leaf-to-root path + ext4/XFS journal + `msync`) | **Minimal** (dirty pages stay in 5 GB DRAM Bank 1; flushed in LBA-sorted 256 KB zero-copy PRP DMA batches) | Drastically lower NVMe wear and higher sustained IOPS |
 | **RAM & Cache Predictability (8 GB Board)** | Unbounded `mmap` RSS + OS page-cache thrashing + Linux OOM risk | **Fixed `5,120 MB` DRAM Bank 1 Sector Cache + flat `~1,053 MB` Heap** | Zero OS page faults, zero swap, deterministic memory ceiling |
 | **Negative Block Lookup Cost** | Full B+Tree root-to-leaf traversal (`3–4` page reads per check) | **$O(1)$ in-RAM `64 MB` `BlockBloom` filter** (persisted on NVMe) | Instant duplicate/existence filtering before touching B-Tree shards |
-| **CPU Scheduling & Execution Model** | Linux CFS thread migration, syscalls, interrupts, and multi-thread DB lock contention | **Hard-pinned 8-Hart Cluster 0 / Cluster 1 SMP** (2× SIMD Crypto harts on Cluster 0, 2× Parallel Sharded Ledger harts on Cluster 1) | **21.0k bps sustained E2E (`22.4k–28.3k bps` active pipeline)**; zero context-switch or syscall overhead |
+| **CPU Scheduling & Execution Model** | Linux CFS thread migration, syscalls, interrupts, and multi-thread DB lock contention | **Hard-pinned 8-Hart Cluster 0 / Cluster 1 SMP** (2× SIMD Crypto harts on Cluster 0, 2× Parallel Sharded Ledger harts + Async Hart 7 WAL on Cluster 1) | **`22,083.4 bps` sustained 300k E2E (`23.5k–26.1k bps` active pipeline; `27.5 µs/blk` on 80 GB live ledger)**; zero context-switch or syscall overhead |
 
 #### Why the Storage Size Difference Occurs
 1. **Self-Contained Bit-Packed Compact Block Encoding & Top-256 Representative Table (~22 GiB saved):**
@@ -551,11 +560,11 @@ dns_server = "192.168.1.1"
 
 [node]
 peering_port = 7075
-enable_voting = true
+enable_voting = false
 enable_bounded_backlog = false
 allow_local_peers = true
-online_weight_minimum = "130000000000000000000000000000000000000"
-representative_vote_weight_minimum = "0"
+online_weight_minimum = "60000000000000000000000000000000000000"
+representative_vote_weight_minimum = "10000000000000000000000000000000"
 preconfigured_peers = [
     "peering.nano.org:7075",
     "192.168.1.151:7075",
@@ -668,7 +677,7 @@ Standard Nano nodes store their ledger in an LMDB file (`data.ldb`) with separat
 
 Instead of performing random 4 KB B-Tree insertions across 220M+ records (which would cause severe SSD write amplification), [`tools/lmdb-to-nvme/src/main.rs`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs) executes a **2-pass parallel streaming pipeline**:
 
-1. **Startup Self-Test (`verify_btree_builder_self_test`):** Before touching any disk sectors, the tool constructs an in-memory multi-level B-Tree of 5,000 entries and verifies that every page passes `barely-nano`'s exact [`!page_is_full`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage.rs#L1127-L1136) invariant and binary-search lookup semantics.
+1. **Startup Self-Test (`verify_btree_builder_self_test`):** Before touching any disk sectors, the tool constructs an in-memory multi-level B-Tree of 5,000 entries and verifies that every page passes `barely-nano`'s exact [`!page_is_full`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs) invariant and binary-search lookup semantics.
 2. **Pass 1 — Parallel Sequential `data.ldb` Leaf Scan:** Memory-maps `data.ldb` (`PROT_READ`, `MAP_PRIVATE`, `MADV_SEQUENTIAL`) and scans all 4 KB LMDB pages across all CPU cores (~6 GiB/s). Valid leaf pages (`mp_flags == 0x02`, `mp_pgno == pgno`) are parsed and each record is classified by its exact `(key_len, val_len)` and inner sub-tree root page numbers into:
    - `accounts` (`TABLE_ID = 1`, 32B key $\rightarrow$ 129B value)
    - `blocks` (`TABLE_ID = 2`, 32B key $\rightarrow$ self-contained bit-packed compact `SavedBlock` value (`107..=267 B`, `COMPACT_BLOCK_TAG = 0x80`) with 1-byte `compact_representatives` table index, omitted zero `previous`/`successor`/`link`, and variable-length balance/height/timestamp matching [`SavedBlock::serialize_compact`](file:///mnt/data/rust-workspace/barely-nano/core/src/blocks/mod.rs#L862))
@@ -791,7 +800,7 @@ Every `.snap` file generated by `nvme-snapshot dump` uses a deterministic, page-
 The repository provides a high-throughput stress testing tool (`tools/nano-stress`) to test node stability, B-Tree storage performance, and queue behavior under heavy load by generating cryptographically valid blocks and streaming them directly over TCP to port **7075**.
 
 > [!TIP]
-> **Hardware Benchmark Results:** On the OrangePi RV2 (SpacemiT K1 8-core RISC-V SoC), the node achieves **21,002.5 blocks/second sustained end-to-end** (`4.76s` for 100,000 blocks), **25,368.0 blocks/second sustained TCP ingress** (`28,771 bps` peak batch = `6,293.7 KB/s`), and **22,396.4 – 28,328.6 blocks/second active pipeline throughput** (`19.32 – 19.92 µs/block` parallel B-Tree ledger commit time across Harts 5 & 6) with full Ed25519 signature verification and RVV Blake2b PoW validation. See the full [Stress Test & Throughput Report (`STRESS_TEST_REPORT.md`)](file:///mnt/data/rust-workspace/barely-nano/STRESS_TEST_REPORT.md) for detailed stage-by-stage hardware profiling and multi-hart metrics.
+> **Hardware Benchmark Results:** On the OrangePi RV2 (SpacemiT K1 8-core RISC-V SoC), the node achieves **`22,083.4 blocks/second` sustained end-to-end across 300,000 blocks** (`13.58s` total; **`22,534.3 bps`** in Run 3 `200k→300k`), **`26,136.5 blocks/second` sustained TCP ingress** (`29,419 bps` peak batch = `6.44 MB/s`), and **`23,490.7 blocks/second` active pipeline throughput** (`20.29 µs/block` parallel B-Tree ledger commit time across Harts 5 & 6) with full Ed25519 signature verification and RVV Blake2b PoW validation. On the full **80 GB (`226.37M`-block, `38.0M`-account) live Nano network ledger**, steady-state block validation + B-Tree insertion on Hart 6 averages **`27.5 µs/block`** (`2.72 µs` validate + `24.74 µs` insert) with **`33.4` sectors/read** batched NVMe read-ahead and only **`~40 MB/hour`** of NVMe write traffic. See the full [Stress Test & Throughput Report (`STRESS_TEST_REPORT.md`)](file:///mnt/data/rust-workspace/barely-nano/STRESS_TEST_REPORT.md) for detailed stage-by-stage hardware profiling and multi-hart metrics.
 
 ### 1. Node Dev Network Setup
 
