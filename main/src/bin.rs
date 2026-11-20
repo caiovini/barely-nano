@@ -1047,6 +1047,8 @@ fn run_consensus_and_elections_loop(
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_aec_voter_tick = kernel_common::clint::mtime();
     let mut last_scheduler_tick = kernel_common::clint::mtime();
+    let loop_start = kernel_common::clint::mtime();
+    let mut last_recount_step = kernel_common::clint::mtime();
     let mut iterations = 0;
     let mut idle_spins = 1u32;
     loop {
@@ -1054,6 +1056,33 @@ fn run_consensus_and_elections_loop(
         if mtime - last_watchdog > seconds(1) {
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
+        }
+
+        // 0. Read-only diagnostic ledger recount (starts 60s after boot, 1024 accounts / 5ms).
+        //    Never writes to the store or the cached counters.
+        if mtime - last_recount_step > millis(5) && mtime - loop_start > seconds(60) {
+            if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+                if !rc.started {
+                    if rc.repair_requested {
+                        rc.start_repair(&node_arc.ledger.store, mtime);
+                        tracing::info!("[recount] Ledger recount + orphan account repair started");
+                    } else {
+                        rc.start(&node_arc.ledger.store, mtime);
+                        tracing::info!("[recount] Read-only ledger recount started");
+                    }
+                }
+                if rc.is_running() && !node_arc.ledger.recount_step(&mut rc, 1024, mtime) {
+                    tracing::info!(
+                        "[recount] done: accounts={} sum_block_count={} sum_conf_height={} (cached block_count={} confirmed_count={})",
+                        rc.accounts,
+                        rc.sum_block_count,
+                        rc.sum_conf_height,
+                        rc.end_block_count,
+                        rc.end_confirmed_count
+                    );
+                }
+            }
+            last_recount_step = mtime;
         }
 
         // 1. Drive AEC voter and ticker every 300ms (matching RSNano's aec_loop_interval)
@@ -1651,11 +1680,95 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
     let miss_n_hart = hart_arr(&kernel_common::storage::bpm::MISS_N_HART, false);
     let miss_ms_hart = hart_arr(&kernel_common::storage::bpm::MISS_TICKS_HART, true);
     let shard_hold_ms_hart = hart_arr(&kernel_common::storage::LOCK_HOLD, true);
+    let recount_json = match rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+        Some(rc) => {
+            let end = if rc.done { rc.end_tick } else { kernel_common::clint::mtime() };
+            let elapsed_ms = if rc.started { (end - rc.start_tick) * 1000 / CLINT_FREQ } else { 0 };
+            let mut top = alloc::string::String::from("[");
+            for k in 0..rc.top_len {
+                let e = &rc.top[k];
+                if k > 0 {
+                    top.push(',');
+                }
+                top.push_str(&alloc::format!(
+                    "{{\"account\":\"{}\",\"block_count\":{},\"conf_height\":{},\"gap\":{}}}",
+                    e.account.encode_account(),
+                    e.block_count,
+                    e.conf_height,
+                    e.gap()
+                ));
+            }
+            top.push(']');
+            let acc_list = |arr: &[rsnano_core::Account]| {
+                let mut out = alloc::string::String::from("[");
+                for (k, a) in arr.iter().enumerate() {
+                    if k > 0 {
+                        out.push(',');
+                    }
+                    out.push('"');
+                    out.push_str(&a.encode_account());
+                    out.push('"');
+                }
+                out.push(']');
+                out
+            };
+            let orphan_samples = acc_list(&rc.orphan_samples[..rc.orphan_samples_len]);
+            let missing_conf_samples = acc_list(&rc.missing_conf_samples[..rc.missing_conf_samples_len]);
+            let mut orphan_hist = alloc::string::String::from("[");
+            for (k, v) in rc.orphan_hist.iter().enumerate() {
+                if k > 0 {
+                    orphan_hist.push(',');
+                }
+                orphan_hist.push_str(&alloc::format!("{}", v));
+            }
+            orphan_hist.push(']');
+            alloc::format!(
+                "{{\"started\":{},\"done\":{},\"elapsed_ms\":{},\"accounts\":{},\"sum_block_count\":{},\"conf_entries\":{},\"sum_conf_height\":{},\"unconfirmed_accounts\":{},\"unconfirmed_blocks\":{},\"missing_conf_accounts\":{},\"missing_conf_blocks\":{},\"conf_over_accounts\":{},\"conf_over_blocks\":{},\"orphan_conf_entries\":{},\"orphan_conf_height\":{},\"cached_start\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"cached_end\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"top_gaps\":{},\"orphan_samples\":{},\"missing_conf_samples\":{},\"orphan_hist\":{},\"repair\":{},\"repaired_accounts\":{},\"repaired_blocks\":{},\"repaired_missing_conf_accounts\":{},\"repaired_missing_conf_blocks\":{},\"repair_failed\":{},\"counters_applied\":{},\"applied\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}}}}",
+                rc.started,
+                rc.done,
+                elapsed_ms,
+                rc.accounts,
+                rc.sum_block_count,
+                rc.conf_entries,
+                rc.sum_conf_height,
+                rc.unconfirmed_accounts,
+                rc.unconfirmed_blocks,
+                rc.missing_conf_accounts,
+                rc.missing_conf_blocks,
+                rc.conf_over_accounts,
+                rc.conf_over_blocks,
+                rc.orphan_conf_entries,
+                rc.orphan_conf_height,
+                rc.start_block_count,
+                rc.start_confirmed_count,
+                rc.start_account_count,
+                rc.end_block_count,
+                rc.end_confirmed_count,
+                rc.end_account_count,
+                top,
+                orphan_samples,
+                missing_conf_samples,
+                orphan_hist,
+                rc.repair,
+                rc.repaired_accounts,
+                rc.repaired_blocks,
+                rc.repaired_missing_conf_accounts,
+                rc.repaired_missing_conf_blocks,
+                rc.repair_failed,
+                rc.counters_applied,
+                rc.applied_block_count,
+                rc.applied_confirmed_count,
+                rc.applied_account_count
+            )
+        }
+        None => alloc::string::String::from("null"),
+    };
 
     let body = alloc::format!(
-        "{{\"network\":\"{}\",\"uptime_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{}}}",
+        "{{\"network\":\"{}\",\"uptime_sec\":{},\"unix_time_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{},\"recount\":{}}}",
         node.network_params.network.current_network.as_str(),
         uptime_sec,
+        rsnano_core::utils::UnixTimestamp::now().as_u64(),
         blocks_stored,
         blocks_confirmed,
         unchecked,
@@ -1706,6 +1819,7 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
         miss_n_hart,
         miss_ms_hart,
         shard_hold_ms_hart,
+        recount_json,
     );
 
     alloc::format!(
@@ -1972,6 +2086,41 @@ fn handle_dashboard_server(ctx: &mut kernel_common::net::NetworkContext, node: A
                     );
                     let _ = socket.send_slice(hdr.as_bytes());
                     let _ = socket.send_slice(NANO_STRESS_WASM_GZ);
+                } else if first_line.starts_with("GET /api/recount_repair") {
+                    // Re-arms the recount in repair mode (rebuild orphan account records from
+                    // local blocks, then set cached counters from the recounted totals).
+                    let accepted = if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+                        if rc.is_running() {
+                            false
+                        } else {
+                            rc.started = false;
+                            rc.done = false;
+                            rc.repair_requested = true;
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                    let body = if accepted { "{\"recount\":\"repair_scheduled\"}" } else { "{\"recount\":\"busy\"}" };
+                    let resp = alloc::format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.send_slice(resp.as_bytes());
+                } else if first_line.starts_with("GET /api/recount_start") {
+                    // Re-arms the read-only ledger recount; Hart 4 restarts it on its next step.
+                    if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+                        rc.started = false;
+                        rc.done = false;
+                    }
+                    let body = "{\"recount\":\"restarting\"}";
+                    let resp = alloc::format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.send_slice(resp.as_bytes());
                 } else if first_line.starts_with("GET /api/metrics") {
                     let resp = format_dashboard_metrics_json(&node);
                     let _ = socket.send_slice(resp.as_bytes());

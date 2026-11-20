@@ -593,7 +593,7 @@ impl Ledger {
                         "[ledger] Genesis account info NOT found for account {}! Recreating from genesis block...",
                         genesis_account.encode_account()
                     );
-                    let mut info = AccountInfo::default();
+                    let mut info = rsnano_core::AccountInfo::default();
                     info.head = genesis.hash();
                     info.open_block = genesis.hash();
                     info.balance = self.constants.genesis_amount;
@@ -1209,6 +1209,18 @@ impl Ledger {
         current_info: Option<AccountInfo>,
         now: rsnano_core::utils::UnixMillisTimestamp,
     ) -> Option<AccountInfo> {
+        self.heal_account_inner(account, start_hash, current_info, Some(now))
+    }
+
+    /// Rebuilds `account`'s `AccountInfo` from local blocks, walking successors from `start_hash`.
+    /// `modified = None` uses the tip block's sideband timestamp instead of the current time.
+    fn heal_account_inner(
+        &self,
+        account: &Account,
+        start_hash: BlockHash,
+        current_info: Option<AccountInfo>,
+        modified: Option<rsnano_core::utils::UnixMillisTimestamp>,
+    ) -> Option<AccountInfo> {
         let mut tip_hash = start_hash;
         for _ in 0..4096 {
             if let Some(succ) = self.store.successors.get(&tip_hash) {
@@ -1254,7 +1266,7 @@ impl Ledger {
             representative: rep,
             open_block,
             balance: tip.balance(),
-            modified: now.into(),
+            modified: modified.unwrap_or_else(|| tip.timestamp()).into(),
             block_count: tip.height(),
             epoch: tip.epoch(),
         };
@@ -1297,6 +1309,18 @@ impl Ledger {
             let mut conf_missing = false;
             if !confirmed_frontier.is_zero() && !self.store.block.exists(&confirmed_frontier) {
                 confirmed_frontier = BlockHash::zero();
+                conf_missing = true;
+            } else if conf_info.is_none()
+                && account_info
+                    .as_ref()
+                    .map(|i| {
+                        let m = i.modified.as_u64();
+                        m >= 1_000_000_000 && m < 1_760_000_000
+                    })
+                    .unwrap_or(false)
+            {
+                // Pre-snapshot account (Unix epoch timestamp from the copied LMDB) whose
+                // `TABLE_CONFIRMATION_HEIGHT` row was lost during the LMDB copy.
                 conf_missing = true;
             }
 
@@ -1402,6 +1426,101 @@ impl Ledger {
         }
 
         (head, confirmed_frontier)
+    }
+
+    /// Drives one chunk of the ledger recount. In repair mode, rebuilds the account records of
+    /// orphan confirmation-height rows from local blocks (no network data, no consensus change),
+    /// and once the pass completes sets the cached counters from the recounted totals.
+    pub fn recount_step(
+        &self,
+        rc: &mut crate::LedgerRecount,
+        budget: usize,
+        now_tick: u64,
+    ) -> bool {
+        let more = rc.step(&self.store, budget, now_tick);
+        if rc.repair && !rc.repair_queue.is_empty() {
+            let mut queue = core::mem::take(&mut rc.repair_queue);
+            for &(account, frontier) in queue.iter() {
+                if self.store.account.get(&account).is_some() {
+                    continue; // healed concurrently by another path
+                }
+                if !self.store.block.exists(&frontier) {
+                    rc.repair_failed += 1;
+                    continue;
+                }
+                match self.heal_account_inner(&account, frontier, None, None) {
+                    Some(info) => {
+                        rc.repaired_accounts += 1;
+                        rc.repaired_blocks += info.block_count;
+                    }
+                    None => rc.repair_failed += 1,
+                }
+            }
+            queue.clear();
+            rc.repair_queue = queue;
+        }
+        if rc.repair && !rc.missing_conf_queue.is_empty() {
+            let mut mqueue = core::mem::take(&mut rc.missing_conf_queue);
+            for &(account, block_count, head, modified) in mqueue.iter() {
+                // Only repair pre-snapshot accounts (`1_000_000_000 <= modified < 1_760_000_000`
+                // Unix epoch seconds) whose `TABLE_CONFIRMATION_HEIGHT` row was lost in the LMDB copy.
+                if !(1_000_000_000..1_760_000_000).contains(&modified) {
+                    continue;
+                }
+                if self.store.confirmation_height.get(&account).is_some() {
+                    continue;
+                }
+                if block_count > 0 && self.store.block.exists(&head) {
+                    self.store.confirmation_height.put(
+                        &account,
+                        &rsnano_core::ConfirmationHeightInfo::new(block_count, head),
+                    );
+                    rc.repaired_missing_conf_accounts += 1;
+                    rc.repaired_missing_conf_blocks += block_count;
+                }
+            }
+            mqueue.clear();
+            rc.missing_conf_queue = mqueue;
+        }
+        if rc.done && rc.repair && !rc.counters_applied {
+            let cache = &self.store.cache;
+            let drift = |now: u64, start: u64| now as i128 - start as i128;
+            let clamp = |v: i128| if v < 0 { 0 } else { v as u64 };
+            let now_b = cache.block_count.load(Ordering::SeqCst);
+            let now_c = cache.confirmed_count.load(Ordering::SeqCst);
+            let now_a = cache.account_count.load(Ordering::SeqCst);
+            // Blocks / confirmations inserted while the scan ran are added back as drift
+            // (bounded by the few blocks inserted during the pass).
+            let blocks = clamp(
+                (rc.sum_block_count + rc.repaired_blocks) as i128 + drift(now_b, rc.start_block_count),
+            );
+            let confirmed = clamp(
+                (rc.sum_conf_height + rc.repaired_missing_conf_blocks) as i128
+                    + drift(now_c, rc.start_confirmed_count),
+            );
+            // `heal_account_inner` already incremented `account_count` for repaired accounts.
+            let accounts = clamp(rc.accounts as i128 + drift(now_a, rc.start_account_count));
+            cache.block_count.store(blocks, Ordering::SeqCst);
+            cache.confirmed_count.store(confirmed, Ordering::SeqCst);
+            cache.account_count.store(accounts, Ordering::SeqCst);
+            rc.counters_applied = true;
+            rc.applied_block_count = blocks;
+            rc.applied_confirmed_count = confirmed;
+            rc.applied_account_count = accounts;
+            tracing::info!(
+                "[recount] repair applied: repaired_accounts={} repaired_blocks={} failed={} | block_count {} -> {} | confirmed_count {} -> {} | account_count {} -> {}",
+                rc.repaired_accounts,
+                rc.repaired_blocks,
+                rc.repair_failed,
+                now_b,
+                blocks,
+                now_c,
+                confirmed,
+                now_a,
+                accounts
+            );
+        }
+        more
     }
 
     pub fn advance_existing_chain(&self, start: BlockHash, max_steps: usize) -> BlockHash {
@@ -1681,8 +1800,156 @@ mod slotted_btree_tests {
         assert_eq!(it_after.next_key(), None);
     }
 
+    /// Serializes tests that install the global `SHARDS` ramdisk B-Trees.
+    static SHARD_TEST_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+    #[test]
+    fn ledger_recount_merge_join_across_chunks() {
+        let _guard = SHARD_TEST_LOCK.lock();
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(64)));
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            let bpm = BufferPool::new(storage.clone(), 256, 1 + i * 512);
+            *kernel_common::storage::SHARDS[i].lock() = Some(BTree::new(bpm));
+        }
+        let store = rsnano_ledger_store::BtreeStore::new();
+
+        // Accounts spread across all 16 shards; deterministic pseudo-random keys.
+        let mut expected_blocks = 0u64;
+        let mut expected_conf = 0u64;
+        let mut expected_unconfirmed = 0u64;
+        let mut expected_missing = 0u64;
+        let mut max_gap = 0u64;
+        let n = 3000u64;
+        for i in 0..n {
+            let mut b = [0u8; 32];
+            let x = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            b[..8].copy_from_slice(&x.to_be_bytes());
+            b[8..16].copy_from_slice(&i.to_be_bytes());
+            let account = rsnano_core::Account::from_bytes(b);
+            let block_count = 1 + (i % 37);
+            let mut info = rsnano_core::AccountInfo::default();
+            info.block_count = block_count;
+            info.head = BlockHash::from(i + 1);
+            store.account.put(&account, &info);
+            expected_blocks += block_count;
+            match i % 5 {
+                0 => {
+                    // No confirmation height entry
+                    expected_missing += 1;
+                    expected_unconfirmed += block_count;
+                    max_gap = max_gap.max(block_count);
+                }
+                1 => {
+                    let h = block_count / 2;
+                    store.confirmation_height.put(
+                        &account,
+                        &rsnano_core::ConfirmationHeightInfo::new(h, BlockHash::from(1)),
+                    );
+                    expected_conf += h;
+                    expected_unconfirmed += block_count - h;
+                    max_gap = max_gap.max(block_count - h);
+                }
+                _ => {
+                    store.confirmation_height.put(
+                        &account,
+                        &rsnano_core::ConfirmationHeightInfo::new(block_count, info.head),
+                    );
+                    expected_conf += block_count;
+                }
+            }
+        }
+        // Orphan confirmation heights (no account)
+        // 50 spread across shards + 400 clustered at the end (exercises the conf cap path).
+        for i in 0..450u64 {
+            let mut b = [0xFFu8; 32];
+            b[24..].copy_from_slice(&i.to_be_bytes());
+            if i < 50 {
+                b[0] = (i as u8) << 4 | 0x0F;
+            }
+            store.confirmation_height.put(
+                &rsnano_core::Account::from_bytes(b),
+                &rsnano_core::ConfirmationHeightInfo::new(3, BlockHash::from(1)),
+            );
+            expected_conf += 3;
+        }
+
+        let mut rc = crate::LedgerRecount::new();
+        rc.start(&store, 0);
+        let mut steps = 0;
+        while rc.step(&store, 64, 0) {
+            steps += 1;
+            assert!(steps < 10_000);
+        }
+        assert!(rc.done);
+        assert!(steps > 10, "budget must force multiple chunks");
+        assert_eq!(rc.accounts, n);
+        assert_eq!(rc.sum_block_count, expected_blocks);
+        assert_eq!(rc.sum_conf_height, expected_conf);
+        assert_eq!(rc.orphan_conf_entries, 450);
+        assert_eq!(rc.missing_conf_accounts, expected_missing);
+        assert_eq!(rc.unconfirmed_blocks, expected_unconfirmed);
+        assert_eq!(rc.top[0].gap(), max_gap);
+
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            *kernel_common::storage::SHARDS[i].lock() = None;
+        }
+    }
+
+    #[test]
+    fn ledger_recount_repair_rebuilds_orphan_account_and_counters() {
+        let _guard = SHARD_TEST_LOCK.lock();
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(16)));
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 128);
+            *kernel_common::storage::SHARDS[i].lock() = Some(BTree::new(bpm));
+        }
+        let ledger = crate::Ledger::new_null();
+
+        // Orphan: block + confirmation height present, account record missing.
+        let block = SavedBlock::new_test_instance();
+        let account = block.account();
+        ledger.store.block.put(&block);
+        ledger.store.confirmation_height.put(
+            &account,
+            &rsnano_core::ConfirmationHeightInfo::new(block.height(), block.hash()),
+        );
+        assert!(ledger.store.account.get(&account).is_none());
+
+        // Healthy account with a stale cached counter.
+        let other = rsnano_core::Account::from_bytes([0x42; 32]);
+        let mut info = rsnano_core::AccountInfo::default();
+        info.block_count = 7;
+        ledger.store.account.put(&other, &info);
+        ledger.store.confirmation_height.put(
+            &other,
+            &rsnano_core::ConfirmationHeightInfo::new(5, BlockHash::from(9)),
+        );
+
+        let mut rc = crate::LedgerRecount::new();
+        rc.start_repair(&ledger.store, 0);
+        while ledger.recount_step(&mut rc, 16, 0) {}
+
+        let healed = ledger.store.account.get(&account).expect("orphan account rebuilt");
+        assert_eq!(healed.head, block.hash());
+        assert_eq!(healed.block_count, block.height());
+        assert_eq!(healed.balance, block.balance());
+        assert_eq!(rc.repaired_accounts, 1);
+        assert_eq!(rc.repaired_blocks, block.height());
+        assert_eq!(rc.repair_failed, 0);
+        assert!(rc.counters_applied);
+        assert_eq!(ledger.block_count() as u64, 7 + block.height());
+        assert_eq!(ledger.confirmed_count() as u64, 5 + block.height());
+        // new_null seeds account_count=1; the scan saw 1 account and the repair added 1.
+        assert_eq!(ledger.account_count(), 2);
+
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            *kernel_common::storage::SHARDS[i].lock() = None;
+        }
+    }
+
     #[test]
     fn embedded_block_successor_roundtrip() {
+        let _guard = SHARD_TEST_LOCK.lock();
         let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(8)));
         for i in 0..kernel_common::storage::SHARD_COUNT {
             let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 64);

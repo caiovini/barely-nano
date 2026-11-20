@@ -85,8 +85,25 @@ pub fn get_cpu_count() -> usize {
 
 pub type MemoryIntensiveInstrumentationCallback = extern "C" fn() -> bool;
 
+/// Unix epoch offset in milliseconds at `SteadyClock = 0` (board boot time).
+/// Calibrated automatically from the median of verified peer `TelemetryAck` timestamps.
+static WALL_CLOCK_OFFSET_MS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+pub fn set_wall_clock_offset_ms(offset_ms: u64) {
+    WALL_CLOCK_OFFSET_MS.store(offset_ms, core::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub fn wall_clock_offset_ms() -> u64 {
+    WALL_CLOCK_OFFSET_MS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn milliseconds_since_epoch() -> u64 {
-    SteadyClock::default().now().millis() as u64
+    WALL_CLOCK_OFFSET_MS
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .saturating_add(SteadyClock::default().now().millis() as u64)
 }
 
 pub fn system_time_as_seconds(time: Timestamp) -> u64 {
@@ -118,7 +135,7 @@ impl UnixTimestamp {
     }
 
     fn seconds_since_unix_epoch() -> u64 {
-        (SteadyClock::default().now().millis() / 1000) as u64
+        milliseconds_since_epoch() / 1000
     }
 
     pub fn to_be_bytes(&self) -> [u8; 8] {
