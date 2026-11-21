@@ -30,6 +30,8 @@ pub struct BareMetalNetConfig {
     pub rpc_enable_control: bool,
     pub dashboard_port: u16,
     pub dashboard_enable: bool,
+    pub dashboard_wallet_enabled: bool,
+    pub dashboard_pos_enable: bool,
 }
 
 impl Default for BareMetalNetConfig {
@@ -46,6 +48,8 @@ impl Default for BareMetalNetConfig {
             rpc_enable_control: true,
             dashboard_port: 7080,
             dashboard_enable: true,
+            dashboard_wallet_enabled: true,
+            dashboard_pos_enable: true,
         }
     }
 }
@@ -62,6 +66,8 @@ pub static NET_CONFIG: Mutex<BareMetalNetConfig> = Mutex::new(BareMetalNetConfig
     rpc_enable_control: true,
     dashboard_port: 7080,
     dashboard_enable: true,
+    dashboard_wallet_enabled: true,
+    dashboard_pos_enable: true,
 });
 
 pub fn set_net_config(cfg: BareMetalNetConfig) {

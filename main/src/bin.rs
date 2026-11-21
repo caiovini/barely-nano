@@ -714,6 +714,26 @@ fn boot_hart_main(hart_id: usize) {
                 if let Some(dash_port) = bm.dashboard_port {
                     net_cfg.dashboard_port = dash_port;
                 }
+                if let Some(w_en) = bm.dashboard_wallet_enabled {
+                    net_cfg.dashboard_wallet_enabled = w_en;
+                }
+                if let Some(p_en) = bm.dashboard_pos_enable {
+                    net_cfg.dashboard_pos_enable = p_en;
+                }
+            }
+            if let Some(dash) = &daemon_toml.dashboard {
+                if let Some(dash_en) = dash.dashboard_enable {
+                    net_cfg.dashboard_enable = dash_en;
+                }
+                if let Some(dash_port) = dash.dashboard_port {
+                    net_cfg.dashboard_port = dash_port;
+                }
+                if let Some(w_en) = dash.dashboard_wallet_enabled {
+                    net_cfg.dashboard_wallet_enabled = w_en;
+                }
+                if let Some(p_en) = dash.dashboard_pos_enable {
+                    net_cfg.dashboard_pos_enable = p_en;
+                }
             }
             kernel_common::net::set_net_config(net_cfg);
         }
@@ -1817,9 +1837,12 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
         None => alloc::string::String::from("null"),
     };
 
+    let net_cfg = kernel_common::net::get_net_config();
     let body = alloc::format!(
-        "{{\"network\":\"{}\",\"uptime_sec\":{},\"unix_time_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{},\"recount\":{}}}",
+        "{{\"network\":\"{}\",\"dashboard_wallet_enabled\":{},\"dashboard_pos_enable\":{},\"uptime_sec\":{},\"unix_time_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{},\"recount\":{}}}",
         node.network_params.network.current_network.as_str(),
+        net_cfg.dashboard_wallet_enabled,
+        net_cfg.dashboard_pos_enable,
         uptime_sec,
         rsnano_core::utils::UnixTimestamp::now().as_u64(),
         blocks_stored,
