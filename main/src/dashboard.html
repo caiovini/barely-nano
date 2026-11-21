@@ -582,9 +582,9 @@ canvas {
         </h2>
         <div style="display:flex;flex-direction:column;gap:12px">
           <div>
-            <label>Merchant Settlement Account (Final Destination)</label>
+            <label>Merchant Settlement Account (Final Destination • Masked for Privacy)</label>
             <div class="input-group">
-              <input id="pos-merchant-dest" placeholder="nano_1... (where payment will be swept)" onchange="savePosSettings()">
+              <input id="pos-merchant-dest" placeholder="Paste nano_1... address (auto-masked on screen)" autocomplete="off" spellcheck="false" onfocus="onPosMerchantDestFocus(this)" onblur="onPosMerchantDestBlur(this)" oninput="onPosMerchantDestInput(this)" onchange="savePosSettings()">
               <button class="btn btn-sec" onclick="fillPosFromWallet()" title="Use selected account from Wallet tab">From Wallet</button>
             </div>
           </div>
@@ -1860,6 +1860,80 @@ let posActive = null;
 let posPollTimer = null;
 let posBusy = false;
 let posHistory = [];
+let posMerchantDestFull = '';
+
+function isFullNanoAddress(str) {
+  str = (str || '').trim();
+  return /^(nano_|nano-|xrb_|xrb-)[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(str);
+}
+
+function maskNanoAddress(addr) {
+  addr = (addr || '').trim();
+  if (!addr || addr.length < 24) return addr;
+  return `${addr.slice(0, 12)}...••••••••••••...${addr.slice(-6)}`;
+}
+
+function setPosMerchantDest(fullAddr) {
+  fullAddr = (fullAddr || '').trim();
+  const input = document.getElementById('pos-merchant-dest');
+  if (isFullNanoAddress(fullAddr)) {
+    posMerchantDestFull = fullAddr;
+    try {
+      localStorage.setItem('barely_nano_pos_dest', fullAddr);
+    } catch (_) {}
+    if (input) input.value = maskNanoAddress(fullAddr);
+  } else if (!fullAddr) {
+    posMerchantDestFull = '';
+    try {
+      localStorage.removeItem('barely_nano_pos_dest');
+    } catch (_) {}
+    if (input) input.value = '';
+  } else if (input && posMerchantDestFull) {
+    input.value = maskNanoAddress(posMerchantDestFull);
+  }
+}
+
+function getPosMerchantDest() {
+  const input = document.getElementById('pos-merchant-dest');
+  const rawVal = input ? input.value.trim() : '';
+  if (isFullNanoAddress(rawVal)) {
+    setPosMerchantDest(rawVal);
+  }
+  return posMerchantDestFull;
+}
+
+function onPosMerchantDestFocus(input) {
+  if (posMerchantDestFull && input.value === maskNanoAddress(posMerchantDestFull)) {
+    input.value = '';
+    input.placeholder = `Current: ${maskNanoAddress(posMerchantDestFull)} (paste new nano_... to change)`;
+  }
+}
+
+function onPosMerchantDestInput(input) {
+  const val = (input.value || '').trim();
+  if (isFullNanoAddress(val)) {
+    setPosMerchantDest(val);
+    input.blur();
+    updatePosAmountLive();
+  }
+}
+
+function onPosMerchantDestBlur(input) {
+  const val = (input.value || '').trim();
+  if (isFullNanoAddress(val)) {
+    setPosMerchantDest(val);
+  } else if (val === '' && posMerchantDestFull) {
+    input.value = maskNanoAddress(posMerchantDestFull);
+  } else if (val !== '' && !val.includes('•')) {
+    if (posMerchantDestFull) {
+      input.value = maskNanoAddress(posMerchantDestFull);
+    } else {
+      input.value = '';
+    }
+  }
+  input.placeholder = 'Paste nano_1... address (auto-masked on screen)';
+  updatePosAmountLive();
+}
 
 function posLog(msg) {
   const el = document.getElementById('pos-log');
@@ -1886,18 +1960,15 @@ function updatePosAmountLive() {
   posActive.amountNano = amountNano;
   posActive.uri = `nano:${posActive.account}?amount=${amountRaw}`;
   document.getElementById('pos-eph-uri').value = posActive.uri;
-  const merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+  const merchantDest = getPosMerchantDest();
   posActive.merchantDest = merchantDest;
-  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + maskNanoAddress(merchantDest) : 'Hold in Ephemeral'}`;
   renderQrCodeToCanvas(posActive.uri, document.getElementById('pos-qr'));
   savePosHistory();
 }
 
 function savePosSettings() {
-  try {
-    const dest = document.getElementById('pos-merchant-dest').value.trim();
-    if (dest) localStorage.setItem('barely_nano_pos_dest', dest);
-  } catch (_) {}
+  getPosMerchantDest();
   updatePosAmountLive();
 }
 
@@ -1911,11 +1982,12 @@ function savePosHistory() {
 async function initPosTab() {
   try {
     const savedDest = localStorage.getItem('barely_nano_pos_dest');
-    const destInput = document.getElementById('pos-merchant-dest');
-    if (savedDest && !destInput.value) {
-      destInput.value = savedDest;
-    } else if (!destInput.value) {
+    if (savedDest && isFullNanoAddress(savedDest) && !posMerchantDestFull) {
+      setPosMerchantDest(savedDest);
+    } else if (!posMerchantDestFull) {
       await fillPosFromWallet();
+    } else {
+      setPosMerchantDest(posMerchantDestFull);
     }
     const savedHist = localStorage.getItem('barely_nano_pos_history');
     if (savedHist && posHistory.length === 0) {
@@ -1924,20 +1996,82 @@ async function initPosTab() {
   } catch (_) {}
   renderPosHistory();
   if (!posActive) {
-    createPosPayment();
+    const existingWaiting = posHistory.find(inv => inv && inv.status === 'WAITING');
+    if (existingWaiting) {
+      activateWaitingPosInvoice(existingWaiting);
+    } else {
+      createPosPayment();
+    }
   }
+}
+
+function activateWaitingPosInvoice(inv) {
+  if (!inv) return;
+  if (posPollTimer) {
+    clearInterval(posPollTimer);
+    posPollTimer = null;
+  }
+  posActive = inv;
+  const merchantDest = (inv.merchantDest && isFullNanoAddress(inv.merchantDest))
+    ? inv.merchantDest
+    : getPosMerchantDest();
+  inv.merchantDest = merchantDest;
+
+  document.getElementById('pos-amount').value = inv.amountNano || '0.1';
+  document.getElementById('pos-memo').value = inv.memo || '';
+  document.getElementById('pos-disp-amount').textContent = inv.amountNano;
+  document.getElementById('pos-disp-memo').textContent = `${inv.memo} • ${merchantDest ? 'Sweep -> ' + maskNanoAddress(merchantDest) : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-eph-account').value = inv.account;
+  document.getElementById('pos-eph-uri').value = inv.uri;
+  document.getElementById('pos-privkey-box').style.display = 'none';
+  document.getElementById('pos-cancel-btn').disabled = false;
+  document.getElementById('pos-check-btn').disabled = false;
+  document.getElementById('pos-key-btn').disabled = false;
+  document.getElementById('pos-progress').style.width = '25%';
+
+  const badge = document.getElementById('pos-state-badge');
+  badge.textContent = 'WAITING FOR PAYMENT';
+  badge.className = 'badge warn';
+
+  renderQrCodeToCanvas(inv.uri, document.getElementById('pos-qr'));
+  posLog(`Resumed waiting invoice ${inv.memo}: ${inv.account}`);
+
+  const powStatusEl = document.getElementById('pos-pow-status');
+  if (inv.openWork) {
+    powStatusEl.textContent = `Open PoW Ready (${inv.openWork}) ✓`;
+    powStatusEl.style.color = 'var(--green)';
+  } else {
+    powStatusEl.textContent = 'Precomputing Open PoW in WASM...';
+    powStatusEl.style.color = 'var(--accent)';
+    const targetPub = inv.publicKey;
+    computeWasmWorkForRoot(targetPub, true).then(workHex => {
+      if (inv && inv.publicKey === targetPub && workHex) {
+        inv.openWork = workHex;
+        savePosHistory();
+        if (posActive && posActive.publicKey === targetPub) {
+          powStatusEl.textContent = `Open PoW Ready (${workHex}) ✓`;
+          powStatusEl.style.color = 'var(--green)';
+          posLog(`Precomputed Open Block PoW in browser WASM: ${workHex}`);
+        }
+      }
+    });
+  }
+
+  posPollTimer = setInterval(() => {
+    checkAndSweepPosNow();
+  }, 1500);
 }
 
 async function fillPosFromWallet() {
   const sendSel = document.getElementById('w-send-source');
   if (sendSel && sendSel.options.length > 0 && sendSel.value) {
-    document.getElementById('pos-merchant-dest').value = sendSel.value;
+    setPosMerchantDest(sendSel.value);
     savePosSettings();
     return;
   }
   loadBrowserWalletsFromStorage();
   if (browserWallets.length > 0 && browserWallets[0].accounts && browserWallets[0].accounts.length > 0) {
-    document.getElementById('pos-merchant-dest').value = browserWallets[0].accounts[0].account;
+    setPosMerchantDest(browserWallets[0].accounts[0].account);
     savePosSettings();
   }
 }
@@ -1968,11 +2102,11 @@ async function createPosPayment() {
   if (BigInt(amountRaw) <= 0n) {
     return alert('Enter a payment amount greater than 0 NANO');
   }
-  let merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+  let merchantDest = getPosMerchantDest();
   const autoSweep = document.getElementById('pos-autosweep').checked;
   if (autoSweep && !merchantDest) {
     await fillPosFromWallet();
-    merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+    merchantDest = getPosMerchantDest();
   }
   savePosSettings();
 
@@ -2028,7 +2162,7 @@ async function createPosPayment() {
   }
 
   document.getElementById('pos-disp-amount').textContent = posActive.amountNano;
-  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + maskNanoAddress(merchantDest) : 'Hold in Ephemeral'}`;
   document.getElementById('pos-eph-account').value = posActive.account;
   document.getElementById('pos-eph-uri').value = posActive.uri;
   document.getElementById('pos-privkey-box').style.display = 'none';
@@ -2168,18 +2302,18 @@ async function checkAndSweepPosNow(targetInvoice) {
       const expectedBal = BigInt(inv.amountRaw || '0');
 
       if (currentBal >= expectedBal || targetInvoice) {
-        const effectiveDest = (inv.merchantDest && inv.merchantDest.startsWith('nano_'))
+        const effectiveDest = (inv.merchantDest && isFullNanoAddress(inv.merchantDest))
           ? inv.merchantDest
-          : document.getElementById('pos-merchant-dest').value.trim();
+          : getPosMerchantDest();
         const shouldSweep = (inv.autoSweep || !!targetInvoice)
           && effectiveDest
-          && effectiveDest.startsWith('nano_')
+          && isFullNanoAddress(effectiveDest)
           && effectiveDest !== inv.account;
 
         if (shouldSweep) {
           inv.merchantDest = effectiveDest;
           const workerCnt = powWorkerPool.length || Math.min(16, Math.max(2, Number(navigator.hardwareConcurrency) || 4));
-          posLog(`Sweeping ${rawToNanoStr(currentBal.toString())} NANO to merchant account ${effectiveDest.slice(0, 20)}... (computing Epoch-2 Send PoW across ${workerCnt} WASM threads)`);
+          posLog(`Sweeping ${rawToNanoStr(currentBal.toString())} NANO to merchant account ${maskNanoAddress(effectiveDest)} (computing Epoch-2 Send PoW across ${workerCnt} WASM threads)...`);
           const t0 = performance.now();
           const sweepWork = (inv.sweepWork && inv.sweepFrontier === accInfo.frontier)
             ? inv.sweepWork
@@ -2254,6 +2388,19 @@ async function sweepHistoryInvoice(id) {
     await new Promise(r => setTimeout(r, 100));
   }
   await checkAndSweepPosNow(inv);
+}
+
+function cancelHistoryInvoice(id) {
+  const inv = posHistory.find(x => x.id === id);
+  if (!inv || inv.status !== 'WAITING') return;
+  if (posActive && posActive.id === inv.id) {
+    cancelPosPayment();
+    return;
+  }
+  inv.status = 'CANCELLED';
+  inv.selectedForSweep = false;
+  savePosHistory();
+  posLog(`Cancelled waiting invoice ${inv.memo} (${inv.account.slice(0, 16)}...).`);
 }
 
 function showHistoryKey(id) {
@@ -2384,6 +2531,7 @@ function renderPosHistory() {
       <td>
         <div class="btn-row">
           <button class="btn btn-sec" style="height:26px;padding:0 8px;font-size:11px" onclick="sweepHistoryInvoice('${inv.id}')" ${isPosInvoiceSwept(inv) ? 'disabled' : ''}>Sweep</button>
+          ${inv.status === 'WAITING' ? `<button class="btn btn-danger" style="height:26px;padding:0 8px;font-size:11px" onclick="cancelHistoryInvoice('${inv.id}')">Cancel</button>` : ''}
           <button class="btn btn-sec" style="height:26px;padding:0 8px;font-size:11px" onclick="showHistoryKey('${inv.id}')">Key</button>
         </div>
       </td>
