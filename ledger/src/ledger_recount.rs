@@ -82,12 +82,17 @@ pub struct LedgerRecount {
     pub repair: bool,
     /// Set by the HTTP trigger; consumed by the driver when (re)starting the scan.
     pub repair_requested: bool,
-    pub repair_queue: Vec<(Account, BlockHash)>,
+    pub repair_queue: Vec<(Account, u64, BlockHash)>,
     pub missing_conf_queue: Vec<(Account, u64, BlockHash, u64)>,
+    pub conf_over_queue: Vec<(Account, u64, BlockHash, u64, BlockHash)>,
+    pub bootstrap_accounts: Vec<Account>,
     pub repaired_accounts: u64,
     pub repaired_blocks: u64,
     pub repaired_missing_conf_accounts: u64,
     pub repaired_missing_conf_blocks: u64,
+    pub removed_orphan_conf_entries: u64,
+    pub removed_orphan_conf_height: u64,
+    pub bootstrap_seeded: u64,
     pub repair_failed: u64,
     pub counters_applied: bool,
     pub applied_block_count: u64,
@@ -140,10 +145,15 @@ impl LedgerRecount {
             repair_requested: false,
             repair_queue: Vec::new(),
             missing_conf_queue: Vec::new(),
+            conf_over_queue: Vec::new(),
+            bootstrap_accounts: Vec::new(),
             repaired_accounts: 0,
             repaired_blocks: 0,
             repaired_missing_conf_accounts: 0,
             repaired_missing_conf_blocks: 0,
+            removed_orphan_conf_entries: 0,
+            removed_orphan_conf_height: 0,
+            bootstrap_seeded: 0,
             repair_failed: 0,
             counters_applied: false,
             applied_block_count: 0,
@@ -261,36 +271,43 @@ impl LedgerRecount {
             let a = self.acc_buf.get(i).copied();
             let c = self.conf_buf.get(j).copied();
             match (a, c) {
-                (Some((acc, bc, _, _)), Some((cacc, h, _))) if acc == cacc => {
+                (Some((acc, bc, head, _)), Some((cacc, h, fr))) if acc == cacc => {
                     self.record_account(acc, bc, Some(h));
+                    if self.repair {
+                        if h < bc && !head.is_zero() {
+                            self.missing_conf_queue.push((acc, bc, head, h));
+                        } else if h > bc {
+                            self.conf_over_queue.push((acc, bc, head, h, fr));
+                        }
+                    }
                     i += 1;
                     j += 1;
                 }
-                (Some((acc, bc, head, modified)), Some((cacc, _, _))) if acc < cacc => {
+                (Some((acc, bc, head, _)), Some((cacc, _, _))) if acc < cacc => {
                     self.record_account(acc, bc, None);
-                    if self.repair && !head.is_zero() {
-                        self.missing_conf_queue.push((acc, bc, head, modified));
+                    if self.repair && bc > 0 && !head.is_zero() {
+                        self.missing_conf_queue.push((acc, bc, head, 0));
                     }
                     i += 1;
                 }
                 (Some(_), Some((cacc, h, fr))) => {
                     self.record_orphan_conf(cacc, h);
-                    if self.repair && !fr.is_zero() {
-                        self.repair_queue.push((cacc, fr));
+                    if self.repair {
+                        self.repair_queue.push((cacc, h, fr));
                     }
                     j += 1;
                 }
-                (Some((acc, bc, head, modified)), None) => {
+                (Some((acc, bc, head, _)), None) => {
                     self.record_account(acc, bc, None);
-                    if self.repair && !head.is_zero() {
-                        self.missing_conf_queue.push((acc, bc, head, modified));
+                    if self.repair && bc > 0 && !head.is_zero() {
+                        self.missing_conf_queue.push((acc, bc, head, 0));
                     }
                     i += 1;
                 }
                 (None, Some((cacc, h, fr))) => {
                     self.record_orphan_conf(cacc, h);
-                    if self.repair && !fr.is_zero() {
-                        self.repair_queue.push((cacc, fr));
+                    if self.repair {
+                        self.repair_queue.push((cacc, h, fr));
                     }
                     j += 1;
                 }

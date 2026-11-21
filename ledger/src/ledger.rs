@@ -1440,34 +1440,97 @@ impl Ledger {
         let more = rc.step(&self.store, budget, now_tick);
         if rc.repair && !rc.repair_queue.is_empty() {
             let mut queue = core::mem::take(&mut rc.repair_queue);
-            for &(account, frontier) in queue.iter() {
+            for &(account, height, frontier) in queue.iter() {
                 if self.store.account.get(&account).is_some() {
                     continue; // healed concurrently by another path
                 }
-                if !self.store.block.exists(&frontier) {
+                if frontier.is_zero() || !self.store.block.exists(&frontier) {
+                    // Both the `TABLE_ACCOUNTS` row and the `frontier` block are missing from disk.
+                    // Remove the dangling confirmation-height entry and enqueue the account for bootstrap pull.
+                    self.store.confirmation_height.del(&account);
+                    rc.removed_orphan_conf_entries += 1;
+                    rc.removed_orphan_conf_height += height;
                     rc.repair_failed += 1;
+                    rc.bootstrap_accounts.push(account);
+                    rc.bootstrap_seeded += 1;
                     continue;
                 }
                 match self.heal_account_inner(&account, frontier, None, None) {
                     Some(info) => {
+                        if info.block_count > height {
+                            self.store.confirmation_height.put(
+                                &account,
+                                &rsnano_core::ConfirmationHeightInfo::new(info.block_count, info.head),
+                            );
+                            rc.repaired_missing_conf_blocks += info.block_count - height;
+                        }
                         rc.repaired_accounts += 1;
                         rc.repaired_blocks += info.block_count;
                     }
-                    None => rc.repair_failed += 1,
+                    None => {
+                        self.store.confirmation_height.del(&account);
+                        rc.removed_orphan_conf_entries += 1;
+                        rc.removed_orphan_conf_height += height;
+                        rc.repair_failed += 1;
+                        rc.bootstrap_accounts.push(account);
+                        rc.bootstrap_seeded += 1;
+                    }
                 }
             }
             queue.clear();
             rc.repair_queue = queue;
         }
+        if rc.repair && !rc.conf_over_queue.is_empty() {
+            let mut co_queue = core::mem::take(&mut rc.conf_over_queue);
+            for &(account, block_count, head, conf_height, frontier) in co_queue.iter() {
+                if !frontier.is_zero() && self.store.block.exists(&frontier) {
+                    let cur_info = self.store.account.get(&account);
+                    if let Some(info) = self.heal_account_inner(&account, frontier, cur_info, None) {
+                        rc.repaired_accounts += 1;
+                        rc.repaired_blocks += info.block_count.saturating_sub(block_count);
+                        if info.block_count > conf_height {
+                            self.store.confirmation_height.put(
+                                &account,
+                                &rsnano_core::ConfirmationHeightInfo::new(info.block_count, info.head),
+                            );
+                            rc.repaired_missing_conf_blocks += info.block_count - conf_height;
+                        }
+                    }
+                } else if block_count > 0 && !head.is_zero() && self.store.block.exists(&head) {
+                    self.store.confirmation_height.put(
+                        &account,
+                        &rsnano_core::ConfirmationHeightInfo::new(block_count, head),
+                    );
+                    rc.removed_orphan_conf_height += conf_height.saturating_sub(block_count);
+                    rc.bootstrap_accounts.push(account);
+                    rc.bootstrap_seeded += 1;
+                } else {
+                    let _ = self.get_healed_account_frontiers(&account);
+                    let new_h = self
+                        .store
+                        .confirmation_height
+                        .get(&account)
+                        .map(|c| c.height)
+                        .unwrap_or(0);
+                    rc.removed_orphan_conf_height += conf_height.saturating_sub(new_h);
+                    rc.repair_failed += 1;
+                    rc.bootstrap_accounts.push(account);
+                    rc.bootstrap_seeded += 1;
+                }
+            }
+            co_queue.clear();
+            rc.conf_over_queue = co_queue;
+        }
         if rc.repair && !rc.missing_conf_queue.is_empty() {
             let mut mqueue = core::mem::take(&mut rc.missing_conf_queue);
-            for &(account, block_count, head, modified) in mqueue.iter() {
-                // Only repair pre-snapshot accounts (`1_000_000_000 <= modified < 1_760_000_000`
-                // Unix epoch seconds) whose `TABLE_CONFIRMATION_HEIGHT` row was lost in the LMDB copy.
-                if !(1_000_000_000..1_760_000_000).contains(&modified) {
-                    continue;
-                }
-                if self.store.confirmation_height.get(&account).is_some() {
+            for &(account, block_count, head, old_conf_height) in mqueue.iter() {
+                let cur_h = self
+                    .store
+                    .confirmation_height
+                    .get(&account)
+                    .map(|c| c.height)
+                    .unwrap_or(0);
+                if cur_h >= block_count {
                     continue;
                 }
                 if block_count > 0 && self.store.block.exists(&head) {
@@ -1476,7 +1539,13 @@ impl Ledger {
                         &rsnano_core::ConfirmationHeightInfo::new(block_count, head),
                     );
                     rc.repaired_missing_conf_accounts += 1;
-                    rc.repaired_missing_conf_blocks += block_count;
+                    rc.repaired_missing_conf_blocks +=
+                        block_count.saturating_sub(old_conf_height.max(cur_h));
+                } else {
+                    let _ = self.get_healed_account_frontiers(&account);
+                    rc.repair_failed += 1;
+                    rc.bootstrap_accounts.push(account);
+                    rc.bootstrap_seeded += 1;
                 }
             }
             mqueue.clear();
@@ -1496,6 +1565,7 @@ impl Ledger {
             );
             let confirmed = clamp(
                 (rc.sum_conf_height + rc.repaired_missing_conf_blocks) as i128
+                    - rc.removed_orphan_conf_height as i128
                     + drift(now_c, rc.start_confirmed_count),
             );
             // `heal_account_inner` already incremented `account_count` for repaired accounts.
@@ -1508,9 +1578,13 @@ impl Ledger {
             rc.applied_confirmed_count = confirmed;
             rc.applied_account_count = accounts;
             tracing::info!(
-                "[recount] repair applied: repaired_accounts={} repaired_blocks={} failed={} | block_count {} -> {} | confirmed_count {} -> {} | account_count {} -> {}",
+                "[recount] repair applied: repaired_accounts={} repaired_blocks={} repaired_conf_accounts={} repaired_conf_blocks={} removed_orphans={} seeded_bootstrap={} failed={} | block_count {} -> {} | confirmed_count {} -> {} | account_count {} -> {}",
                 rc.repaired_accounts,
                 rc.repaired_blocks,
+                rc.repaired_missing_conf_accounts,
+                rc.repaired_missing_conf_blocks,
+                rc.removed_orphan_conf_entries,
+                rc.bootstrap_seeded,
                 rc.repair_failed,
                 now_b,
                 blocks,
@@ -1915,14 +1989,25 @@ mod slotted_btree_tests {
         );
         assert!(ledger.store.account.get(&account).is_none());
 
-        // Healthy account with a stale cached counter.
+        // Healthy account with an unconfirmed gap (`conf_height = 5 < block_count = 7`) whose head block exists.
+        let other_block = SavedBlock::new_test_instance_with_key(42);
         let other = rsnano_core::Account::from_bytes([0x42; 32]);
+        ledger.store.block.put(&other_block);
         let mut info = rsnano_core::AccountInfo::default();
+        info.head = other_block.hash();
         info.block_count = 7;
         ledger.store.account.put(&other, &info);
         ledger.store.confirmation_height.put(
             &other,
             &rsnano_core::ConfirmationHeightInfo::new(5, BlockHash::from(9)),
+        );
+
+        // Unrecoverable orphan (no account row, and frontier block missing from `TABLE_BLOCKS`):
+        // should be removed from `TABLE_CONFIRMATION_HEIGHT` and seeded into `bootstrap_accounts`.
+        let missing_orphan = rsnano_core::Account::from_bytes([0x99; 32]);
+        ledger.store.confirmation_height.put(
+            &missing_orphan,
+            &rsnano_core::ConfirmationHeightInfo::new(3, BlockHash::from(999)),
         );
 
         let mut rc = crate::LedgerRecount::new();
@@ -1935,10 +2020,21 @@ mod slotted_btree_tests {
         assert_eq!(healed.balance, block.balance());
         assert_eq!(rc.repaired_accounts, 1);
         assert_eq!(rc.repaired_blocks, block.height());
-        assert_eq!(rc.repair_failed, 0);
+        assert_eq!(rc.repaired_missing_conf_accounts, 1);
+        assert_eq!(rc.repaired_missing_conf_blocks, 2);
+        assert_eq!(rc.removed_orphan_conf_entries, 1);
+        assert_eq!(rc.removed_orphan_conf_height, 3);
+        assert_eq!(rc.bootstrap_seeded, 1);
+        assert_eq!(rc.bootstrap_accounts, alloc::vec![missing_orphan]);
+        assert!(ledger.store.confirmation_height.get(&missing_orphan).is_none());
+        assert_eq!(
+            ledger.store.confirmation_height.get(&other),
+            Some(rsnano_core::ConfirmationHeightInfo::new(7, other_block.hash()))
+        );
+        assert_eq!(rc.repair_failed, 1);
         assert!(rc.counters_applied);
         assert_eq!(ledger.block_count() as u64, 7 + block.height());
-        assert_eq!(ledger.confirmed_count() as u64, 5 + block.height());
+        assert_eq!(ledger.confirmed_count() as u64, 7 + block.height());
         // new_null seeds account_count=1; the scan saw 1 account and the repair added 1.
         assert_eq!(ledger.account_count(), 2);
 

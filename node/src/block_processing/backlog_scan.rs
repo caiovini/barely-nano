@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use rsnano_core::{Account, AccountInfo, ConfirmationHeightInfo};
-use rsnano_ledger::{AnySet, ConfirmedSet, Ledger};
+use rsnano_ledger::Ledger;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{StatsCollection, StatsSource};
 
@@ -25,8 +25,8 @@ impl Default for BacklogScanConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            batch_size: 256,
-            rate_limit: 10_000,
+            batch_size: 2048,
+            rate_limit: 20_480,
         }
     }
 }
@@ -180,32 +180,74 @@ struct BacklogScanLoop {
 
 impl BacklogScanLoop {
     fn scan_batch(ledger: &Ledger, next: Account, batch_size: usize) -> BacklogScanResult {
+        let mut accounts = Vec::with_capacity(batch_size.min(2048));
+        let mut done = true;
+        ledger.store.account.for_each_while(next, |account, account_info| {
+            accounts.push((account, account_info));
+            if accounts.len() >= batch_size {
+                done = false;
+                return false;
+            }
+            true
+        });
+
+        if accounts.is_empty() {
+            return BacklogScanResult {
+                next,
+                done: true,
+                ..Default::default()
+            };
+        }
+
+        let first_acc = accounts[0].0;
+        let last_acc = accounts.last().unwrap().0;
         let mut result = BacklogScanResult {
-            next,
-            done: true,
+            next: last_acc.inc_or_max(),
+            done,
             ..Default::default()
         };
-        let any = ledger.any();
-        let it = any.accounts_range(result.next..);
-        for (account, account_info) in it {
-            let conf_info = any.confirmed().get_conf_info(&account).unwrap_or_default();
-            let is_confirmed = conf_info.height >= account_info.block_count;
 
-            if is_confirmed {
-                result.fully_confirmed.push(account);
-            } else {
-                result.unconfirmed.push(UnconfirmedInfo {
-                    account,
-                    account_info,
-                    conf_info,
-                });
-            }
+        let mut idx = 0usize;
+        ledger
+            .store
+            .confirmation_height
+            .for_each_while(first_acc, |cacc, conf_info| {
+                if cacc > last_acc {
+                    return false;
+                }
+                while idx < accounts.len() && accounts[idx].0 < cacc {
+                    let (account, account_info) = accounts[idx].clone();
+                    result.unconfirmed.push(UnconfirmedInfo {
+                        account,
+                        account_info,
+                        conf_info: ConfirmationHeightInfo::default(),
+                    });
+                    idx += 1;
+                }
+                if idx < accounts.len() && accounts[idx].0 == cacc {
+                    let (account, account_info) = accounts[idx].clone();
+                    if conf_info.height >= account_info.block_count {
+                        result.fully_confirmed.push(account);
+                    } else {
+                        result.unconfirmed.push(UnconfirmedInfo {
+                            account,
+                            account_info,
+                            conf_info,
+                        });
+                    }
+                    idx += 1;
+                }
+                idx < accounts.len()
+            });
 
-            result.next = account.inc_or_max();
-            if result.len() >= batch_size {
-                result.done = false;
-                break;
-            }
+        while idx < accounts.len() {
+            let (account, account_info) = accounts[idx].clone();
+            result.unconfirmed.push(UnconfirmedInfo {
+                account,
+                account_info,
+                conf_info: ConfirmationHeightInfo::default(),
+            });
+            idx += 1;
         }
 
         result

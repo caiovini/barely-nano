@@ -1064,28 +1064,38 @@ fn run_consensus_and_elections_loop(
         }
 
         // 0. Read-only diagnostic ledger recount (starts 60s after boot, 1024 accounts / 5ms).
-        //    Never writes to the store or the cached counters.
+        //    Never writes to the store or the cached counters unless triggered via /api/recount_repair.
         if mtime - last_recount_step > millis(5) && mtime - loop_start > seconds(60) {
+            let mut to_bootstrap = alloc::vec::Vec::new();
             if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
                 if !rc.started {
                     if rc.repair_requested {
                         rc.start_repair(&node_arc.ledger.store, mtime);
-                        tracing::info!("[recount] Ledger recount + orphan account repair started");
+                        tracing::info!("[recount] Ledger recount + orphan/confirmation-height repair started");
                     } else {
                         rc.start(&node_arc.ledger.store, mtime);
                         tracing::info!("[recount] Read-only ledger recount started");
                     }
                 }
-                if rc.is_running() && !node_arc.ledger.recount_step(&mut rc, 1024, mtime) {
-                    tracing::info!(
-                        "[recount] done: accounts={} sum_block_count={} sum_conf_height={} (cached block_count={} confirmed_count={})",
-                        rc.accounts,
-                        rc.sum_block_count,
-                        rc.sum_conf_height,
-                        rc.end_block_count,
-                        rc.end_confirmed_count
-                    );
+                if rc.is_running() {
+                    let more = node_arc.ledger.recount_step(&mut rc, 1024, mtime);
+                    if !rc.bootstrap_accounts.is_empty() {
+                        to_bootstrap = core::mem::take(&mut rc.bootstrap_accounts);
+                    }
+                    if !more {
+                        tracing::info!(
+                            "[recount] done: accounts={} sum_block_count={} sum_conf_height={} (cached block_count={} confirmed_count={})",
+                            rc.accounts,
+                            rc.sum_block_count,
+                            rc.sum_conf_height,
+                            rc.end_block_count,
+                            rc.end_confirmed_count
+                        );
+                    }
                 }
+            }
+            for acc in to_bootstrap {
+                node_arc.bootstrapper.prioritize_account(&acc);
             }
             last_recount_step = mtime;
         }
@@ -1763,7 +1773,7 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
             }
             orphan_hist.push(']');
             alloc::format!(
-                "{{\"started\":{},\"done\":{},\"elapsed_ms\":{},\"accounts\":{},\"sum_block_count\":{},\"conf_entries\":{},\"sum_conf_height\":{},\"unconfirmed_accounts\":{},\"unconfirmed_blocks\":{},\"missing_conf_accounts\":{},\"missing_conf_blocks\":{},\"conf_over_accounts\":{},\"conf_over_blocks\":{},\"orphan_conf_entries\":{},\"orphan_conf_height\":{},\"cached_start\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"cached_end\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"top_gaps\":{},\"orphan_samples\":{},\"missing_conf_samples\":{},\"orphan_hist\":{},\"repair\":{},\"repaired_accounts\":{},\"repaired_blocks\":{},\"repaired_missing_conf_accounts\":{},\"repaired_missing_conf_blocks\":{},\"repair_failed\":{},\"counters_applied\":{},\"applied\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}}}}",
+                "{{\"started\":{},\"done\":{},\"elapsed_ms\":{},\"accounts\":{},\"sum_block_count\":{},\"conf_entries\":{},\"sum_conf_height\":{},\"unconfirmed_accounts\":{},\"unconfirmed_blocks\":{},\"missing_conf_accounts\":{},\"missing_conf_blocks\":{},\"conf_over_accounts\":{},\"conf_over_blocks\":{},\"orphan_conf_entries\":{},\"orphan_conf_height\":{},\"cached_start\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"cached_end\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"top_gaps\":{},\"orphan_samples\":{},\"missing_conf_samples\":{},\"orphan_hist\":{},\"repair\":{},\"repaired_accounts\":{},\"repaired_blocks\":{},\"repaired_missing_conf_accounts\":{},\"repaired_missing_conf_blocks\":{},\"removed_orphan_conf_entries\":{},\"removed_orphan_conf_height\":{},\"bootstrap_seeded\":{},\"repair_failed\":{},\"counters_applied\":{},\"applied\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}}}}",
                 rc.started,
                 rc.done,
                 elapsed_ms,
@@ -1794,6 +1804,9 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
                 rc.repaired_blocks,
                 rc.repaired_missing_conf_accounts,
                 rc.repaired_missing_conf_blocks,
+                rc.removed_orphan_conf_entries,
+                rc.removed_orphan_conf_height,
+                rc.bootstrap_seeded,
                 rc.repair_failed,
                 rc.counters_applied,
                 rc.applied_block_count,
