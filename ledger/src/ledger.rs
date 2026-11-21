@@ -1064,15 +1064,21 @@ impl Ledger {
             sorted_blocks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
             #[cfg(not(test))]
-            for (_, (first_old_info, final_new_info)) in deferred_accounts.entries_mut() {
-                if !first_old_info.head.is_zero()
-                    && first_old_info.block_count > final_new_info.block_count
+            for (account, (first_old_info, final_new_info)) in deferred_accounts.entries_mut() {
+                let disk_info = self.store.account.get(account);
+                let best_old = match disk_info.as_ref() {
+                    Some(d) if d.block_count > first_old_info.block_count => d.clone(),
+                    _ => first_old_info.clone(),
+                };
+                if !best_old.head.is_zero()
+                    && best_old.block_count > final_new_info.block_count
                     && (sorted_blocks
-                        .binary_search_by(|e| e.0.cmp(&first_old_info.head))
+                        .binary_search_by(|e| e.0.cmp(&best_old.head))
                         .is_ok()
-                        || self.store.block.exists(&first_old_info.head))
+                        || self.store.block.exists(&best_old.head))
                 {
-                    *final_new_info = first_old_info.clone();
+                    *first_old_info = best_old.clone();
+                    *final_new_info = best_old;
                 }
             }
 
@@ -1201,8 +1207,7 @@ impl Ledger {
         BatchProcessResult { processed }
     }
 
-    #[cfg(not(test))]
-    fn heal_account_from_block(
+    pub fn heal_account_from_block(
         &self,
         account: &Account,
         start_hash: BlockHash,
@@ -1387,13 +1392,7 @@ impl Ledger {
                             .filter(|s| !s.is_zero() && *s != healed.head)
                             .map(|s| !self.store.block.exists(&s))
                             .unwrap_or(true);
-                        if (conf_missing && (chain_ended || healed.block_count >= old_conf_height))
-                            || (chain_ended
-                                && conf_info
-                                    .as_ref()
-                                    .map(|c| c.height > healed.block_count)
-                                    .unwrap_or(false))
-                        {
+                        if conf_missing && (chain_ended || healed.block_count >= old_conf_height) {
                             self.store.confirmation_height.put(
                                 account,
                                 &rsnano_core::ConfirmationHeightInfo::new(
@@ -1561,15 +1560,16 @@ impl Ledger {
             // Blocks / confirmations inserted while the scan ran are added back as drift
             // (bounded by the few blocks inserted during the pass).
             let blocks = clamp(
-                (rc.sum_block_count + rc.repaired_blocks) as i128 + drift(now_b, rc.start_block_count),
+                (rc.sum_block_count + rc.repaired_blocks) as i128
+                    + drift(now_b, rc.start_block_count).max(0),
             );
             let confirmed = clamp(
                 (rc.sum_conf_height + rc.repaired_missing_conf_blocks) as i128
                     - rc.removed_orphan_conf_height as i128
-                    + drift(now_c, rc.start_confirmed_count),
+                    + drift(now_c, rc.start_confirmed_count).max(0),
             );
             // `heal_account_inner` already incremented `account_count` for repaired accounts.
-            let accounts = clamp(rc.accounts as i128 + drift(now_a, rc.start_account_count));
+            let accounts = clamp(rc.accounts as i128 + drift(now_a, rc.start_account_count).max(0));
             cache.block_count.store(blocks, Ordering::SeqCst);
             cache.confirmed_count.store(confirmed, Ordering::SeqCst);
             cache.account_count.store(accounts, Ordering::SeqCst);

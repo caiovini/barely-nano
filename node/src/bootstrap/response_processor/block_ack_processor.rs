@@ -294,6 +294,16 @@ impl BlockAckProcessor {
                     }
                 }
             }
+            if !account.is_zero() && !prev_existing_hash.is_zero() {
+                if self.ledger.store.account.get(&account).is_none() {
+                    let _ = self.ledger.heal_account_from_block(
+                        &account,
+                        prev_existing_hash,
+                        None,
+                        rsnano_core::utils::UnixMillisTimestamp::now(),
+                    );
+                }
+            }
             forward_cursor = last_missing_hash;
             blocks = filtered;
             if blocks.is_empty() {
