@@ -5,9 +5,197 @@ use rsnano_core::{
 
 use kernel_common::storage::{SHARDS, get_shard_index, SHARD_COUNT};
 use kernel_common::storage::btree::KEY_SIZE;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::LedgerCache;
+
+/// Maximum unconfirmed accounts tracked per shard in RAM (`16 * 4,096 = 65,536` accounts max, `< 2.5 MB`).
+const MAX_UNCONFIRMED_PER_SHARD: usize = 4096;
+/// Maximum recently confirmed accounts buffered for `on_up_to_date` observers (`BoundedBacklog`).
+const MAX_RECENTLY_CONFIRMED: usize = 4096;
+
+/// Sharded in-RAM index of accounts with `block_count > confirmation_height` (`Account -> block_count`).
+/// Eliminates full-table `BacklogScan` sweeps across 35M cold accounts on NVMe.
+static UNCONFIRMED_ACCOUNTS: [spin::Mutex<BTreeMap<Account, u64>>; SHARD_COUNT] =
+    [const { spin::Mutex::new(BTreeMap::new()) }; SHARD_COUNT];
+static UNCONFIRMED_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+static RECENTLY_CONFIRMED: spin::Mutex<Vec<Account>> = spin::Mutex::new(Vec::new());
+static RECENTLY_CONFIRMED_LEN: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+fn account_shard(account: &Account) -> usize {
+    (account.as_bytes()[0] >> 4) as usize
+}
+
+#[inline]
+fn push_recently_confirmed(account: Account) {
+    let mut guard = RECENTLY_CONFIRMED.lock();
+    if guard.len() < MAX_RECENTLY_CONFIRMED {
+        guard.push(account);
+        RECENTLY_CONFIRMED_LEN.store(guard.len(), Ordering::Relaxed);
+    }
+}
+
+/// Records that `account` was written with `block_count` in `TABLE_ACCOUNTS`.
+#[inline]
+pub fn unconfirmed_account_on_account_put(account: &Account, block_count: u64) {
+    if block_count == 0 {
+        return;
+    }
+    if !cfg!(test) {
+        if let Some(conf) = crate::confirmation_height_store::hot_conf_height_get(account) {
+            if conf.height >= block_count {
+                let shard = account_shard(account);
+                let mut map = UNCONFIRMED_ACCOUNTS[shard].lock();
+                if map.remove(account).is_some() {
+                    UNCONFIRMED_COUNT.fetch_sub(1, Ordering::Relaxed);
+                }
+                return;
+            }
+        }
+    }
+    let shard = account_shard(account);
+    let mut map = UNCONFIRMED_ACCOUNTS[shard].lock();
+    if let Some(existing) = map.get_mut(account) {
+        *existing = block_count;
+    } else if map.len() < MAX_UNCONFIRMED_PER_SHARD {
+        map.insert(*account, block_count);
+        UNCONFIRMED_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Records that `account` was deleted from `TABLE_ACCOUNTS`.
+#[inline]
+pub fn unconfirmed_account_on_account_del(account: &Account) {
+    let shard = account_shard(account);
+    let mut map = UNCONFIRMED_ACCOUNTS[shard].lock();
+    if map.remove(account).is_some() {
+        UNCONFIRMED_COUNT.fetch_sub(1, Ordering::Relaxed);
+        drop(map);
+        push_recently_confirmed(*account);
+    }
+}
+
+/// Records that `account`'s confirmation height advanced to `conf_height`.
+/// If `conf_height >= tracked_block_count`, removes `account` in $O(\log U)$ from the shard map.
+#[inline]
+pub fn unconfirmed_account_on_conf_put(account: &Account, conf_height: u64) {
+    let shard = account_shard(account);
+    let mut map = UNCONFIRMED_ACCOUNTS[shard].lock();
+    if let Some(&block_count) = map.get(account) {
+        if conf_height >= block_count {
+            map.remove(account);
+            UNCONFIRMED_COUNT.fetch_sub(1, Ordering::Relaxed);
+            drop(map);
+            push_recently_confirmed(*account);
+        }
+    }
+}
+
+/// Records that `account`'s confirmation height entry was deleted.
+#[inline]
+pub fn unconfirmed_account_on_conf_del(account: &Account) {
+    if let Some(info) = hot_account_get(account) {
+        if info.block_count > 0 {
+            unconfirmed_account_on_account_put(account, info.block_count);
+        }
+    }
+}
+
+/// Seeds an unconfirmed account discovered during the boot-time `LedgerRecount` merge-join.
+#[inline]
+pub fn unconfirmed_account_seed(account: &Account, block_count: u64) {
+    unconfirmed_account_on_account_put(account, block_count);
+}
+
+/// Removes `account` from `UNCONFIRMED_ACCOUNTS` if `BacklogScan` verified on disk that
+/// `current_conf_height >= current_block_count` (or the account no longer exists).
+#[inline]
+pub fn unconfirmed_account_resolve_clean(account: &Account, current_conf_height: u64) {
+    let shard = account_shard(account);
+    let mut map = UNCONFIRMED_ACCOUNTS[shard].lock();
+    if let Some(&tracked_bc) = map.get(account) {
+        if current_conf_height == u64::MAX || current_conf_height >= tracked_bc {
+            map.remove(account);
+            UNCONFIRMED_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Clears all tracked unconfirmed and recently confirmed accounts (used on DB wipe / test reset).
+pub fn unconfirmed_accounts_clear() {
+    for s in 0..SHARD_COUNT {
+        UNCONFIRMED_ACCOUNTS[s].lock().clear();
+    }
+    UNCONFIRMED_COUNT.store(0, Ordering::Relaxed);
+    RECENTLY_CONFIRMED.lock().clear();
+    RECENTLY_CONFIRMED_LEN.store(0, Ordering::Relaxed);
+}
+
+/// Lock-free $O(1)$ count of tracked unconfirmed accounts.
+#[inline(always)]
+pub fn unconfirmed_accounts_count() -> usize {
+    UNCONFIRMED_COUNT.load(Ordering::Relaxed)
+}
+
+/// Lock-free $O(1)$ check whether `BacklogScan` has any unconfirmed or newly cemented accounts to process.
+#[inline(always)]
+pub fn unconfirmed_accounts_has_work() -> bool {
+    UNCONFIRMED_COUNT.load(Ordering::Relaxed) > 0
+        || RECENTLY_CONFIRMED_LEN.load(Ordering::Relaxed) > 0
+}
+
+/// Drains up to `max_count` recently cemented accounts for `on_up_to_date` notifications.
+pub fn drain_recently_confirmed(max_count: usize) -> Vec<Account> {
+    if RECENTLY_CONFIRMED_LEN.load(Ordering::Relaxed) == 0 {
+        return Vec::new();
+    }
+    let mut guard = RECENTLY_CONFIRMED.lock();
+    let take = guard.len().min(max_count);
+    let out: Vec<Account> = guard.drain(..take).collect();
+    RECENTLY_CONFIRMED_LEN.store(guard.len(), Ordering::Relaxed);
+    out
+}
+
+/// Fetches up to `max_count` tracked unconfirmed accounts starting at `>= start` across the 16 in-RAM shard maps.
+/// Returns `(accounts, last_account, reached_end)`.
+pub fn unconfirmed_accounts_next_batch(
+    start: Account,
+    max_count: usize,
+) -> (Vec<Account>, Option<Account>, bool) {
+    let mut out = Vec::new();
+    if UNCONFIRMED_COUNT.load(Ordering::Relaxed) == 0 || max_count == 0 {
+        return (out, None, true);
+    }
+    let start_shard = account_shard(&start);
+    let mut reached_end = true;
+    for s in start_shard..SHARD_COUNT {
+        let map = UNCONFIRMED_ACCOUNTS[s].lock();
+        if map.is_empty() {
+            continue;
+        }
+        let iter = if s == start_shard {
+            map.range(start..)
+        } else {
+            map.range(Account::zero()..)
+        };
+        for (&acc, _) in iter {
+            out.push(acc);
+            if out.len() >= max_count {
+                reached_end = false;
+                break;
+            }
+        }
+        if !reached_end {
+            break;
+        }
+    }
+    let last = out.last().copied();
+    (out, last, reached_end)
+}
 
 const ACCOUNT_BLOOM_BUCKETS: usize = 1 << 13; // 8,192 4-word buckets = 32,768 u64s = 256 KB
 const ACCOUNT_BLOOM_WORDS: usize = ACCOUNT_BLOOM_BUCKETS * 4;
@@ -137,6 +325,7 @@ impl BtreeAccountStore {
             if !cfg!(test) {
                 hot_account_put(account, info);
             }
+            unconfirmed_account_on_account_put(account, info.block_count);
         }
     }
 
@@ -174,6 +363,7 @@ impl BtreeAccountStore {
 
     pub fn clear_bloom(&self) {
         kernel_common::storage::STORAGE_GEN.fetch_add(1, Ordering::Release);
+        unconfirmed_accounts_clear();
         ACCOUNT_BLOOM_READY.store(false, Ordering::Release);
         for w in ACCOUNT_BLOOM.iter() {
             w.store(0, Ordering::Relaxed);
@@ -227,6 +417,8 @@ impl BtreeAccountStore {
         let mut lock = SHARDS[shard_idx].lock();
         if let Some(db) = lock.as_mut() {
             db.delete(key);
+            drop(lock);
+            unconfirmed_account_on_account_del(account);
         }
     }
 

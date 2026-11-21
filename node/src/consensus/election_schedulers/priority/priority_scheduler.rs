@@ -132,6 +132,12 @@ impl PriorityScheduler {
 
         let next_unconfirmed_hash = match conf_info.height {
             0 => account_info.open_block,
+            h if !cfg!(test)
+                && account_info.block_count == h + 1
+                && !account_info.head.is_zero() =>
+            {
+                account_info.head
+            }
             _ => {
                 match any.block_successor(&conf_info.frontier) {
                     Some(h) => h,

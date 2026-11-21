@@ -393,6 +393,7 @@ impl LedgerRecount {
         if gap == 0 {
             return;
         }
+        rsnano_ledger_store::unconfirmed_account_seed(&account, block_count);
         self.unconfirmed_accounts += 1;
         self.unconfirmed_blocks += gap;
         self.insert_top(RecountGap {

@@ -180,77 +180,54 @@ struct BacklogScanLoop {
 
 impl BacklogScanLoop {
     fn scan_batch(ledger: &Ledger, next: Account, batch_size: usize) -> BacklogScanResult {
-        let mut accounts = Vec::with_capacity(batch_size.min(2048));
-        let mut done = true;
-        ledger.store.account.for_each_while(next, |account, account_info| {
-            accounts.push((account, account_info));
-            if accounts.len() >= batch_size {
-                done = false;
-                return false;
-            }
-            true
-        });
+        let mut fully_confirmed = ledger.drain_recently_confirmed(batch_size);
+        let (candidates, last_acc, done) =
+            ledger.unconfirmed_accounts_next_batch(next, batch_size);
 
-        if accounts.is_empty() {
+        if candidates.is_empty() {
             return BacklogScanResult {
+                fully_confirmed,
+                unconfirmed: Vec::new(),
                 next,
                 done: true,
-                ..Default::default()
             };
         }
 
-        let first_acc = accounts[0].0;
-        let last_acc = accounts.last().unwrap().0;
-        let mut result = BacklogScanResult {
-            next: last_acc.inc_or_max(),
-            done,
-            ..Default::default()
-        };
-
-        let mut idx = 0usize;
-        ledger
-            .store
-            .confirmation_height
-            .for_each_while(first_acc, |cacc, conf_info| {
-                if cacc > last_acc {
-                    return false;
-                }
-                while idx < accounts.len() && accounts[idx].0 < cacc {
-                    let (account, account_info) = accounts[idx].clone();
-                    result.unconfirmed.push(UnconfirmedInfo {
-                        account,
-                        account_info,
-                        conf_info: ConfirmationHeightInfo::default(),
-                    });
-                    idx += 1;
-                }
-                if idx < accounts.len() && accounts[idx].0 == cacc {
-                    let (account, account_info) = accounts[idx].clone();
-                    if conf_info.height >= account_info.block_count {
-                        result.fully_confirmed.push(account);
-                    } else {
-                        result.unconfirmed.push(UnconfirmedInfo {
-                            account,
-                            account_info,
-                            conf_info,
-                        });
-                    }
-                    idx += 1;
-                }
-                idx < accounts.len()
-            });
-
-        while idx < accounts.len() {
-            let (account, account_info) = accounts[idx].clone();
-            result.unconfirmed.push(UnconfirmedInfo {
-                account,
-                account_info,
-                conf_info: ConfirmationHeightInfo::default(),
-            });
-            idx += 1;
+        let mut unconfirmed = Vec::with_capacity(candidates.len());
+        for account in candidates {
+            let Some(account_info) = ledger.store.account.get(&account) else {
+                ledger.unconfirmed_account_resolve_clean(&account, u64::MAX);
+                fully_confirmed.push(account);
+                continue;
+            };
+            let conf_info = ledger
+                .store
+                .confirmation_height
+                .get(&account)
+                .unwrap_or_default();
+            if conf_info.height >= account_info.block_count {
+                ledger.unconfirmed_account_resolve_clean(&account, conf_info.height);
+                fully_confirmed.push(account);
+            } else {
+                unconfirmed.push(UnconfirmedInfo {
+                    account,
+                    account_info,
+                    conf_info,
+                });
+            }
         }
 
-        result
+        let next_cursor = match last_acc {
+            Some(last) => last.inc_or_max(),
+            None => next,
+        };
+
+        BacklogScanResult {
+            fully_confirmed,
+            unconfirmed,
+            next: next_cursor,
+            done,
+        }
     }
 
     fn notify_observers(&self, result: BacklogScanResult) {

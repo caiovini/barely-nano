@@ -60,10 +60,16 @@ impl TcpStream {
                     if let Some(ref mut ctx) = *lock_net_worker() {
                         let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                         if socket.can_recv() {
-                            match socket.recv_slice(buf) {
-                                Ok(n) => Poll::Ready(Ok(n)),
-                                Err(_) => Poll::Ready(Err(anyhow::anyhow!("Read error"))),
+                            let mut total = 0;
+                            while total < buf.len() && socket.can_recv() {
+                                match socket.recv_slice(&mut buf[total..]) {
+                                    Ok(0) => break,
+                                    Ok(n) => total += n,
+                                    Err(_) if total > 0 => break,
+                                    Err(_) => return Poll::Ready(Err(anyhow::anyhow!("Read error"))),
+                                }
                             }
+                            Poll::Ready(Ok(total))
                         } else {
                             let state = socket.state();
                             if state == smoltcp::socket::tcp::State::Closed || 
@@ -125,7 +131,16 @@ impl TcpStream {
                 if let Some(ref mut ctx) = *lock_net_worker() {
                     let socket = ctx.sockets.get_mut::<SmolTcpSocket>(stream.handle());
                     if socket.can_recv() {
-                        socket.recv_slice(buf).map_err(|_| anyhow::anyhow!("Read error"))
+                        let mut total = 0;
+                        while total < buf.len() && socket.can_recv() {
+                            match socket.recv_slice(&mut buf[total..]) {
+                                Ok(0) => break,
+                                Ok(n) => total += n,
+                                Err(_) if total > 0 => break,
+                                Err(_) => return Err(anyhow::anyhow!("Read error")),
+                            }
+                        }
+                        Ok(total)
                     } else {
                         Err(anyhow::anyhow!("Would block"))
                     }

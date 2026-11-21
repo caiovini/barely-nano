@@ -689,6 +689,35 @@ impl Ledger {
         self.block_count().saturating_sub(self.confirmed_count())
     }
 
+    #[inline(always)]
+    pub fn has_unconfirmed_backlog_work(&self) -> bool {
+        rsnano_ledger_store::unconfirmed_accounts_has_work()
+    }
+
+    #[inline(always)]
+    pub fn tracked_unconfirmed_accounts(&self) -> usize {
+        rsnano_ledger_store::unconfirmed_accounts_count()
+    }
+
+    #[inline(always)]
+    pub fn drain_recently_confirmed(&self, max_count: usize) -> Vec<Account> {
+        rsnano_ledger_store::drain_recently_confirmed(max_count)
+    }
+
+    #[inline(always)]
+    pub fn unconfirmed_accounts_next_batch(
+        &self,
+        start: Account,
+        max_count: usize,
+    ) -> (Vec<Account>, Option<Account>, bool) {
+        rsnano_ledger_store::unconfirmed_accounts_next_batch(start, max_count)
+    }
+
+    #[inline(always)]
+    pub fn unconfirmed_account_resolve_clean(&self, account: &Account, current_conf_height: u64) {
+        rsnano_ledger_store::unconfirmed_account_resolve_clean(account, current_conf_height);
+    }
+
     pub fn account_count(&self) -> usize {
         self.store.cache.account_count.load(Ordering::Relaxed) as usize
     }
@@ -2132,5 +2161,81 @@ mod slotted_btree_tests {
             assert!(!tree.contains_key(k));
         }
         assert_eq!(tree.iter([0u8; KEY_SIZE]).next_key(), None);
+    }
+
+    #[test]
+    fn exact_unconfirmed_accounts_index_lifecycle() {
+        let _guard = SHARD_TEST_LOCK.lock();
+        let storage = Arc::new(Mutex::new(StorageContext::new_ramdisk(16)));
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            let bpm = BufferPool::new(storage.clone(), 64, 1 + i * 128);
+            *kernel_common::storage::SHARDS[i].lock() = Some(BTree::new(bpm));
+        }
+        let store = rsnano_ledger_store::BtreeStore::new();
+        rsnano_ledger_store::unconfirmed_accounts_clear();
+
+        let mut expected_unconfirmed = alloc::collections::BTreeSet::new();
+        for i in 0..200u64 {
+            let mut b = [0u8; 32];
+            b[0] = ((i % 16) as u8) << 4;
+            b[24..32].copy_from_slice(&i.to_be_bytes());
+            let acc = rsnano_core::Account::from_bytes(b);
+            let mut info = rsnano_core::AccountInfo::default();
+            info.block_count = 10;
+            info.head = BlockHash::from(i + 1);
+            store.account.put(&acc, &info);
+
+            if i % 50 == 7 {
+                // Unconfirmed gap (conf_height = 6 < block_count = 10)
+                store.confirmation_height.put(
+                    &acc,
+                    &rsnano_core::ConfirmationHeightInfo::new(6, BlockHash::from(i + 1)),
+                );
+                expected_unconfirmed.insert(acc);
+            } else {
+                // Fully confirmed (conf_height == block_count == 10)
+                store.confirmation_height.put(
+                    &acc,
+                    &rsnano_core::ConfirmationHeightInfo::new(10, info.head),
+                );
+            }
+        }
+
+        assert_eq!(expected_unconfirmed.len(), 4);
+        assert_eq!(
+            rsnano_ledger_store::unconfirmed_accounts_count(),
+            expected_unconfirmed.len()
+        );
+
+        let _ = rsnano_ledger_store::drain_recently_confirmed(1024);
+        let (batch, _last, done) =
+            rsnano_ledger_store::unconfirmed_accounts_next_batch(rsnano_core::Account::zero(), 64);
+        assert!(done);
+        let batch_set: alloc::collections::BTreeSet<_> = batch.into_iter().collect();
+        assert_eq!(batch_set, expected_unconfirmed);
+
+        // Cement 3 of the 4 unconfirmed accounts and delete the 4th
+        let mut iter = expected_unconfirmed.iter().copied();
+        for _ in 0..3 {
+            let acc = iter.next().unwrap();
+            store.confirmation_height.put(
+                &acc,
+                &rsnano_core::ConfirmationHeightInfo::new(10, BlockHash::from(999)),
+            );
+        }
+        let last_acc = iter.next().unwrap();
+        store.account.del(&last_acc);
+
+        assert_eq!(rsnano_ledger_store::unconfirmed_accounts_count(), 0);
+        let recently_confirmed: alloc::collections::BTreeSet<_> =
+            rsnano_ledger_store::drain_recently_confirmed(64)
+                .into_iter()
+                .collect();
+        assert_eq!(recently_confirmed, expected_unconfirmed);
+        assert!(!rsnano_ledger_store::unconfirmed_accounts_has_work());
+
+        for i in 0..kernel_common::storage::SHARD_COUNT {
+            *kernel_common::storage::SHARDS[i].lock() = None;
+        }
     }
 }

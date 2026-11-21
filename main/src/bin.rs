@@ -1083,9 +1083,10 @@ fn run_consensus_and_elections_loop(
             last_watchdog = mtime;
         }
 
-        // 0. Read-only diagnostic ledger recount (starts 60s after boot, 1024 accounts / 5ms).
+        // 0. Read-only diagnostic ledger recount & initial unconfirmed index seeding
+        //    (starts 10s after boot, 1024 accounts / 5ms).
         //    Never writes to the store or the cached counters unless triggered via /api/recount_repair.
-        if mtime - last_recount_step > millis(5) && mtime - loop_start > seconds(60) {
+        if mtime - last_recount_step > millis(5) && mtime - loop_start > seconds(10) {
             let mut to_bootstrap = alloc::vec::Vec::new();
             if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
                 if !rc.started {
@@ -1149,7 +1150,7 @@ fn run_consensus_and_elections_loop(
         if mtime - last_scheduler_tick > millis(100) {
             if node_arc.active.read().len() < 4096
                 && node_arc.election_schedulers.priority.len() < 512
-                && node_arc.ledger.backlog_count() > 0
+                && node_arc.ledger.has_unconfirmed_backlog_work()
             {
                 if let Some(mut guard) = node_arc.backlog_scan.try_lock() {
                     guard.run_once();
