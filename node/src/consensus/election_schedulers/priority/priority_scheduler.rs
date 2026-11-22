@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 use tracing::debug;
 
@@ -39,6 +39,7 @@ pub struct PriorityScheduler {
     activations_per_bucket: Vec<AtomicU64>,
     is_bootstrap_active: Box<dyn Fn() -> bool + Send + Sync>,
     queued_count: AtomicUsize,
+    notified: AtomicBool,
 }
 
 impl PriorityScheduler {
@@ -68,11 +69,13 @@ impl PriorityScheduler {
             activations_per_bucket,
             is_bootstrap_active,
             queued_count: AtomicUsize::new(0),
+            notified: AtomicBool::new(false),
         }
     }
 
     pub fn stop(&self) {
         *self.stopped.lock() = true;
+        self.notified.store(false, Ordering::Release);
         self.condition.notify_all();
         let _handle = self.thread.lock().take();
         // if let Some(handle) = handle {
@@ -81,6 +84,7 @@ impl PriorityScheduler {
     }
 
     pub fn notify(&self) {
+        self.notified.store(true, Ordering::Release);
         self.condition.notify_all();
     }
 
@@ -128,6 +132,12 @@ impl PriorityScheduler {
 
         let next_unconfirmed_hash = match conf_info.height {
             0 => account_info.open_block,
+            h if !cfg!(test)
+                && account_info.block_count == h + 1
+                && !account_info.head.is_zero() =>
+            {
+                account_info.head
+            }
             _ => {
                 match any.block_successor(&conf_info.frontier) {
                     Some(h) => h,
@@ -201,6 +211,7 @@ impl PriorityScheduler {
         if insert_result.is_ok() {
             self.stats
                 .inc(StatType::ElectionScheduler, DetailType::Activated);
+            self.notified.store(true, Ordering::Release);
             self.condition.notify_all();
         }
     }
@@ -222,8 +233,34 @@ impl PriorityScheduler {
         self.len() == 0
     }
 
-    pub fn run_one(&self) {
+    fn predicate(&self) -> bool {
+        let aec = self.aec.read();
+        let buckets = self.buckets.lock();
+        let any_available = buckets.iter().any(|b| b.available(&aec));
+        if !any_available {
+            let remaining: usize = buckets.iter().map(|b| b.len()).sum();
+            self.queued_count.store(remaining, Ordering::Relaxed);
+        }
+        any_available
+    }
+
+    pub fn run_if_notified(&self) -> bool {
         if self.queued_count.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        if !self.notified.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        self.run_one();
+        true
+    }
+
+    pub fn run_one(&self) {
+        self.notified.store(false, Ordering::Relaxed);
+        if self.queued_count.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if !self.predicate() {
             return;
         }
 
@@ -231,8 +268,10 @@ impl PriorityScheduler {
             .inc(StatType::ElectionScheduler, DetailType::Loop);
 
         let now = self.clock.now();
-        let mut buckets = self.buckets.lock();
+        // Always acquire `self.aec` before `self.buckets` so `self.buckets` is never held
+        // while waiting for `self.aec.write()`.
         let mut aec = self.aec.write();
+        let mut buckets = self.buckets.lock();
         let mut inserted = true;
 
         while inserted && self.queued_count.load(Ordering::Relaxed) > 0 {
@@ -263,7 +302,14 @@ impl PriorityScheduler {
     pub fn container_info(&self) -> ContainerInfo {
         let mut bucket_infos = ContainerInfo::builder();
 
-        for (id, bucket) in self.buckets.lock().iter().enumerate() {
+        #[cfg(not(test))]
+        let Some(guard) = self.buckets.try_lock() else {
+            return ContainerInfo::new();
+        };
+        #[cfg(test)]
+        let guard = self.buckets.lock();
+
+        for (id, bucket) in guard.iter().enumerate() {
             bucket_infos = bucket_infos.leaf(id.to_string(), bucket.len(), 0);
         }
 

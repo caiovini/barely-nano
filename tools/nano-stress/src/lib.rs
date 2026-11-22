@@ -120,43 +120,134 @@ fn key_from_u64(val: u64) -> [u8; 32] {
     k
 }
 
+/// Specialized 4-way lock-step Blake2b-64 compression for 40-byte Nano PoW inputs
+/// (`nonce_le[8] || root[32]`).
+///
+/// Since `m[1..5]` are the constant 32-byte root words and `m[5..16]` are all zero,
+/// this avoids 128-byte buffer zeroing, slice copying, and `from_le_bytes` parsing in
+/// the inner PoW loop, and auto-vectorizes across the 4 lanes (`[u64; 4]`) with WebAssembly
+/// `simd128` (`i64x2`).
+#[inline(always)]
+fn pow_hash8_40_batch4(n0: u64, r0: u64, r1: u64, r2: u64, r3: u64) -> [u64; 4] {
+    const SIGMA: [[usize; 16]; 12] = [
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+        [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4],
+        [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
+        [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13],
+        [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
+        [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11],
+        [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
+        [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5],
+        [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+    ];
+    const H0_INIT: u64 = 0x6a09e667f3bcc908 ^ 0x01010008;
+
+    let mut m = [[0u64; 4]; 16];
+    m[0] = [
+        n0,
+        n0.wrapping_add(1),
+        n0.wrapping_add(2),
+        n0.wrapping_add(3),
+    ];
+    m[1] = [r0; 4];
+    m[2] = [r1; 4];
+    m[3] = [r2; 4];
+    m[4] = [r3; 4];
+
+    let mut v: [[u64; 4]; 16] = [
+        [H0_INIT; 4],
+        [0xbb67ae8584caa73b; 4],
+        [0x3c6ef372fe94f82b; 4],
+        [0xa54ff53a5f1d36f1; 4],
+        [0x510e527fade682d1; 4],
+        [0x9b05688c2b3e6c1f; 4],
+        [0x1f83d9abfb41bd6b; 4],
+        [0x5be0cd19137e2179; 4],
+        [0x6a09e667f3bcc908; 4],
+        [0xbb67ae8584caa73b; 4],
+        [0x3c6ef372fe94f82b; 4],
+        [0xa54ff53a5f1d36f1; 4],
+        [0x510e527fade682d1 ^ 40; 4],
+        [0x9b05688c2b3e6c1f; 4],
+        [!0x1f83d9abfb41bd6b; 4],
+        [0x5be0cd19137e2179; 4],
+    ];
+
+    #[inline(always)]
+    fn g4(
+        v: &mut [[u64; 4]; 16],
+        a: usize,
+        b: usize,
+        c: usize,
+        d: usize,
+        x: [u64; 4],
+        y: [u64; 4],
+    ) {
+        for l in 0..4 {
+            v[a][l] = v[a][l].wrapping_add(v[b][l]).wrapping_add(x[l]);
+            v[d][l] = (v[d][l] ^ v[a][l]).rotate_right(32);
+            v[c][l] = v[c][l].wrapping_add(v[d][l]);
+            v[b][l] = (v[b][l] ^ v[c][l]).rotate_right(24);
+            v[a][l] = v[a][l].wrapping_add(v[b][l]).wrapping_add(y[l]);
+            v[d][l] = (v[d][l] ^ v[a][l]).rotate_right(16);
+            v[c][l] = v[c][l].wrapping_add(v[d][l]);
+            v[b][l] = (v[b][l] ^ v[c][l]).rotate_right(63);
+        }
+    }
+
+    for s in &SIGMA {
+        g4(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
+        g4(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
+        g4(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
+        g4(&mut v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
+        g4(&mut v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
+        g4(&mut v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
+        g4(&mut v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
+        g4(&mut v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+    }
+
+    [
+        H0_INIT ^ v[0][0] ^ v[8][0],
+        H0_INIT ^ v[0][1] ^ v[8][1],
+        H0_INIT ^ v[0][2] ^ v[8][2],
+        H0_INIT ^ v[0][3] ^ v[8][3],
+    ]
+}
+
 #[inline]
 fn compute_work_batch4(rng_state: &mut u64, threshold: u64, root: &[u8; 32]) -> u64 {
     if threshold == 0 {
         return 0;
     }
     let mut nonce = next_u64(rng_state);
-    let mut inputs = [[0u8; 40]; 4];
-    for item in &mut inputs {
-        item[8..40].copy_from_slice(root);
-    }
+    let r0 = u64::from_le_bytes([
+        root[0], root[1], root[2], root[3], root[4], root[5], root[6], root[7],
+    ]);
+    let r1 = u64::from_le_bytes([
+        root[8], root[9], root[10], root[11], root[12], root[13], root[14], root[15],
+    ]);
+    let r2 = u64::from_le_bytes([
+        root[16], root[17], root[18], root[19], root[20], root[21], root[22], root[23],
+    ]);
+    let r3 = u64::from_le_bytes([
+        root[24], root[25], root[26], root[27], root[28], root[29], root[30], root[31],
+    ]);
     loop {
-        let n0 = nonce;
-        let n1 = nonce.wrapping_add(1);
-        let n2 = nonce.wrapping_add(2);
-        let n3 = nonce.wrapping_add(3);
-        inputs[0][0..8].copy_from_slice(&n0.to_le_bytes());
-        inputs[1][0..8].copy_from_slice(&n1.to_le_bytes());
-        inputs[2][0..8].copy_from_slice(&n2.to_le_bytes());
-        inputs[3][0..8].copy_from_slice(&n3.to_le_bytes());
-
-        let diffs = blake2b::hash8_batch_4([
-            &inputs[0][..],
-            &inputs[1][..],
-            &inputs[2][..],
-            &inputs[3][..],
-        ]);
+        let diffs = pow_hash8_40_batch4(nonce, r0, r1, r2, r3);
         if diffs[0] >= threshold {
-            return n0;
+            return nonce;
         }
         if diffs[1] >= threshold {
-            return n1;
+            return nonce.wrapping_add(1);
         }
         if diffs[2] >= threshold {
-            return n2;
+            return nonce.wrapping_add(2);
         }
         if diffs[3] >= threshold {
-            return n3;
+            return nonce.wrapping_add(3);
         }
         nonce = nonce.wrapping_add(4);
     }
@@ -497,6 +588,16 @@ pub extern "C" fn wasm_get_pow_out_ptr() -> *const u8 {
     unsafe { state().pow_out_be.as_ptr() }
 }
 
+/// Seeds the WebAssembly PoW nonce generator so parallel Web Workers explore disjoint nonce spaces.
+#[no_mangle]
+pub extern "C" fn wasm_seed_pow_rng(seed_hi: u32, seed_lo: u32) {
+    let seed = (((seed_hi as u64) << 32) | (seed_lo as u64)) | 1;
+    // SAFETY: Single-threaded WebAssembly PoW helper.
+    let st = unsafe { state() };
+    st.rng_state = seed;
+    st.pow_nonce_cursor = next_u64(&mut st.rng_state);
+}
+
 /// Chunked PoW solver for Browser Wallet / UI so the main thread or worker can yield.
 /// Returns 1 if a valid nonce was found and written to `pow_out_be`, or 0 if `max_iters`
 /// elapsed without hitting the threshold.
@@ -509,28 +610,53 @@ pub extern "C" fn wasm_compute_pow_step(
     let threshold = ((threshold_hi as u64) << 32) | (threshold_lo as u64);
     // SAFETY: Single-threaded WebAssembly PoW helper.
     let st = unsafe { state() };
-    let mut nonce = st.pow_nonce_cursor.wrapping_add(next_u64(&mut st.rng_state));
-    let mut inputs = [[0u8; 40]; 4];
-    for item in &mut inputs {
-        item[8..40].copy_from_slice(&st.pow_root);
+    if st.pow_nonce_cursor <= 1 {
+        st.pow_nonce_cursor = next_u64(&mut st.rng_state);
     }
+    let mut nonce = st.pow_nonce_cursor;
+    let r0 = u64::from_le_bytes([
+        st.pow_root[0],
+        st.pow_root[1],
+        st.pow_root[2],
+        st.pow_root[3],
+        st.pow_root[4],
+        st.pow_root[5],
+        st.pow_root[6],
+        st.pow_root[7],
+    ]);
+    let r1 = u64::from_le_bytes([
+        st.pow_root[8],
+        st.pow_root[9],
+        st.pow_root[10],
+        st.pow_root[11],
+        st.pow_root[12],
+        st.pow_root[13],
+        st.pow_root[14],
+        st.pow_root[15],
+    ]);
+    let r2 = u64::from_le_bytes([
+        st.pow_root[16],
+        st.pow_root[17],
+        st.pow_root[18],
+        st.pow_root[19],
+        st.pow_root[20],
+        st.pow_root[21],
+        st.pow_root[22],
+        st.pow_root[23],
+    ]);
+    let r3 = u64::from_le_bytes([
+        st.pow_root[24],
+        st.pow_root[25],
+        st.pow_root[26],
+        st.pow_root[27],
+        st.pow_root[28],
+        st.pow_root[29],
+        st.pow_root[30],
+        st.pow_root[31],
+    ]);
     let batches = (max_iters / 4).max(1);
     for _ in 0..batches {
-        let n0 = nonce;
-        let n1 = nonce.wrapping_add(1);
-        let n2 = nonce.wrapping_add(2);
-        let n3 = nonce.wrapping_add(3);
-        inputs[0][0..8].copy_from_slice(&n0.to_le_bytes());
-        inputs[1][0..8].copy_from_slice(&n1.to_le_bytes());
-        inputs[2][0..8].copy_from_slice(&n2.to_le_bytes());
-        inputs[3][0..8].copy_from_slice(&n3.to_le_bytes());
-
-        let diffs = blake2b::hash8_batch_4([
-            &inputs[0][..],
-            &inputs[1][..],
-            &inputs[2][..],
-            &inputs[3][..],
-        ]);
+        let diffs = pow_hash8_40_batch4(nonce, r0, r1, r2, r3);
         for (k, &d) in diffs.iter().enumerate() {
             if d >= threshold {
                 let winner = nonce.wrapping_add(k as u64);

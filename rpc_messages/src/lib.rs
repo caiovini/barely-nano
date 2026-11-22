@@ -72,6 +72,7 @@ pub enum RpcCommand {
     UncheckedClear,
     Unopened(UnopenedArgs),
     NodeId,
+    #[serde(alias = "search_pending_all")]
     SearchReceivableAll,
     ReceiveMinimum,
     Stats(StatsArgs),
@@ -107,15 +108,20 @@ pub enum RpcCommand {
     WalletInfo(WalletRpcMessage),
     WalletExport(WalletRpcMessage),
     WalletChangeSeed(WalletChangeSeedArgs),
+    #[serde(alias = "wallet_pending")]
     WalletReceivable(WalletReceivableArgs),
     WalletRepresentativeSet(WalletRepresentativeSetArgs),
+    #[serde(alias = "search_pending")]
     SearchReceivable(WalletRpcMessage),
     WalletRepublish(WalletWithCountArgs),
     WalletBalances(WalletBalancesArgs),
     WalletHistory(WalletHistoryArgs),
     WalletLedger(WalletLedgerArgs),
+    #[serde(alias = "accounts_pending")]
     AccountsReceivable(AccountsReceivableArgs),
+    #[serde(alias = "pending")]
     Receivable(ReceivableArgs),
+    #[serde(alias = "pending_exists")]
     ReceivableExists(ReceivableExistsArgs),
     RepresentativesOnline(RepresentativesOnlineArgs),
     Unchecked(CountArgs),

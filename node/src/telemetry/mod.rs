@@ -128,6 +128,7 @@ impl Telemetry {
                 },
                 Self::MAX_SIZE,
             );
+            guard.telemetries.calibrate_wall_clock();
         }
 
         self.stats
@@ -313,6 +314,30 @@ impl OrderedTelemetries {
         if let Some(entry) = self.by_channel_id.remove(&channel_id) {
             self.by_endpoint.remove(&entry.endpoint);
             self.sequenced.retain(|i| *i != channel_id);
+        }
+    }
+
+    /// Calibrates `WALL_CLOCK_OFFSET_MS` using the median `(peer_unix_ms - local_steady_ms)`
+    /// across up to 32 verified peer telemetries so a single misconfigured peer cannot skew the clock.
+    fn calibrate_wall_clock(&self) {
+        const MIN_VALID_UNIX_MS: u64 = 1_700_000_000_000; // 2023-11-14T22:13:20Z
+        let mut offsets = [0u64; 32];
+        let mut n = 0usize;
+        for entry in self.by_channel_id.values() {
+            let peer_ms = entry.data.timestamp.as_u64();
+            let steady_ms = entry.last_updated.millis().max(0) as u64;
+            if peer_ms >= MIN_VALID_UNIX_MS && peer_ms > steady_ms {
+                offsets[n] = peer_ms - steady_ms;
+                n += 1;
+                if n == offsets.len() {
+                    break;
+                }
+            }
+        }
+        if n > 0 {
+            offsets[..n].sort_unstable();
+            let median = offsets[n / 2];
+            rsnano_core::utils::set_wall_clock_offset_ms(median);
         }
     }
 }

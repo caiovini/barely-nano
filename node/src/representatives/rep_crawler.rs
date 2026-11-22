@@ -413,7 +413,14 @@ impl RepCrawler {
 
 impl ContainerInfoProvider for RepCrawler {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.rep_crawler_impl.lock();
+        #[cfg(test)]
+        let Some(guard) = Some(self.rep_crawler_impl.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.rep_crawler_impl.try_lock() else {
+            return ContainerInfo::default();
+        };
         [
             ("queries", guard.queries.len(), OrderedQueries::ELEMENT_SIZE),
             (

@@ -16,7 +16,7 @@ impl BareMetalRpcServer {
     pub fn handle_request(&self, request: &str) -> Option<String> {
         if request.starts_with("OPTIONS ") {
             return Some(String::from(
-                "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Origin, Authorization, X-Requested-With\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n",
             ));
         }
 

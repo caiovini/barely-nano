@@ -608,6 +608,26 @@ fn boot_hart_main(hart_id: usize) {
                 if let Some(dash_port) = bm.dashboard_port {
                     net_cfg.dashboard_port = dash_port;
                 }
+                if let Some(w_en) = bm.dashboard_wallet_enabled {
+                    net_cfg.dashboard_wallet_enabled = w_en;
+                }
+                if let Some(p_en) = bm.dashboard_pos_enable {
+                    net_cfg.dashboard_pos_enable = p_en;
+                }
+            }
+            if let Some(dash) = &daemon_toml.dashboard {
+                if let Some(dash_en) = dash.dashboard_enable {
+                    net_cfg.dashboard_enable = dash_en;
+                }
+                if let Some(dash_port) = dash.dashboard_port {
+                    net_cfg.dashboard_port = dash_port;
+                }
+                if let Some(w_en) = dash.dashboard_wallet_enabled {
+                    net_cfg.dashboard_wallet_enabled = w_en;
+                }
+                if let Some(p_en) = dash.dashboard_pos_enable {
+                    net_cfg.dashboard_pos_enable = p_en;
+                }
             }
             kernel_common::net::set_net_config(net_cfg);
         }
@@ -709,6 +729,12 @@ fn boot_hart_main(hart_id: usize) {
         if let Some(ws) = &websocket_server {
             use rsnano_websocket_server::WebsocketListenerExt;
             ws.start();
+            // Poll the newly spawned `WebsocketListener` task once on the boot hart so
+            // `ctx.tcp_handle` transitions to `State::Listen` before `clean_cache_range`
+            // flushes the heap/executor queues to DRAM for secondary worker harts.
+            let _ = exec.run_once(3);
+            let _ = exec.run_once(4);
+            let _ = exec.run_once(7);
             tracing::info!(
                 "[boot] websocket server started on port {}",
                 ws.listening_port()
@@ -833,6 +859,7 @@ fn boot_hart_main(hart_id: usize) {
                 wake_val
             );
         }
+        kernel_common::watchdog::enable();
     } else {
         // Other harts wait for the leader to finish node setup
         while !NODE_INIT_COMPLETE.load(Ordering::SeqCst) {
@@ -940,6 +967,8 @@ fn run_consensus_and_elections_loop(
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_aec_voter_tick = kernel_common::clint::mtime();
     let mut last_scheduler_tick = kernel_common::clint::mtime();
+    let loop_start = kernel_common::clint::mtime();
+    let mut last_recount_step = kernel_common::clint::mtime();
     let mut iterations = 0;
     let mut idle_spins = 1u32;
     loop {
@@ -947,6 +976,44 @@ fn run_consensus_and_elections_loop(
         if mtime - last_watchdog > seconds(1) {
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
+        }
+
+        // 0. Read-only diagnostic ledger recount & initial unconfirmed index seeding
+        //    (starts 10s after boot, 1024 accounts / 5ms).
+        //    Never writes to the store or the cached counters unless triggered via /api/recount_repair.
+        if mtime - last_recount_step > millis(5) && mtime - loop_start > seconds(10) {
+            let mut to_bootstrap = alloc::vec::Vec::new();
+            if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+                if !rc.started {
+                    if rc.repair_requested {
+                        rc.start_repair(&node_arc.ledger.store, mtime);
+                        tracing::info!("[recount] Ledger recount + orphan/confirmation-height repair started");
+                    } else {
+                        rc.start(&node_arc.ledger.store, mtime);
+                        tracing::info!("[recount] Read-only ledger recount started");
+                    }
+                }
+                if rc.is_running() {
+                    let more = node_arc.ledger.recount_step(&mut rc, 1024, mtime);
+                    if !rc.bootstrap_accounts.is_empty() {
+                        to_bootstrap = core::mem::take(&mut rc.bootstrap_accounts);
+                    }
+                    if !more {
+                        tracing::info!(
+                            "[recount] done: accounts={} sum_block_count={} sum_conf_height={} (cached block_count={} confirmed_count={})",
+                            rc.accounts,
+                            rc.sum_block_count,
+                            rc.sum_conf_height,
+                            rc.end_block_count,
+                            rc.end_confirmed_count
+                        );
+                    }
+                }
+            }
+            for acc in to_bootstrap {
+                node_arc.bootstrapper.prioritize_account(&acc);
+            }
+            last_recount_step = mtime;
         }
 
         // 1. Drive AEC voter and ticker every 300ms (matching RSNano's aec_loop_interval)
@@ -972,9 +1039,14 @@ fn run_consensus_and_elections_loop(
         let mut worked = false;
 
         // 2. Drive priority & periodic election schedulers (co-located in Cluster 1 L2)
-        node_arc.election_schedulers.priority.run_one();
+        if node_arc.election_schedulers.priority.run_if_notified() {
+            worked = true;
+        }
         if mtime - last_scheduler_tick > millis(100) {
-            if node_arc.active.read().len() < 4096 && node_arc.ledger.backlog_count() > 0 {
+            if node_arc.active.read().len() < 4096
+                && node_arc.election_schedulers.priority.len() < 512
+                && node_arc.ledger.has_unconfirmed_backlog_work()
+            {
                 if let Some(mut guard) = node_arc.backlog_scan.try_lock() {
                     guard.run_once();
                 }
@@ -1025,6 +1097,7 @@ fn run_vote_processor_loop(
         let mtime = kernel_common::clint::mtime();
 
         if mtime - last_watchdog > seconds(1) {
+            kernel_common::watchdog::heartbeat_hart0(mtime);
             kernel_common::watchdog::kick();
             last_watchdog = mtime;
         }
@@ -1042,24 +1115,22 @@ fn run_vote_processor_loop(
         if node_arc.vote_cache_processor.run_once() {
             worked = true;
         }
-        if node_arc.vote_processor.run_once() {
-            worked = true;
-        }
-        if node_arc.config.enable_vote_rebroadcast && node_arc.vote_rebroadcaster.run_once() {
-            worked = true;
-        }
-        for _ in 0..8 {
-            if exec.run_once(hart_id) {
+        for _ in 0..4 {
+            if node_arc.vote_processor.run_once() {
                 worked = true;
             } else {
                 break;
             }
         }
-        if !node_arc.signature_checker.is_empty_relaxed() {
+        if node_arc.config.enable_vote_rebroadcast && node_arc.vote_rebroadcaster.run_once() {
+            worked = true;
+        }
+        if !worked && !node_arc.signature_checker.is_empty_relaxed() {
             if node_arc.signature_checker.help_verify() > 0 {
                 worked = true;
             }
         }
+        let _ = (&exec, hart_id);
         adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
@@ -1425,7 +1496,7 @@ fn is_http_request_complete(req: &str) -> bool {
     let Some((headers, body)) = req.split_once("\r\n\r\n").or_else(|| req.split_once("\n\n")) else {
         return false;
     };
-    if headers.starts_with("GET ") {
+    if headers.starts_with("GET ") || headers.starts_with("OPTIONS ") {
         return true;
     }
     for line in headers.lines() {
@@ -1440,79 +1511,112 @@ fn is_http_request_complete(req: &str) -> bool {
     !trimmed.is_empty() && trimmed.ends_with('}')
 }
 
-static RPC_ACTIVE_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RPC_ACTIVE_SINCE: [core::sync::atomic::AtomicU64; kernel_common::net::RPC_SOCKET_COUNT] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; kernel_common::net::RPC_SOCKET_COUNT];
 
-fn handle_rpc_server(ctx: &mut kernel_common::net::NetworkContext, node: Arc<Node>) {
+fn poll_rpc_request(
+    ctx: &mut kernel_common::net::NetworkContext,
+) -> Option<(usize, alloc::string::String, bool)> {
     let net_cfg = kernel_common::net::get_net_config();
     if !net_cfg.rpc_enable {
-        return;
+        return None;
     }
     use smoltcp::socket::tcp::{Socket as SmolTcpSocket, State as SmolTcpState};
-    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handle);
     let now = kernel_common::clint::mtime();
-    match socket.state() {
-        SmolTcpState::Closed => {
-            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-            let _ = socket.listen(net_cfg.rpc_port);
-        }
-        SmolTcpState::Listen => {
-            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-        }
-        SmolTcpState::TimeWait | SmolTcpState::CloseWait | SmolTcpState::LastAck | SmolTcpState::Closing => {
-            RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-            socket.abort();
-            let _ = socket.listen(net_cfg.rpc_port);
-        }
-        SmolTcpState::SynReceived => {
-            let since = RPC_ACTIVE_SINCE.load(Ordering::Relaxed);
-            if since == 0 {
-                RPC_ACTIVE_SINCE.store(now, Ordering::Relaxed);
-            } else if now.wrapping_sub(since) > seconds(5) {
-                RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
+    for sock_idx in 0..kernel_common::net::RPC_SOCKET_COUNT {
+        let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handles[sock_idx]);
+        match socket.state() {
+            SmolTcpState::Closed => {
+                RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                let _ = socket.listen(net_cfg.rpc_port);
+            }
+            SmolTcpState::Listen => {
+                RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+            }
+            SmolTcpState::TimeWait => {
+                RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
                 socket.abort();
                 let _ = socket.listen(net_cfg.rpc_port);
             }
-        }
-        SmolTcpState::Established => {
-            let since = RPC_ACTIVE_SINCE.load(Ordering::Relaxed);
-            if since == 0 {
-                RPC_ACTIVE_SINCE.store(now, Ordering::Relaxed);
-            } else if now.wrapping_sub(since) > seconds(5) {
-                RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                socket.abort();
-                let _ = socket.listen(net_cfg.rpc_port);
-                return;
-            }
-
-            if socket.can_recv() {
-                let mut response: Option<alloc::string::String> = None;
-                let enable_control = net_cfg.rpc_enable_control;
-                let _ = socket.recv(|buffer| {
-                    let request = core::str::from_utf8(buffer).unwrap_or("");
-                    if !is_http_request_complete(request) && buffer.len() < 60_000 {
-                        return (0, ());
+            SmolTcpState::FinWait1
+            | SmolTcpState::FinWait2
+            | SmolTcpState::Closing
+            | SmolTcpState::LastAck
+            | SmolTcpState::CloseWait => {
+                if socket.send_queue() == 0
+                    && matches!(
+                        socket.state(),
+                        SmolTcpState::CloseWait
+                            | SmolTcpState::LastAck
+                            | SmolTcpState::Closing
+                            | SmolTcpState::FinWait2
+                    )
+                {
+                    RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.rpc_port);
+                } else {
+                    let since = RPC_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                    if since > 0 && now.wrapping_sub(since) > seconds(5) {
+                        RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                        socket.abort();
+                        let _ = socket.listen(net_cfg.rpc_port);
                     }
-                    let handler = RpcCommandHandler::new(node.clone(), enable_control);
-                    let server = BareMetalRpcServer::new(handler);
-
-                    if let Some(resp_str) = server.handle_request(request) {
-                        response = Some(resp_str);
-                    } else {
-                        response = Some(alloc::string::String::from(
-                            "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n",
-                        ));
-                    }
-                    (buffer.len(), ())
-                });
-                if let Some(resp_str) = response {
-                    RPC_ACTIVE_SINCE.store(0, Ordering::Relaxed);
-                    let _ = socket.send_slice(resp_str.as_bytes());
-                    socket.close();
                 }
             }
+            SmolTcpState::SynReceived => {
+                let since = RPC_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                if since == 0 {
+                    RPC_ACTIVE_SINCE[sock_idx].store(now, Ordering::Relaxed);
+                } else if now.wrapping_sub(since) > seconds(5) {
+                    RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.rpc_port);
+                }
+            }
+            SmolTcpState::Established => {
+                let since = RPC_ACTIVE_SINCE[sock_idx].load(Ordering::Relaxed);
+                if since == 0 {
+                    RPC_ACTIVE_SINCE[sock_idx].store(now, Ordering::Relaxed);
+                } else if now.wrapping_sub(since) > seconds(5) {
+                    RPC_ACTIVE_SINCE[sock_idx].store(0, Ordering::Relaxed);
+                    socket.abort();
+                    let _ = socket.listen(net_cfg.rpc_port);
+                    continue;
+                }
+
+                if socket.can_recv() {
+                    let mut extracted: Option<alloc::string::String> = None;
+                    let enable_control = net_cfg.rpc_enable_control;
+                    let _ = socket.recv(|buffer| {
+                        let request = core::str::from_utf8(buffer).unwrap_or("");
+                        if !is_http_request_complete(request) && buffer.len() < 60_000 {
+                            return (0, ());
+                        }
+                        extracted = Some(alloc::string::String::from(request));
+                        (buffer.len(), ())
+                    });
+                    if let Some(req_str) = extracted {
+                        return Some((sock_idx, req_str, enable_control));
+                    }
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
+    None
+}
+
+fn send_rpc_response(
+    ctx: &mut kernel_common::net::NetworkContext,
+    sock_idx: usize,
+    resp_str: &str,
+) {
+    use smoltcp::socket::tcp::Socket as SmolTcpSocket;
+    let socket = ctx.sockets.get_mut::<SmolTcpSocket>(ctx.rpc_handles[sock_idx]);
+    RPC_ACTIVE_SINCE[sock_idx].store(kernel_common::clint::mtime(), Ordering::Relaxed);
+    let _ = socket.send_slice(resp_str.as_bytes());
+    socket.close();
 }
 
 static DASHBOARD_HTML: &[u8] = include_bytes!("dashboard.html");
@@ -1602,8 +1706,8 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
     let blocks_stored = node.ledger.block_count();
     let blocks_confirmed = node.ledger.confirmed_count();
     let unchecked = node.unchecked.len();
-    let bpq_len = node.block_processor.total_queue_len();
-    let confirming_set_len = node.confirming_set.len();
+    let bpq_len = node.block_processor.try_total_queue_len().unwrap_or(0);
+    let confirming_set_len = node.confirming_set.try_len().unwrap_or(0);
     let active_elections = node.active.try_read().map(|a| a.len()).unwrap_or(0);
 
     let bp = &rsnano_node::block_processing::BLOCK_PROF;
@@ -1617,11 +1721,127 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
     let wal_ms = (ws[3].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
 
     let h1_ms = |i: usize| (HART1_PROF[i].load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    let tick_ms = |c: &core::sync::atomic::AtomicU64| (c.load(Ordering::Relaxed) * 1000 / CLINT_FREQ) as usize;
+    let io = &kernel_common::uboot::DEV_IO_PROF;
+    let io_n = |i: usize| io[i].load(Ordering::Relaxed);
+    let io_ms = |i: usize| tick_ms(&io[i]);
+    let sp = &kernel_common::storage::bpm::STORAGE_PROF;
+    let sp_n = |i: usize| sp[i].load(Ordering::Relaxed);
+    let sp_ms = |i: usize| tick_ms(&sp[i]);
+    let hart_arr = |arr: &[core::sync::atomic::AtomicU64; 16], as_ms: bool| {
+        let mut out = alloc::string::String::from("[");
+        for i in 0..16 {
+            if i > 0 {
+                out.push(',');
+            }
+            let val = if as_ms {
+                tick_ms(&arr[i]) as u64
+            } else {
+                arr[i].load(Ordering::Relaxed)
+            };
+            out.push_str(&alloc::format!("{}", val));
+        }
+        out.push(']');
+        out
+    };
+    let miss_n_hart = hart_arr(&kernel_common::storage::bpm::MISS_N_HART, false);
+    let miss_ms_hart = hart_arr(&kernel_common::storage::bpm::MISS_TICKS_HART, true);
+    let shard_hold_ms_hart = hart_arr(&kernel_common::storage::LOCK_HOLD, true);
+    let recount_json = match rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+        Some(rc) => {
+            let end = if rc.done { rc.end_tick } else { kernel_common::clint::mtime() };
+            let elapsed_ms = if rc.started { (end - rc.start_tick) * 1000 / CLINT_FREQ } else { 0 };
+            let mut top = alloc::string::String::from("[");
+            for k in 0..rc.top_len {
+                let e = &rc.top[k];
+                if k > 0 {
+                    top.push(',');
+                }
+                top.push_str(&alloc::format!(
+                    "{{\"account\":\"{}\",\"block_count\":{},\"conf_height\":{},\"gap\":{}}}",
+                    e.account.encode_account(),
+                    e.block_count,
+                    e.conf_height,
+                    e.gap()
+                ));
+            }
+            top.push(']');
+            let acc_list = |arr: &[rsnano_core::Account]| {
+                let mut out = alloc::string::String::from("[");
+                for (k, a) in arr.iter().enumerate() {
+                    if k > 0 {
+                        out.push(',');
+                    }
+                    out.push('"');
+                    out.push_str(&a.encode_account());
+                    out.push('"');
+                }
+                out.push(']');
+                out
+            };
+            let orphan_samples = acc_list(&rc.orphan_samples[..rc.orphan_samples_len]);
+            let missing_conf_samples = acc_list(&rc.missing_conf_samples[..rc.missing_conf_samples_len]);
+            let mut orphan_hist = alloc::string::String::from("[");
+            for (k, v) in rc.orphan_hist.iter().enumerate() {
+                if k > 0 {
+                    orphan_hist.push(',');
+                }
+                orphan_hist.push_str(&alloc::format!("{}", v));
+            }
+            orphan_hist.push(']');
+            alloc::format!(
+                "{{\"started\":{},\"done\":{},\"elapsed_ms\":{},\"accounts\":{},\"sum_block_count\":{},\"conf_entries\":{},\"sum_conf_height\":{},\"unconfirmed_accounts\":{},\"unconfirmed_blocks\":{},\"missing_conf_accounts\":{},\"missing_conf_blocks\":{},\"conf_over_accounts\":{},\"conf_over_blocks\":{},\"orphan_conf_entries\":{},\"orphan_conf_height\":{},\"cached_start\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"cached_end\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}},\"top_gaps\":{},\"orphan_samples\":{},\"missing_conf_samples\":{},\"orphan_hist\":{},\"repair\":{},\"repaired_accounts\":{},\"repaired_blocks\":{},\"repaired_missing_conf_accounts\":{},\"repaired_missing_conf_blocks\":{},\"removed_orphan_conf_entries\":{},\"removed_orphan_conf_height\":{},\"bootstrap_seeded\":{},\"repair_failed\":{},\"counters_applied\":{},\"applied\":{{\"blocks\":{},\"confirmed\":{},\"accounts\":{}}}}}",
+                rc.started,
+                rc.done,
+                elapsed_ms,
+                rc.accounts,
+                rc.sum_block_count,
+                rc.conf_entries,
+                rc.sum_conf_height,
+                rc.unconfirmed_accounts,
+                rc.unconfirmed_blocks,
+                rc.missing_conf_accounts,
+                rc.missing_conf_blocks,
+                rc.conf_over_accounts,
+                rc.conf_over_blocks,
+                rc.orphan_conf_entries,
+                rc.orphan_conf_height,
+                rc.start_block_count,
+                rc.start_confirmed_count,
+                rc.start_account_count,
+                rc.end_block_count,
+                rc.end_confirmed_count,
+                rc.end_account_count,
+                top,
+                orphan_samples,
+                missing_conf_samples,
+                orphan_hist,
+                rc.repair,
+                rc.repaired_accounts,
+                rc.repaired_blocks,
+                rc.repaired_missing_conf_accounts,
+                rc.repaired_missing_conf_blocks,
+                rc.removed_orphan_conf_entries,
+                rc.removed_orphan_conf_height,
+                rc.bootstrap_seeded,
+                rc.repair_failed,
+                rc.counters_applied,
+                rc.applied_block_count,
+                rc.applied_confirmed_count,
+                rc.applied_account_count
+            )
+        }
+        None => alloc::string::String::from("null"),
+    };
 
+    let net_cfg = kernel_common::net::get_net_config();
     let body = alloc::format!(
-        "{{\"network\":\"{}\",\"uptime_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{}}}",
+        "{{\"network\":\"{}\",\"dashboard_wallet_enabled\":{},\"dashboard_pos_enable\":{},\"uptime_sec\":{},\"unix_time_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{},\"recount\":{}}}",
         node.network_params.network.current_network.as_str(),
+        net_cfg.dashboard_wallet_enabled,
+        net_cfg.dashboard_pos_enable,
         uptime_sec,
+        rsnano_core::utils::UnixTimestamp::now().as_u64(),
         blocks_stored,
         blocks_confirmed,
         unchecked,
@@ -1653,6 +1873,26 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
         h1_ms(1),
         h1_ms(2),
         h1_ms(3),
+        io_n(0),
+        io_n(1),
+        io_ms(2),
+        io_ms(3),
+        io_n(4),
+        io_n(5),
+        io_ms(6),
+        io_ms(7),
+        sp_n(0),
+        sp_ms(1),
+        tick_ms(&kernel_common::storage::LOCK_WAIT[5]),
+        tick_ms(&kernel_common::storage::LOCK_HOLD[5]),
+        tick_ms(&kernel_common::storage::LOCK_WAIT[6]),
+        tick_ms(&kernel_common::storage::LOCK_HOLD[6]),
+        tick_ms(&rsnano_ledger::LEDGER_PROF[1]),
+        tick_ms(&rsnano_ledger::LEDGER_PROF[2]),
+        miss_n_hart,
+        miss_ms_hart,
+        shard_hold_ms_hart,
+        recount_json,
     );
 
     alloc::format!(
@@ -1899,7 +2139,7 @@ fn handle_dashboard_server(ctx: &mut kernel_common::net::NetworkContext, node: A
 
                 if first_line.starts_with("OPTIONS ") {
                     let _ = socket.send_slice(
-                        b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+                        b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Origin, Authorization, X-Requested-With\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n",
                     );
                 } else if first_line.starts_with("GET /favicon.ico") {
                     let _ = socket.send_slice(
@@ -1919,6 +2159,41 @@ fn handle_dashboard_server(ctx: &mut kernel_common::net::NetworkContext, node: A
                     );
                     let _ = socket.send_slice(hdr.as_bytes());
                     let _ = socket.send_slice(NANO_STRESS_WASM_GZ);
+                } else if first_line.starts_with("GET /api/recount_repair") {
+                    // Re-arms the recount in repair mode (rebuild orphan account records from
+                    // local blocks, then set cached counters from the recounted totals).
+                    let accepted = if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+                        if rc.is_running() {
+                            false
+                        } else {
+                            rc.started = false;
+                            rc.done = false;
+                            rc.repair_requested = true;
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                    let body = if accepted { "{\"recount\":\"repair_scheduled\"}" } else { "{\"recount\":\"busy\"}" };
+                    let resp = alloc::format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.send_slice(resp.as_bytes());
+                } else if first_line.starts_with("GET /api/recount_start") {
+                    // Re-arms the read-only ledger recount; Hart 4 restarts it on its next step.
+                    if let Some(mut rc) = rsnano_ledger::LEDGER_RECOUNT.try_lock() {
+                        rc.started = false;
+                        rc.done = false;
+                    }
+                    let body = "{\"recount\":\"restarting\"}";
+                    let resp = alloc::format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.send_slice(resp.as_bytes());
                 } else if first_line.starts_with("GET /api/metrics") {
                     let resp = format_dashboard_metrics_json(&node);
                     let _ = socket.send_slice(resp.as_bytes());
@@ -2310,6 +2585,7 @@ fn run_hdmi_display_and_monitor_loop(
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    kernel_common::watchdog::mark_fatal_stall();
     let hart_id: usize;
     unsafe {
         core::arch::asm!("mv {0}, tp", out(reg) hart_id);
@@ -2906,6 +3182,7 @@ fn run_maintenance_and_network_loop(
 
         let mut retry_net = false;
         let mut net_active = false;
+        let mut pending_rpc = None;
         let hp0 = kernel_common::clint::mtime();
         {
             let _intr = kernel_common::uart::InterruptGuard::new();
@@ -2913,7 +3190,7 @@ fn run_maintenance_and_network_loop(
             let mut ctx = kernel_common::net::NET.lock();
             if let Some(ref mut ctx_val) = *ctx {
                 net_active = ctx_val.poll(mtime);
-                handle_rpc_server(ctx_val, node_arc.clone());
+                pending_rpc = poll_rpc_request(ctx_val);
                 handle_dashboard_server(ctx_val, node_arc.clone());
 
                 if mtime - last_ping > seconds(5) {
@@ -2928,6 +3205,22 @@ fn run_maintenance_and_network_loop(
                     retry_net = true;
                     last_ping = mtime;
                 }
+            }
+            drop(ctx);
+            kernel_common::net::HART1_WANTS_NET.store(false, Ordering::Release);
+        }
+
+        if let Some((sock_idx, req_str, enable_control)) = pending_rpc {
+            let handler = RpcCommandHandler::new(node_arc.clone(), enable_control);
+            let server = BareMetalRpcServer::new(handler);
+            let resp_str = server.handle_request(&req_str).unwrap_or_else(|| {
+                alloc::string::String::from("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+            });
+            let _intr = kernel_common::uart::InterruptGuard::new();
+            kernel_common::net::HART1_WANTS_NET.store(true, Ordering::Release);
+            let mut ctx = kernel_common::net::NET.lock();
+            if let Some(ref mut ctx_val) = *ctx {
+                send_rpc_response(ctx_val, sock_idx, &resp_str);
             }
             drop(ctx);
             kernel_common::net::HART1_WANTS_NET.store(false, Ordering::Release);
@@ -2950,7 +3243,11 @@ fn run_maintenance_and_network_loop(
         }
 
         if mtime - last_heartbeat > seconds(10) {
-            let processed = node_arc.message_processor.lock().total_processed();
+            let processed = node_arc
+                .message_processor
+                .try_lock()
+                .map(|m| m.total_processed())
+                .unwrap_or(0);
             tracing::debug!(
                 "[heartbeat] Hart 1 (Maint+Net) | Iters: {} | Msgs: {} | ms net={} msgproc={} sig={} exec={}",
                 iterations,

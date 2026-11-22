@@ -255,12 +255,12 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
         return;
     }
 
-    // SpacemiT X60 LSU erratum: when a non-cacheable AXI MMIO write or cross-cluster
+    // SpacemiT X60/X100 LSU erratum: when a non-cacheable AXI MMIO write or cross-cluster
     // snoop/reservation is draining while the core executes a `pause` (`fence w, 0`,
     // encoding `0x0100_000f`) hint instruction, the LSU can raise an imprecise
-    // `CAUSE_LOAD_ACCESS` (`scause = 0x5`) with `stval = 0x0` and `sepc` pointing at
-    // `pause`. Because `pause` is a 4-byte architectural no-op hint with no register
-    // or memory side effects, advance `sepc + 4` and resume execution.
+    // `CAUSE_LOAD_ACCESS` (`scause = 0x5`) or `CAUSE_STORE_ACCESS` (`scause = 0x7`)
+    // with `stval = 0x0` and `sepc` pointing at `pause` (or at the instruction
+    // immediately following `pause` at `sepc - 4` if `pause` already retired).
     if !is_interrupt && (cause == 5 || cause == 7) {
         let sepc = csrr!("sepc");
         let stval = csrr!("stval");
@@ -270,6 +270,13 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
             if (lo | (hi << 16)) == 0x0100_000f {
                 csrw!("sepc", sepc + 4);
                 return;
+            }
+            if sepc >= 0x1_0400_0004usize {
+                let prev_lo = unsafe { core::ptr::read_volatile((sepc - 4) as *const u16) } as u32;
+                let prev_hi = unsafe { core::ptr::read_volatile((sepc - 2) as *const u16) } as u32;
+                if (prev_lo | (prev_hi << 16)) == 0x0100_000f {
+                    return;
+                }
             }
         }
     }
@@ -322,6 +329,7 @@ pub extern "C" fn rust_trap_handler(_regs: *const usize) {
         // 3: Breakpoint, 4: Load Address Misaligned, 5: Load Access Fault,
         // 6: Store/AMO Address Misaligned, 7: Store/AMO Access Fault, 12-15: Page Faults
         if xcause <= 7 || xcause >= 12 {
+            crate::watchdog::mark_fatal_stall();
             let mut last_print = crate::clint::mtime();
             loop {
                 let now = crate::clint::mtime();

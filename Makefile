@@ -10,7 +10,7 @@ boot.scr: boot.cmd
 RUST_LIB_VENDOR := $(shell $(CARGO) --version >/dev/null 2>&1 && rustc --print sysroot)/lib/rustlib/src/rust/library/vendor
 
 build-stress-wasm:
-	RUSTC_BOOTSTRAP=1 RUSTFLAGS="" $(CARGO) build -Z build-std=core --offline \
+	RUSTC_BOOTSTRAP=1 RUSTFLAGS="-C target-feature=+simd128" $(CARGO) build -Z build-std=core --offline \
 		--config 'source.crates-io.replace-with="vendored-sources"' \
 		--config 'source.vendored-sources.directory="$(RUST_LIB_VENDOR)"' \
 		--manifest-path tools/nano-stress/wasm/Cargo.toml --release --target wasm32-unknown-unknown

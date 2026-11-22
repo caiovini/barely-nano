@@ -113,7 +113,17 @@ impl BtreeStore {
         }
 
         let (account_count, block_count, confirmed_count, pruned_count) =
-            if let Some((acc, blk, conf, pruned)) = self.version.get_cached_counts() {
+            if let Some((acc, blk, mut conf, pruned)) = self.version.get_cached_counts() {
+                if conf > blk {
+                    #[cfg(not(test))]
+                    tracing::info!(
+                        "[ledger] Repairing drifted confirmed_count ({} > {}) from confirmation_height table...",
+                        conf,
+                        blk
+                    );
+                    conf = self.confirmation_height.sum_heights().min(blk);
+                    self.version.put_cached_counts(acc, blk, conf, pruned);
+                }
                 *LAST_PERSISTED_COUNTS.lock() = (acc, blk, conf, pruned);
                 if acc <= 250_000 {
                     self.account.populate_bloom();
@@ -144,7 +154,7 @@ impl BtreeStore {
                     "[ledger] Scanning B-Tree for initial account/block/confirmed counts (one-time scan)..."
                 );
                 let (acc, blk) = self.account.scan_counts();
-                let conf = self.confirmation_height.sum_heights();
+                let conf = self.confirmation_height.sum_heights().min(blk);
                 let pruned = self.pruned.count(&());
                 *LAST_PERSISTED_COUNTS.lock() = (0, 0, 0, 0);
                 if acc == 0 && blk == 0 {

@@ -95,6 +95,79 @@ impl<'a> OwningAnySet<'a> {
         result
     }
 
+    /// If `account` is missing from `TABLE_ACCOUNTS` (lost row from snapshot copy) and
+    /// `frontier_hash` already exists in local `TABLE_BLOCKS`, rebuilds `account`'s record
+    /// and confirmation height from the local block chain and returns `true`.
+    pub fn try_heal_missing_account(&self, account: &Account, frontier_hash: BlockHash) -> bool {
+        if frontier_hash.is_zero() || !self.store.block.exists(&frontier_hash) {
+            return false;
+        }
+        if self.store.account.get(account).is_some() {
+            return true;
+        }
+        let mut tip_hash = frontier_hash;
+        for _ in 0..4096 {
+            if let Some(succ) = self.store.successors.get(&tip_hash) {
+                if !succ.is_zero() && succ != tip_hash && self.store.block.exists(&succ) {
+                    tip_hash = succ;
+                    continue;
+                }
+            }
+            break;
+        }
+        let Some(tip) = self.store.block.get(&tip_hash) else {
+            return false;
+        };
+        if tip.account() != *account {
+            return false;
+        }
+        let open_block = {
+            let mut curr = tip.clone();
+            for _ in 0..256 {
+                if curr.previous().is_zero() || curr.height() <= 1 {
+                    break;
+                }
+                let Some(prev) = self.store.block.get(&curr.previous()) else {
+                    break;
+                };
+                curr = prev;
+            }
+            curr.hash()
+        };
+        let rep = tip.representative_field().unwrap_or_default();
+        let healed = AccountInfo {
+            head: tip.hash(),
+            representative: rep,
+            open_block,
+            balance: tip.balance(),
+            modified: tip.timestamp().into(),
+            block_count: tip.height(),
+            epoch: tip.epoch(),
+        };
+        self.store.account.put(account, &healed);
+        self.store
+            .cache
+            .account_count
+            .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        let old_conf_h = self
+            .store
+            .confirmation_height
+            .get(account)
+            .map(|c| c.height)
+            .unwrap_or(0);
+        if healed.block_count > old_conf_h {
+            self.store.confirmation_height.put(
+                account,
+                &rsnano_core::ConfirmationHeightInfo::new(healed.block_count, healed.head),
+            );
+            self.store.cache.confirmed_count.fetch_add(
+                healed.block_count - old_conf_h,
+                core::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        true
+    }
+
     pub fn accounts_range(
         &'a self,
         range: impl RangeBounds<Account> + 'static,
@@ -650,7 +723,7 @@ impl<'a> Iterator for AccountRangeIterator<'a> {
     type Item = (Account, AccountInfo);
 
     fn next(&mut self) -> Option<Self::Item> {
-        const BATCH_SIZE: usize = 32;
+        const BATCH_SIZE: usize = 64;
         if self.index >= self.batch.len() {
             let start = self.next_start.take()?;
             self.batch.clear();

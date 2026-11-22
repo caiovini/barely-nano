@@ -19,6 +19,8 @@ const WDT_WCR: usize = 0xc8; // Watchdog Control Register (Kick)
 const WDT_WMER: usize = 0xb8; // Watchdog Mode Enable Register
 
 static HART6_LAST_HEARTBEAT_MTIME: AtomicU64 = AtomicU64::new(0);
+static HART0_LAST_HEARTBEAT_MTIME: AtomicU64 = AtomicU64::new(0);
+static FATAL_STALL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 #[cfg(target_arch = "riscv64")]
 static WDT_STATUS: AtomicU8 = AtomicU8::new(0); // 0 = unprobed, 1 = accessible, 2 = unmapped
 
@@ -42,19 +44,33 @@ pub fn heartbeat_hart6(mtime: u64) {
     HART6_LAST_HEARTBEAT_MTIME.store(mtime, Ordering::Relaxed);
 }
 
+/// Records that Hart 0 (VoteProc) is alive and making progress.
+#[inline]
+pub fn heartbeat_hart0(mtime: u64) {
+    HART0_LAST_HEARTBEAT_MTIME.store(mtime, Ordering::Relaxed);
+}
+
+/// Marks an unrecoverable trap or panic on any hart so `kick()` stops feeding the hardware watchdog.
+#[inline]
+pub fn mark_fatal_stall() {
+    FATAL_STALL.store(true, Ordering::SeqCst);
+}
+
 /// "Kicks" (pings) the hardware watchdog to reset its counter if mapped.
 pub fn kick() {
     #[cfg(target_arch = "riscv64")]
     {
-        if !wdt_accessible() {
+        if !wdt_accessible() || FATAL_STALL.load(Ordering::Relaxed) {
             return;
         }
+        let now = crate::clint::mtime();
         let last_h6 = HART6_LAST_HEARTBEAT_MTIME.load(Ordering::Relaxed);
-        if last_h6 != 0 {
-            let now = crate::clint::mtime();
-            if now.saturating_sub(last_h6) > 60 * crate::clint::FREQ {
-                return;
-            }
+        if last_h6 != 0 && now.saturating_sub(last_h6) > 60 * crate::clint::FREQ {
+            return;
+        }
+        let last_h0 = HART0_LAST_HEARTBEAT_MTIME.load(Ordering::Relaxed);
+        if last_h0 != 0 && now.saturating_sub(last_h0) > 60 * crate::clint::FREQ {
+            return;
         }
         unsafe {
             let base = WDT_BASE as *mut u32;
@@ -88,6 +104,38 @@ pub fn disable() {
 
             // 2. Disable mode
             base.add(WDT_WMER / 4).write_volatile(0x0000);
+        }
+    }
+}
+
+/// Re-enables the SpacemiT hardware watchdog in system-reset mode (`WE | WRIE = 0x0003`)
+/// after single-threaded boot initialization completes, if mapped.
+pub fn enable() {
+    #[cfg(target_arch = "riscv64")]
+    {
+        let now = crate::clint::mtime();
+        HART6_LAST_HEARTBEAT_MTIME.store(now, Ordering::Relaxed);
+        HART0_LAST_HEARTBEAT_MTIME.store(now, Ordering::Relaxed);
+        if !wdt_accessible() {
+            return;
+        }
+        unsafe {
+            let base = WDT_BASE as *mut u32;
+
+            // 1. Clear status register (0xC0)
+            base.add(WDT_WFAR / 4).write_volatile(0xbaba);
+            base.add(WDT_WSAR / 4).write_volatile(0xeb10);
+            base.add(0xc0 / 4).write_volatile(0x0000);
+
+            // 2. Reset counter register (0xC8)
+            base.add(WDT_WFAR / 4).write_volatile(0xbaba);
+            base.add(WDT_WSAR / 4).write_volatile(0xeb10);
+            base.add(WDT_WCR / 4).write_volatile(0x0001);
+
+            // 3. Enable counter + reset generation on timeout (`WE | WRIE = 0x0003`)
+            base.add(WDT_WFAR / 4).write_volatile(0xbaba);
+            base.add(WDT_WSAR / 4).write_volatile(0xeb10);
+            base.add(WDT_WMER / 4).write_volatile(0x0003);
         }
     }
 }

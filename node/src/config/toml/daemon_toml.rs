@@ -17,6 +17,22 @@ pub struct BareMetalToml {
     pub wipe_blocks: Option<bool>,
     pub dashboard_enable: Option<bool>,
     pub dashboard_port: Option<u16>,
+    #[serde(alias = "dashboard_wallet_enable")]
+    pub dashboard_wallet_enabled: Option<bool>,
+    #[serde(alias = "dashboard_pos_enabled")]
+    pub dashboard_pos_enable: Option<bool>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone, Debug)]
+pub struct DashboardToml {
+    #[serde(alias = "enable", alias = "enabled", alias = "dashboard_enabled")]
+    pub dashboard_enable: Option<bool>,
+    #[serde(alias = "port")]
+    pub dashboard_port: Option<u16>,
+    #[serde(alias = "wallet_enabled", alias = "wallet_enable", alias = "dashboard_wallet_enable")]
+    pub dashboard_wallet_enabled: Option<bool>,
+    #[serde(alias = "pos_enable", alias = "pos_enabled", alias = "dashboard_pos_enabled")]
+    pub dashboard_pos_enable: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -25,6 +41,7 @@ pub struct DaemonToml {
     pub node: Option<NodeToml>,
     pub rpc: Option<NodeRpcToml>,
     pub bare_metal: Option<BareMetalToml>,
+    pub dashboard: Option<DashboardToml>,
 }
 
 impl DaemonToml {
@@ -289,6 +306,7 @@ impl From<&DaemonConfig> for DaemonToml {
             node: Some((&config.node).into()),
             rpc: Some(config.into()),
             bare_metal: None,
+            dashboard: None,
         }
     }
 }

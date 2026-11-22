@@ -88,6 +88,21 @@ impl<'a> FrontierChecker<'a> {
             return FrontierCheckResult::Pending;
         }
 
+        #[cfg(not(test))]
+        if !frontier.hash.is_zero() {
+            // If the account record was lost from `TABLE_ACCOUNTS` during the snapshot copy
+            // (and its `TABLE_PENDING` entry was already consumed), either heal it directly
+            // from `TABLE_BLOCKS` if the peer's frontier block is already on disk, or mark it
+            // `Pending` so `Bootstrapper` pulls its chain starting from block #1.
+            if self
+                .any
+                .try_heal_missing_account(&frontier.account, frontier.hash)
+            {
+                return FrontierCheckResult::UpToDate;
+            }
+            return FrontierCheckResult::Pending;
+        }
+
         FrontierCheckResult::UnknownAccount
     }
 

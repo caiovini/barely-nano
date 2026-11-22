@@ -19,6 +19,8 @@ use spin::Mutex;
 const STATE_IDLE: u8 = 0;
 const STATE_QUEUED: u8 = 1;
 const STATE_SUSPENDED: u8 = 2;
+const STATE_RUNNING: u8 = 3;
+const STATE_NOTIFIED: u8 = 4;
 
 /// A type-erased future that outputs `()`.
 type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -51,16 +53,46 @@ impl Wake for Task {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        let prev = self.state.swap(STATE_QUEUED, Ordering::SeqCst);
-        if prev != STATE_QUEUED {
-            let ptr = EXECUTOR_PTR.load(Ordering::Acquire);
-            if !ptr.is_null() {
-                let executor = unsafe { &*ptr };
-                let hart_id = self.assigned_hart.load(Ordering::Relaxed) as usize;
-                if hart_id < 16 {
-                    executor.local_queues[hart_id].lock().push_back(self.clone());
-                } else {
-                    executor.injector_queue.lock().push_back(self.clone());
+        loop {
+            match self.state.load(Ordering::SeqCst) {
+                STATE_QUEUED | STATE_NOTIFIED => return,
+                STATE_RUNNING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            STATE_RUNNING,
+                            STATE_NOTIFIED,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        return;
+                    }
+                }
+                s => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            s,
+                            STATE_QUEUED,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        let ptr = EXECUTOR_PTR.load(Ordering::Acquire);
+                        if !ptr.is_null() {
+                            let executor = unsafe { &*ptr };
+                            let hart_id = self.assigned_hart.load(Ordering::Relaxed) as usize;
+                            if hart_id < 16 {
+                                executor.local_queues[hart_id].lock().push_back(self.clone());
+                            } else {
+                                executor.injector_queue.lock().push_back(self.clone());
+                            }
+                        }
+                        return;
+                    }
                 }
             }
         }
@@ -140,10 +172,11 @@ impl Executor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        // Hart 1 is dedicated to Network/RPC polling, Harts 2 & 3 are dedicated to lock-free
-        // Crypto (Ed25519) & MessageProcessor draining, and Harts 5 & 6 are dedicated to
-        // Sharded Ledger Commit (Ledger-B / Ledger-A), so schedule async tasks across worker harts [0, 4, 7].
-        const WORKER_HARTS: [u8; 4] = [0, 3, 4, 7];
+        // Hart 0 is dedicated to VoteProc (VoteProcessor, VoteCacheProcessor, VoteRebroadcaster),
+        // Hart 1 is dedicated to Network/RPC polling, Hart 2 is dedicated to MessageProcessor,
+        // and Harts 5 & 6 are dedicated to Sharded Ledger Commit (Ledger-B / Ledger-A),
+        // so schedule async tasks across worker harts [3, 4, 7].
+        const WORKER_HARTS: [u8; 3] = [3, 4, 7];
         let idx = (self.next_spawn_hart.fetch_add(1, Ordering::Relaxed) as usize) % WORKER_HARTS.len();
         let hart_id = WORKER_HARTS[idx];
         
@@ -167,18 +200,15 @@ impl Executor {
         let task = self.pop_task(hart_id);
         let Some(task) = task else { return false; };
 
-        // crate::uart::putchar(b'{');
-        // crate::uart::putchar(b'0' + hart_id as u8);
-
         let waker = Waker::from(task.clone());
         let mut cx = Context::from_waker(&waker);
 
         let mut future_guard = task.future.lock();
-        task.state.store(STATE_IDLE, Ordering::SeqCst);
+        task.state.store(STATE_RUNNING, Ordering::SeqCst);
         let future = match future_guard.as_mut() {
             Some(f) => f,
             None => {
-                // crate::uart::putchar(b'}');
+                task.state.store(STATE_IDLE, Ordering::SeqCst);
                 return true;
             }
         };
@@ -188,19 +218,27 @@ impl Executor {
         match poll {
             Poll::Ready(_) => {
                 *future_guard = None;
+                task.state.store(STATE_IDLE, Ordering::SeqCst);
                 self.completed_count.fetch_add(1, Ordering::SeqCst);
             }
             Poll::Pending => {
-                let _ = task.state.compare_exchange(
-                    STATE_IDLE,
-                    STATE_SUSPENDED,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
-                // crate::uart::putchar(b'.');
+                drop(future_guard);
+                if task
+                    .state
+                    .compare_exchange(
+                        STATE_RUNNING,
+                        STATE_SUSPENDED,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_err()
+                {
+                    task.state.store(STATE_QUEUED, Ordering::SeqCst);
+                    let target = (task.assigned_hart.load(Ordering::Relaxed) as usize).min(15);
+                    self.local_queues[target].lock().push_back(task);
+                }
             }
         }
-        // crate::uart::putchar(b'}');
         true
     }
 
@@ -218,7 +256,7 @@ impl Executor {
         }
 
         // 3. Work Stealing: Try other worker queues
-        const WORKER_HARTS: [usize; 4] = [0, 3, 4, 7];
+        const WORKER_HARTS: [usize; 3] = [3, 4, 7];
         for &victim_id in &WORKER_HARTS {
             if victim_id == hart_id {
                 continue;

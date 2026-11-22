@@ -15,6 +15,7 @@ mod dependent_blocks_finder;
 mod ledger;
 mod ledger_builder;
 mod ledger_constants;
+mod ledger_recount;
 mod ledger_sets;
 mod rep_weight_cache;
 mod rep_weights_updater;
@@ -30,6 +31,7 @@ pub use ledger_constants::{
     LedgerConstants, DEV_GENESIS_ACCOUNT, DEV_GENESIS_BLOCK, DEV_GENESIS_HASH, DEV_GENESIS_PUB_KEY,
 };
 pub use ledger_sets::*;
+pub use ledger_recount::{LedgerRecount, RecountGap, LEDGER_RECOUNT, RECOUNT_SAMPLES, RECOUNT_TOP_N};
 pub use rep_weight_cache::*;
 pub use rep_weights_updater::*;
 pub(crate) use representative_block_finder::RepresentativeBlockFinder;

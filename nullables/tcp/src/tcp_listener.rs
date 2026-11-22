@@ -22,7 +22,7 @@ impl TcpListener {
                 let socket = ctx.sockets.get_mut::<TcpSocket>(ctx.tcp_handle);
                 
                 if !socket.is_active() && !socket.is_open() {
-                    socket.listen(self.port).unwrap();
+                    let _ = socket.listen(self.port);
                 }
 
                 match socket.state() {
@@ -52,6 +52,19 @@ impl TcpListener {
                         // 3. Add the established socket back under a new handle and wrap it
                         let new_handle = ctx.sockets.add(established_socket);
                         return Poll::Ready(Ok((TcpStream::new(kernel_common::net::async_tcp::AsyncTcpStream::new(new_handle)), addr)));
+                    }
+                    smoltcp::socket::tcp::State::CloseWait
+                    | smoltcp::socket::tcp::State::TimeWait
+                    | smoltcp::socket::tcp::State::Closing
+                    | smoltcp::socket::tcp::State::LastAck
+                    | smoltcp::socket::tcp::State::FinWait1
+                    | smoltcp::socket::tcp::State::FinWait2 => {
+                        // A client connected and disconnected before `accept()` polled the socket;
+                        // reset and re-listen immediately so port 7078 never gets wedged.
+                        socket.abort();
+                        let _ = socket.listen(self.port);
+                        socket.register_recv_waker(cx.waker());
+                        Poll::Pending
                     }
                     _ => {
                         socket.register_recv_waker(cx.waker());

@@ -50,6 +50,20 @@ impl RpcMonitor {
     }
 
     async fn post_json<T: DeserializeOwned>(&self, payload: &serde_json::Value) -> Result<T> {
+        let mut last_err = None;
+        for attempt in 0..4 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            match self.post_json_once(payload).await {
+                Ok(val) => return Ok(val),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    async fn post_json_once<T: DeserializeOwned>(&self, payload: &serde_json::Value) -> Result<T> {
         let body = serde_json::to_string(payload)?;
         let request = format!(
             "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

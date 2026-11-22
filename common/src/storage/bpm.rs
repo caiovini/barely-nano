@@ -26,6 +26,11 @@ pub static STORAGE_PROF: [AtomicU64; 13] = [
 /// The fundamental unit of storage and caching. Matches typical SSD block sizes.
 pub const BLOCK_SIZE: usize = 4096;
 
+/// Per-hart Buffer Pool miss attribution: number of misses that went to NVMe, and their
+/// total cost in CLINT ticks (victim selection + device read), indexed by hart id.
+pub static MISS_N_HART: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+pub static MISS_TICKS_HART: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+
 /// A container for a single cached block of data.
 pub struct Frame {
     pub data: crate::storage::AlignedBlock,
@@ -334,6 +339,159 @@ impl BufferPool {
         })
     }
 
+    #[inline]
+    pub fn is_resident(&self, page_id: usize) -> bool {
+        self.get_page_frame(page_id) != u32::MAX
+    }
+
+    /// Retrieves a page for a sequential scan (`BTree::iter` / `RangeIterator`).
+    /// Keeps internal B-Tree nodes pinned with high Clock priority (`4`), while assigning
+    /// scanned leaf pages `ref_count = 0` so full-table scans (`FrontierChecker`, `BacklogScan`)
+    /// are reclaimed first without evicting hot point-lookup pages (`ref_count = 2`).
+    pub fn fetch_page_scan(&mut self, page_id: usize) -> Result<PageGuard, crate::storage::StorageError> {
+        let fid = self.get_page_frame(page_id);
+        let frame_id = if fid != u32::MAX {
+            let frame_id = fid as usize;
+            // SAFETY: `frame_id < self.meta.len() <= self.max_frames`.
+            let is_internal = unsafe {
+                let bytes = &(*self.data_ptr.add(frame_id)).bytes;
+                let base = bytes.as_ptr();
+                crate::storage::prefetch_read(base);
+                crate::storage::prefetch_read(base.add(320));
+                crate::storage::prefetch_read(base.add(3840));
+                page_id == 0 || bytes[0] == 0
+            };
+            let m = &mut self.meta[frame_id];
+            if is_internal && m.ref_count < 4 {
+                m.ref_count = 4;
+            }
+            m.pin_count += 1;
+            frame_id
+        } else {
+            let t0 = crate::clint::mtime();
+            let victim_frame_id = self.claim_victim_frame()?;
+            let m = &mut self.meta[victim_frame_id];
+            m.set_page_id(Some(page_id));
+            m.is_dirty = false;
+            m.pin_count = 1;
+
+            let tr = crate::clint::mtime();
+            // SAFETY: `victim_frame_id < self.meta.len() <= self.max_frames`.
+            let buf = unsafe { &mut (*self.data_ptr.add(victim_frame_id)).bytes };
+            if self.is_wallet {
+                self.storage.lock().read_wallet_block(page_id, buf)?;
+            } else {
+                self.storage.lock().read_block(page_id + self.base_page, buf)?;
+            }
+            self.meta[victim_frame_id].ref_count = if page_id == 0 || buf[0] == 0 { 4 } else { 0 };
+            let now = crate::clint::mtime();
+            STORAGE_PROF[0].fetch_add(1, Ordering::Relaxed);
+            STORAGE_PROF[1].fetch_add(now - t0, Ordering::Relaxed);
+            STORAGE_PROF[2].fetch_add(1, Ordering::Relaxed);
+            STORAGE_PROF[3].fetch_add(now - tr, Ordering::Relaxed);
+            let hart = crate::storage::current_hart();
+            MISS_N_HART[hart].fetch_add(1, Ordering::Relaxed);
+            MISS_TICKS_HART[hart].fetch_add(now - t0, Ordering::Relaxed);
+
+            self.set_page_frame(page_id, victim_frame_id as u32);
+            victim_frame_id
+        };
+        // SAFETY: `frame_id < self.meta.len() <= self.max_frames`.
+        let data_ptr = unsafe { &raw mut (*self.data_ptr.add(frame_id)).bytes };
+        Ok(PageGuard {
+            bpm: self as *mut _,
+            data_ptr,
+            frame_id,
+            is_dirty: false,
+        })
+    }
+
+    /// Prefetches a contiguous run of non-resident pages (`start_page_id .. start_page_id + count`)
+    /// in a single multi-sector NVMe DMA read (`read_contiguous_into_frames`), assigning scan priority
+    /// (`ref_count = 0` for leaf pages, `4` for internal nodes).
+    pub fn prefetch_contiguous_scan(&mut self, start_page_id: usize, count: usize) {
+        if self.is_wallet || count <= 1 {
+            return;
+        }
+        let max_run = count.min(crate::storage::DMA_BOUNCE_PAGES);
+        let mut run_len = 0usize;
+        while run_len < max_run {
+            if self.get_page_frame(start_page_id + run_len) != u32::MAX {
+                break;
+            }
+            run_len += 1;
+        }
+        if run_len <= 1 {
+            return;
+        }
+
+        let t0 = crate::clint::mtime();
+        let mut fids = [0usize; crate::storage::DMA_BOUNCE_PAGES];
+        let mut ptrs = [core::ptr::null_mut::<[u8; BLOCK_SIZE]>(); crate::storage::DMA_BOUNCE_PAGES];
+        let mut claimed = 0usize;
+        while claimed < run_len {
+            if let Ok(fid) = self.claim_victim_frame() {
+                // Temporarily pin while claiming remaining frames in this batch so the Clock hand
+                // cannot reclaim an earlier frame from the same batch.
+                self.meta[fid].pin_count = 1;
+                fids[claimed] = fid;
+                // SAFETY: `fid < self.meta.len() <= self.max_frames`.
+                ptrs[claimed] = unsafe { &raw mut (*self.data_ptr.add(fid)).bytes };
+                claimed += 1;
+            } else {
+                break;
+            }
+        }
+        if claimed <= 1 {
+            for i in 0..claimed {
+                let fid = fids[i];
+                self.meta[fid].pin_count = 0;
+                self.meta[fid].set_page_id(None);
+                self.free_list.push(fid);
+            }
+            return;
+        }
+
+        let tr = crate::clint::mtime();
+        // SAFETY: Each `ptrs[i]` points to a distinct, valid 4 KB `AlignedBlock` frame in Bank 1.
+        let res = unsafe {
+            self.storage
+                .lock()
+                .read_contiguous_into_frames(start_page_id + self.base_page, &ptrs[..claimed])
+        };
+        if res.is_err() {
+            for i in 0..claimed {
+                let fid = fids[i];
+                self.meta[fid].pin_count = 0;
+                self.meta[fid].set_page_id(None);
+                self.free_list.push(fid);
+            }
+            return;
+        }
+
+        for i in 0..claimed {
+            let pid = start_page_id + i;
+            let fid = fids[i];
+            // SAFETY: `ptrs[i]` was populated by `read_contiguous_into_frames`.
+            let is_internal = pid == 0 || unsafe { (*ptrs[i])[0] == 0 };
+            let m = &mut self.meta[fid];
+            m.set_page_id(Some(pid));
+            m.is_dirty = false;
+            m.pin_count = 0;
+            m.ref_count = if is_internal { 4 } else { 0 };
+            self.set_page_frame(pid, fid as u32);
+        }
+
+        let now = crate::clint::mtime();
+        STORAGE_PROF[0].fetch_add(claimed as u64, Ordering::Relaxed);
+        STORAGE_PROF[1].fetch_add(now - t0, Ordering::Relaxed);
+        STORAGE_PROF[2].fetch_add(1, Ordering::Relaxed);
+        STORAGE_PROF[3].fetch_add(now - tr, Ordering::Relaxed);
+        let hart = crate::storage::current_hart();
+        MISS_N_HART[hart].fetch_add(claimed as u64, Ordering::Relaxed);
+        MISS_TICKS_HART[hart].fetch_add(now - t0, Ordering::Relaxed);
+    }
+
     /// Allocates or pins a frame for a newly allocated `page_id` without reading uninitialized
     /// disk sectors from NVMe, since the caller will immediately overwrite the 4 KB page.
     pub fn new_page(&mut self, page_id: usize) -> Result<PageGuard, crate::storage::StorageError> {
@@ -371,13 +529,26 @@ impl BufferPool {
     fn page_priority(page_id: usize, bytes: &[u8; BLOCK_SIZE]) -> u8 {
         if page_id == 0 || bytes[0] == 0 {
             // Shard metadata (page 0) or internal B-Tree routing node (`is_leaf == 0`)
-            3
-        } else if matches!(bytes[4], 2..=5) {
-            // Hot Account (2), ConfirmationHeight (3), Pending (4), or RepWeight (5) leaf
-            2
+            4
         } else {
-            // Cold Block (1) or Successor (8) leaf
-            1
+            let num_keys = u16::from_le_bytes([bytes[1], bytes[2]]) as usize;
+            let table_id = if num_keys > 0 {
+                let cell_off = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+                if cell_off + 3 < BLOCK_SIZE {
+                    bytes[cell_off + 3]
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            if matches!(table_id, 1 | 3 | 7 | 11 | 12) {
+                // Hot Account (1), ConfirmationHeight (3), Pending (7), Version (11), or RepWeight (12) leaf
+                2
+            } else {
+                // Cold Block/Successor (2), Pruned (5), Peer (6), FinalVote (8), or OnlineWeight (9) leaf
+                1
+            }
         }
     }
 
@@ -516,6 +687,9 @@ impl BufferPool {
         STORAGE_PROF[1].fetch_add(now - t0, Ordering::Relaxed);
         STORAGE_PROF[2].fetch_add(1, Ordering::Relaxed);
         STORAGE_PROF[3].fetch_add(now - tr, Ordering::Relaxed);
+        let hart = crate::storage::current_hart();
+        MISS_N_HART[hart].fetch_add(1, Ordering::Relaxed);
+        MISS_TICKS_HART[hart].fetch_add(now - t0, Ordering::Relaxed);
 
         self.set_page_frame(page_id, victim_frame_id as u32);
         Ok(victim_frame_id)

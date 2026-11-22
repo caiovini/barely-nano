@@ -101,7 +101,7 @@ impl PriorityRequester {
                     }
                 }
                 PriorityState::WaitPriority(ref channel) => {
-                    let next = {
+                    let mut next = {
                         let mut state = state_mutex.lock();
                         let next = state.next_priority(now);
                         if next.account.is_zero() {
@@ -114,6 +114,35 @@ impl PriorityRequester {
                         self.stats.wait_priority.fetch_add(1, Ordering::Relaxed);
                         self.state = PriorityState::Initial;
                         return PollResult::Wait;
+                    }
+
+                    #[cfg(not(test))]
+                    if next.target_hash.is_zero() {
+                        let dep_opt = state_mutex
+                            .lock()
+                            .candidate_accounts
+                            .next_dependency_for_account(&next.account);
+                        if let Some(dep_hash) = dep_opt {
+                            if self.query_factory.block_exists(&dep_hash) {
+                                let mut state = state_mutex.lock();
+                                state.candidate_accounts.unblock_hash(&dep_hash);
+                                if state
+                                    .candidate_accounts
+                                    .count_by_dependency_account(&next.account)
+                                    > 0
+                                {
+                                    state.candidate_accounts.reset_last_request(&next.account);
+                                    state.candidate_accounts.priority_set_safe(&next.account);
+                                } else {
+                                    state.candidate_accounts.priority_erase(&next.account);
+                                }
+                                state.scoring.request_finished(channel.channel_id());
+                                self.state = PriorityState::Initial;
+                                continue;
+                            } else if next.fails > 0 {
+                                next.target_hash = dep_hash;
+                            }
+                        }
                     }
 
                     #[cfg(not(test))]
@@ -160,14 +189,15 @@ impl PriorityRequester {
                     } else {
                         self.query_factory.pull_type_decider.decide_pull_type()
                     };
+                    let heal = next.fails > 0;
                     let (head, confirmed_frontier) = match pull_type {
                         crate::bootstrap::state::PullType::Optimistic => (
-                            self.query_factory.get_account_head(&next.account),
+                            self.query_factory.get_account_head(&next.account, heal),
                             rsnano_core::BlockHash::zero(),
                         ),
-                        crate::bootstrap::state::PullType::Safe => {
-                            self.query_factory.get_account_info(&next.account)
-                        }
+                        crate::bootstrap::state::PullType::Safe => self
+                            .query_factory
+                            .get_account_info_for_pull(&next.account, heal),
                     };
                     let query = self.query_factory.create_priority_query(
                         &next,

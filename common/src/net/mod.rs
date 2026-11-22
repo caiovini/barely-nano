@@ -30,6 +30,8 @@ pub struct BareMetalNetConfig {
     pub rpc_enable_control: bool,
     pub dashboard_port: u16,
     pub dashboard_enable: bool,
+    pub dashboard_wallet_enabled: bool,
+    pub dashboard_pos_enable: bool,
 }
 
 impl Default for BareMetalNetConfig {
@@ -46,6 +48,8 @@ impl Default for BareMetalNetConfig {
             rpc_enable_control: true,
             dashboard_port: 7080,
             dashboard_enable: true,
+            dashboard_wallet_enabled: true,
+            dashboard_pos_enable: true,
         }
     }
 }
@@ -62,6 +66,8 @@ pub static NET_CONFIG: Mutex<BareMetalNetConfig> = Mutex::new(BareMetalNetConfig
     rpc_enable_control: true,
     dashboard_port: 7080,
     dashboard_enable: true,
+    dashboard_wallet_enabled: true,
+    dashboard_pos_enable: true,
 });
 
 pub fn set_net_config(cfg: BareMetalNetConfig) {
@@ -143,6 +149,7 @@ impl<'b> smoltcp::phy::TxToken for NetTxToken<'b> {
 }
 
 pub const DASHBOARD_SOCKET_COUNT: usize = 6;
+pub const RPC_SOCKET_COUNT: usize = 8;
 
 pub struct NetworkContext<'a> {
     pub iface: Interface,
@@ -153,7 +160,7 @@ pub struct NetworkContext<'a> {
     pub dns_handle: smoltcp::iface::SocketHandle,
     pub peering_handle: smoltcp::iface::SocketHandle,
     pub udp_handle: smoltcp::iface::SocketHandle,
-    pub rpc_handle: smoltcp::iface::SocketHandle,
+    pub rpc_handles: [smoltcp::iface::SocketHandle; RPC_SOCKET_COUNT],
     pub dashboard_handles: [smoltcp::iface::SocketHandle; DASHBOARD_SOCKET_COUNT],
     pub sockets_to_drop: alloc::vec::Vec<smoltcp::iface::SocketHandle>,
 }
@@ -457,13 +464,15 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let udp_socket = smoltcp::socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
         let udp_handle = sockets.add(udp_socket);
 
-        let tcp_rx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
-        let tcp_tx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
-        let mut tcp_rpc = TcpSocket::new(tcp_rx_buffer_3, tcp_tx_buffer_3);
-        if net_cfg.rpc_enable {
-            let _ = tcp_rpc.listen(net_cfg.rpc_port);
-        }
-        let rpc_handle = sockets.add(tcp_rpc);
+        let rpc_handles = core::array::from_fn(|_| {
+            let tcp_rx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
+            let tcp_tx_buffer_3 = TcpSocketBuffer::new(vec![0; 65535]);
+            let mut tcp_rpc = TcpSocket::new(tcp_rx_buffer_3, tcp_tx_buffer_3);
+            if net_cfg.rpc_enable {
+                let _ = tcp_rpc.listen(net_cfg.rpc_port);
+            }
+            sockets.add(tcp_rpc)
+        });
 
         let dashboard_handles = core::array::from_fn(|_| {
             let tcp_rx_buffer_4 = TcpSocketBuffer::new(vec![0; 131072]);
@@ -484,7 +493,7 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
             dns_handle,
             peering_handle,
             udp_handle,
-            rpc_handle,
+            rpc_handles,
             dashboard_handles,
             sockets_to_drop: alloc::vec::Vec::new(),
         });

@@ -10,6 +10,7 @@ use rsnano_rpc_messages::{
 impl RpcCommandHandler {
     pub(crate) fn block_info(&self, args: BlockInfoArgs) -> anyhow::Result<BlockInfoResponse> {
         let include_linked_account = unwrap_bool_or_false(args.include_linked_account);
+        let json_block = unwrap_bool_or_false(args.json_block);
         let any = self.node.ledger.any();
         let block = any
             .detailed_block(&args.hash)
@@ -24,6 +25,13 @@ impl RpcCommandHandler {
             None
         };
 
+        let repr = block.block.json_representation();
+        let contents = if json_block {
+            serde_json::to_value(&repr).unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::String(serde_json::to_string(&repr).unwrap_or_default())
+        };
+
         Ok(BlockInfoResponse {
             block_account: block.block.account(),
             amount: block.amount,
@@ -32,11 +40,12 @@ impl RpcCommandHandler {
             local_timestamp: UnixTimestamp::from(block.block.timestamp()).as_u64().into(),
             successor: any.block_successor(&block.block.hash()).unwrap_or_default(),
             confirmed: block.confirmed.into(),
-            contents: block.block.json_representation(),
+            contents,
             subtype: Self::subtype_for(&block.block),
             source_account: None,
             receive_hash: None,
             receivable: None,
+            pending: None,
             linked_account,
         })
     }

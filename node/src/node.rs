@@ -177,18 +177,12 @@ impl NodeArgs {
 
 impl Node {
     pub fn tick(&self) {
-        if self.active.read().len() < 1024 && self.ledger.backlog_count() > 0 {
-            if let Some(mut guard) = self.backlog_scan.try_lock() {
-                guard.run_once();
-            }
-        }
         if self.block_processor.total_queue_len() <= 1024
             || self.ledger.backlog_count() >= 80_000
         {
             self.bounded_backlog.run_scan_once();
         }
         self.bounded_backlog.run_once();
-        self.election_schedulers.run_once();
 
         let cancel_token = rsnano_core::utils::CancellationToken::new();
         if let Some(mut guard) = self.block_rate_calculator.try_lock() {

@@ -268,8 +268,8 @@ impl NanoDataReceiver {
 impl DataReceiver for NanoDataReceiver {
     fn receive(&mut self, data: &[u8]) -> ReceiveResult {
         kernel_common::uart::putchar(b'i');
-        self.message_deserializer.push(data);
-        while let Some(result) = self.message_deserializer.try_deserialize() {
+        let mut remaining = data;
+        while let Some(result) = self.message_deserializer.next_from_slice(&mut remaining) {
             let result = match result {
                 Ok(msg) => {
                     kernel_common::uart::putchar(b'm');
@@ -299,6 +299,9 @@ impl DataReceiver for NanoDataReceiver {
             };
 
             if !matches!(result, ReceiveResult::Continue) {
+                if !remaining.is_empty() {
+                    self.message_deserializer.push(remaining);
+                }
                 return result;
             }
         }

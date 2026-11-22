@@ -34,7 +34,7 @@ impl PeerSession {
         let _ = stream.set_nodelay(true);
 
         let protocol = ProtocolInfo::default_for(network);
-        let node_id_key = PrivateKey::from(RawKey::from(12345));
+        let node_id_key = PrivateKey::from(RawKey::from(rand::random::<u64>() | 1));
 
         Self::handshake(&mut stream, protocol, genesis_hash, node_id_key).await?;
 
@@ -134,6 +134,7 @@ impl PeerSession {
         let start = Instant::now();
         let mut sent_count = 0;
         let mut write_buf = Vec::with_capacity(32 * 1024);
+        let mut drain_buf = [0u8; 4096];
 
         let delay_per_block = if rate_bps > 0 {
             Some(Duration::from_secs_f64(1.0 / (rate_bps as f64)))
@@ -147,6 +148,11 @@ impl PeerSession {
             write_buf.extend_from_slice(encoded);
 
             if write_buf.len() >= 16 * 1024 || i + 1 == blocks.len() {
+                while let Ok(n) = self.stream.try_read(&mut drain_buf) {
+                    if n == 0 {
+                        break;
+                    }
+                }
                 self.stream
                     .write_all(&write_buf)
                     .await

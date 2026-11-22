@@ -291,7 +291,15 @@ impl StatsSource for BlockProcessorQueue {
 
 impl ContainerInfoProvider for BlockProcessorQueue {
     fn container_info(&self) -> ContainerInfo {
-        self.queue.lock().process_queue.container_info()
+        #[cfg(test)]
+        let Some(guard) = Some(self.queue.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.queue.try_lock() else {
+            return ContainerInfo::default();
+        };
+        guard.process_queue.container_info()
     }
 }
 

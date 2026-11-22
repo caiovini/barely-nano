@@ -178,7 +178,14 @@ impl VoteGenerator {
         let candidates_count;
         let requests_count;
         {
-            let guard = self.shared_state.queues.lock();
+            #[cfg(test)]
+            let Some(guard) = Some(self.shared_state.queues.lock()) else {
+                unreachable!()
+            };
+            #[cfg(not(test))]
+            let Some(guard) = self.shared_state.queues.try_lock() else {
+                return ContainerInfo::default();
+            };
             candidates_count = guard.candidates.len();
             requests_count = guard.requests.len();
         }

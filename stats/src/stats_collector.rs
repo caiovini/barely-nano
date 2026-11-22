@@ -90,7 +90,12 @@ where
     T: StatsSource,
 {
     fn collect_stats(&self, result: &mut StatsCollection) {
-        self.lock().collect_stats(result)
+        #[cfg(test)]
+        self.lock().collect_stats(result);
+        #[cfg(not(test))]
+        if let Some(guard) = self.try_lock() {
+            guard.collect_stats(result);
+        }
     }
 }
 
@@ -99,7 +104,12 @@ where
     T: StatsSource,
 {
     fn collect_stats(&self, result: &mut StatsCollection) {
-        self.read().collect_stats(result)
+        #[cfg(test)]
+        self.read().collect_stats(result);
+        #[cfg(not(test))]
+        if let Some(guard) = self.try_read() {
+            guard.collect_stats(result);
+        }
     }
 }
 

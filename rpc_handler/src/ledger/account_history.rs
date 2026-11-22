@@ -35,6 +35,8 @@ pub(crate) struct AccountHistoryHelper<'a> {
 
 impl<'a> AccountHistoryHelper<'a> {
     fn new(ledger: &'a Ledger, args: AccountHistoryArgs) -> Self {
+        let count_raw: u64 = args.count.into();
+        let count = if count_raw == 0 { u64::MAX } else { count_raw };
         Self {
             ledger,
             accounts_to_filter: args.account_filter.unwrap_or_default(),
@@ -43,7 +45,7 @@ impl<'a> AccountHistoryHelper<'a> {
             head: args.head,
             requested_account: args.account,
             output_raw: unwrap_bool_or_false(args.raw),
-            count: args.count.into(),
+            count,
             current_block_hash: BlockHash::zero(),
             account: Account::zero(),
             include_linked_account: unwrap_bool_or_false(args.include_linked_account),

@@ -15,7 +15,7 @@ pub struct AccountInfoArgs {
     pub representative: Option<RpcBool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weight: Option<RpcBool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "pending")]
     pub receivable: Option<RpcBool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_confirmed: Option<RpcBool>,

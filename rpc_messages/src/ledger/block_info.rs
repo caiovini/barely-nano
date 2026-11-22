@@ -1,6 +1,6 @@
 use alloc::string::String;
 use crate::{BlockSubTypeDto, RpcBool, RpcCommand, RpcU64};
-use rsnano_core::{Account, Amount, BlockHash, JsonBlock};
+use rsnano_core::{Account, Amount, BlockHash};
 use serde::{Deserialize, Serialize};
 
 impl RpcCommand {
@@ -32,11 +32,13 @@ pub struct BlockInfoResponse {
     pub local_timestamp: RpcU64,
     pub successor: BlockHash,
     pub confirmed: RpcBool,
-    pub contents: JsonBlock,
+    pub contents: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtype: Option<BlockSubTypeDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receivable: Option<RpcU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<RpcU64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receive_hash: Option<BlockHash>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,9 +69,10 @@ mod tests {
             )
             .unwrap(),
             confirmed: true.into(),
-            contents: Block::new_test_instance().json_representation(),
+            contents: serde_json::to_value(Block::new_test_instance().json_representation()).unwrap(),
             subtype: Some(BlockSubTypeDto::Send),
             receivable: None,
+            pending: None,
             receive_hash: None,
             source_account: None,
             linked_account: None,
@@ -155,7 +158,7 @@ mod tests {
         assert_eq!(deserialized.subtype, Some(BlockSubTypeDto::Send));
         assert_eq!(
             deserialized.contents,
-            Block::new_test_instance().json_representation()
+            serde_json::to_value(Block::new_test_instance().json_representation()).unwrap()
         );
         assert_eq!(deserialized.linked_account, Some("0".to_owned()));
     }

@@ -97,7 +97,7 @@ impl TcpNetworkAdapter {
         let clock_l = self.clock.clone();
         async_rt::spawn_named(async move {
             let channel_l = adapter_l.channel.clone();
-            let mut buffer = [0u8; 4096];
+            let mut buffer = [0u8; 16384];
             let mut consecutive_reads = 0usize;
 
             loop {

@@ -29,7 +29,7 @@ impl BlocksInfoResponse {
 
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BlocksInfoArgs {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "pending")]
     pub receivable: Option<RpcBool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receive_hash: Option<RpcBool>,
@@ -39,6 +39,8 @@ pub struct BlocksInfoArgs {
     pub include_not_found: Option<RpcBool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_linked_account: Option<RpcBool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub json_block: Option<RpcBool>,
     pub hashes: Vec<BlockHash>,
 }
 
@@ -50,6 +52,7 @@ impl From<Vec<BlockHash>> for BlocksInfoArgs {
             source: None,
             include_not_found: None,
             include_linked_account: None,
+            json_block: None,
             hashes: value,
         }
     }

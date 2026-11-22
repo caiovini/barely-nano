@@ -191,7 +191,7 @@ impl BlockAckProcessor {
                         if !forward_start.is_zero() {
                             guard
                                 .candidate_accounts
-                                .set_gap_target(account, forward_start);
+                                .set_forward_gap_target(account, forward_start);
                         } else {
                             guard.candidate_accounts.clear_gap_target(&account);
                         }
@@ -294,6 +294,16 @@ impl BlockAckProcessor {
                     }
                 }
             }
+            if !account.is_zero() && !prev_existing_hash.is_zero() {
+                if self.ledger.store.account.get(&account).is_none() {
+                    let _ = self.ledger.heal_account_from_block(
+                        &account,
+                        prev_existing_hash,
+                        None,
+                        rsnano_core::utils::UnixMillisTimestamp::now(),
+                    );
+                }
+            }
             forward_cursor = last_missing_hash;
             blocks = filtered;
             if blocks.is_empty() {
@@ -310,8 +320,7 @@ impl BlockAckProcessor {
                     } else {
                         prev_existing_hash
                     };
-                    let (head, _) = self.ledger.get_healed_account_frontiers(&account);
-                    if next_target != head {
+                    if next_target != query.hash {
                         let mut guard = self.state.lock();
                         guard
                             .candidate_accounts
@@ -431,6 +440,9 @@ impl BlockAckProcessor {
 
         {
             let mut guard = self.state.lock();
+            if !query.account.is_zero() {
+                guard.candidate_accounts.clear_gap_target(&query.account);
+            }
             match guard.candidate_accounts.priority_down(&query.account) {
                 PriorityDownResult::Deprioritized => {
                     self.stats

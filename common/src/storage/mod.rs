@@ -76,7 +76,7 @@ pub static LOCK_HOLD: [core::sync::atomic::AtomicU64; 16] = [const { core::sync:
 pub static LOCK_ACQ: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 
 #[inline]
-fn current_hart() -> usize {
+pub(crate) fn current_hart() -> usize {
     #[cfg(target_arch = "riscv64")]
     {
         let id: usize;
@@ -230,12 +230,15 @@ pub enum StorageBackend {
 }
 
 pub const HIGH_DRAM_THRESHOLD: usize = 0x8000_0000;
+/// Number of 4 KB pages in the contiguous Bank 0 DMA bounce buffer (`16 * 4 KB = 64 KB`).
+pub const DMA_BOUNCE_PAGES: usize = 16;
 
 pub struct StorageContext {
     pub backend: StorageBackend,
-    /// 64-byte-aligned 4 KB bounce buffer in Bank 0 (< 0x8000_0000) used when transferring frames
-    /// located in High DRAM Bank 1 (>= 0x1_0000_0000) so U-Boot DMA always uses 32-bit addresses.
-    dma_bounce: alloc::boxed::Box<AlignedBlock>,
+    /// 64-byte-aligned 64 KB (`16 x 4 KB`) bounce buffer in Bank 0 (< 0x8000_0000) used when
+    /// transferring single or contiguous runs of frames located in High DRAM Bank 1 (>= 0x1_0000_0000)
+    /// so U-Boot DMA always uses 64-byte aligned buffers.
+    dma_bounce: alloc::boxed::Box<[AlignedBlock; DMA_BOUNCE_PAGES]>,
     /// Isolated backing buffer for wallet pages when running on `StorageBackend::RamDisk`
     /// (empty `Vec` with 0 heap allocation on `StorageBackend::UBoot`).
     wallet_ram: alloc::vec::Vec<u8>,
@@ -282,7 +285,7 @@ impl StorageContext {
     pub fn new_uboot(info: uboot::DeviceInfo) -> Self {
         Self {
             backend: StorageBackend::UBoot(info),
-            dma_bounce: alloc::boxed::Box::new(AlignedBlock::new()),
+            dma_bounce: alloc::boxed::Box::new([AlignedBlock::new(); DMA_BOUNCE_PAGES]),
             wallet_ram: alloc::vec::Vec::new(),
         }
     }
@@ -291,7 +294,7 @@ impl StorageContext {
         let size = size_mb * 1024 * 1024;
         Self {
             backend: StorageBackend::RamDisk(alloc::vec![0; size]),
-            dma_bounce: alloc::boxed::Box::new(AlignedBlock::new()),
+            dma_bounce: alloc::boxed::Box::new([AlignedBlock::new(); DMA_BOUNCE_PAGES]),
             wallet_ram: alloc::vec::Vec::new(),
         }
     }
@@ -310,9 +313,9 @@ impl StorageContext {
                 }
                 let count = 8;
                 if (buf.as_ptr() as usize) % 64 != 0 {
-                    let ret = uboot::dev_read(info, lba, count, self.dma_bounce.bytes.as_mut_ptr());
+                    let ret = uboot::dev_read(info, lba, count, self.dma_bounce[0].bytes.as_mut_ptr());
                     if ret > 0 {
-                        buf[..4096].copy_from_slice(&self.dma_bounce.bytes);
+                        buf[..4096].copy_from_slice(&self.dma_bounce[0].bytes);
                         Ok(())
                     } else {
                         Err(StorageError::IoError)
@@ -353,8 +356,8 @@ impl StorageContext {
                 }
                 let count = 8;
                 let ret = if (buf.as_ptr() as usize) % 64 != 0 {
-                    self.dma_bounce.bytes.copy_from_slice(&buf[..4096]);
-                    uboot::dev_write(info, lba, count, self.dma_bounce.bytes.as_ptr())
+                    self.dma_bounce[0].bytes.copy_from_slice(&buf[..4096]);
+                    uboot::dev_write(info, lba, count, self.dma_bounce[0].bytes.as_ptr())
                 } else {
                     uboot::dev_write(info, lba, count, buf.as_ptr())
                 };
@@ -480,9 +483,9 @@ impl StorageContext {
                 let lba = (block_id * 8) as u64 + STORAGE_BASE_LBA;
                 let count = 8;
                 if (buf.as_ptr() as usize) % 64 != 0 {
-                    let ret = uboot::dev_read(info, lba, count, self.dma_bounce.bytes.as_mut_ptr());
+                    let ret = uboot::dev_read(info, lba, count, self.dma_bounce[0].bytes.as_mut_ptr());
                     if ret > 0 {
-                        buf[..4096].copy_from_slice(&self.dma_bounce.bytes);
+                        buf[..4096].copy_from_slice(&self.dma_bounce[0].bytes);
                         Ok(())
                     } else {
                         Err(StorageError::IoError)
@@ -508,14 +511,63 @@ impl StorageContext {
         }
     }
 
+    /// Reads `dests.len()` (`1..=DMA_BOUNCE_PAGES`) consecutive 4 KB pages starting at `start_block_id`
+    /// in a single NVMe command into the Bank 0 bounce buffer and copies each page into its target frame.
+    ///
+    /// # Safety
+    /// Each pointer in `dests` must point to a valid, exclusively owned `[u8; 4096]` frame buffer.
+    pub unsafe fn read_contiguous_into_frames(
+        &mut self,
+        start_block_id: usize,
+        dests: &[*mut [u8; 4096]],
+    ) -> Result<(), StorageError> {
+        let n = dests.len();
+        if n == 0 || n > DMA_BOUNCE_PAGES {
+            return Err(StorageError::IoError);
+        }
+        match &mut self.backend {
+            StorageBackend::UBoot(info) => {
+                let lba = (start_block_id * 8) as u64 + STORAGE_BASE_LBA;
+                let count = (n * 8) as u64;
+                let ret = uboot::dev_read(
+                    info,
+                    lba,
+                    count,
+                    self.dma_bounce.as_mut_ptr() as *mut u8,
+                );
+                if ret > 0 {
+                    for (i, &dst) in dests.iter().enumerate() {
+                        (*dst).copy_from_slice(&self.dma_bounce[i].bytes);
+                    }
+                    Ok(())
+                } else {
+                    Err(StorageError::IoError)
+                }
+            }
+            StorageBackend::RamDisk(vec) => {
+                let offset = start_block_id * 4096;
+                let total_bytes = n * 4096;
+                if offset + total_bytes <= vec.len() {
+                    for (i, &dst) in dests.iter().enumerate() {
+                        let p_off = offset + i * 4096;
+                        (*dst).copy_from_slice(&vec[p_off..p_off + 4096]);
+                    }
+                    Ok(())
+                } else {
+                    Err(StorageError::IoError)
+                }
+            }
+        }
+    }
+
     pub fn write_block(&mut self, block_id: usize, buf: &[u8]) -> Result<(), StorageError> {
         match &mut self.backend {
             StorageBackend::UBoot(info) => {
                 let lba = (block_id * 8) as u64 + STORAGE_BASE_LBA;
                 let count = 8;
                 let ret = if (buf.as_ptr() as usize) % 64 != 0 {
-                    self.dma_bounce.bytes.copy_from_slice(&buf[..4096]);
-                    uboot::dev_write(info, lba, count, self.dma_bounce.bytes.as_ptr())
+                    self.dma_bounce[0].bytes.copy_from_slice(&buf[..4096]);
+                    uboot::dev_write(info, lba, count, self.dma_bounce[0].bytes.as_ptr())
                 } else {
                     uboot::dev_write(info, lba, count, buf.as_ptr())
                 };

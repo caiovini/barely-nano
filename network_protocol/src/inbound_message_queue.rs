@@ -132,7 +132,14 @@ impl Default for InboundMessageQueue {
 
 impl ContainerInfoProvider for InboundMessageQueue {
     fn container_info(&self) -> ContainerInfo {
-        let guard = self.state.lock();
+        #[cfg(test)]
+        let Some(guard) = Some(self.state.lock()) else {
+            unreachable!()
+        };
+        #[cfg(not(test))]
+        let Some(guard) = self.state.try_lock() else {
+            return ContainerInfo::default();
+        };
         ContainerInfo::builder()
             .node("queue", guard.queue.container_info())
             .finish()

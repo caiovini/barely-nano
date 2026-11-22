@@ -582,9 +582,9 @@ canvas {
         </h2>
         <div style="display:flex;flex-direction:column;gap:12px">
           <div>
-            <label>Merchant Settlement Account (Final Destination)</label>
+            <label>Merchant Settlement Account (Final Destination • Masked for Privacy)</label>
             <div class="input-group">
-              <input id="pos-merchant-dest" placeholder="nano_1... (where payment will be swept)" onchange="savePosSettings()">
+              <input id="pos-merchant-dest" placeholder="Paste nano_1... address (auto-masked on screen)" autocomplete="off" spellcheck="false" onfocus="onPosMerchantDestFocus(this)" onblur="onPosMerchantDestBlur(this)" oninput="onPosMerchantDestInput(this)" onchange="savePosSettings()">
               <button class="btn btn-sec" onclick="fillPosFromWallet()" title="Use selected account from Wallet tab">From Wallet</button>
             </div>
           </div>
@@ -678,13 +678,17 @@ canvas {
         <span>PoS Ephemeral Payment History</span>
         <div class="btn-row">
           <span class="pill" id="pos-hist-count">0 Invoices</span>
-          <button class="btn btn-sec" style="height:28px;padding:0 10px;font-size:12px" onclick="clearPosHistory()">Clear History</button>
+          <button class="btn btn-green" id="pos-batch-sweep-btn" style="height:28px;padding:0 10px;font-size:12px" onclick="sweepSelectedHistoryInvoices()" disabled>⚡ Sweep Selected (<span id="pos-selected-count">0</span>)</button>
+          <button class="btn btn-sec" style="height:28px;padding:0 10px;font-size:12px" onclick="clearPosHistory()" title="Clears only cancelled and swept invoices; unswept invoices are protected">Clear Cancelled / Swept</button>
         </div>
       </h2>
       <div class="table-wrap" style="max-height:240px;overflow-y:auto">
         <table>
           <thead>
             <tr>
+              <th style="width:32px;text-align:center">
+                <input type="checkbox" id="pos-select-all-chk" style="width:auto;height:auto;cursor:pointer" onchange="toggleSelectAllPosInvoices(this.checked)" title="Select all unswept invoices for batch sweep">
+              </th>
               <th>Time</th>
               <th>Order / Reference</th>
               <th>Amount (NANO)</th>
@@ -694,7 +698,7 @@ canvas {
             </tr>
           </thead>
           <tbody id="pos-history-tbody">
-            <tr><td colspan="6" style="color:var(--muted)">No PoS invoices generated yet.</td></tr>
+            <tr><td colspan="7" style="color:var(--muted)">No PoS invoices generated yet.</td></tr>
           </tbody>
         </table>
       </div>
@@ -808,7 +812,11 @@ let cpsHistory = [];
 let wsConn = null;
 let wasmExports = null;
 let wasmMemory = null;
+let wasmModuleBytes = null;
 let wasmLoading = false;
+let powWorkerPool = [];
+let powJobSeq = 0;
+let powQueueChain = Promise.resolve();
 let metricsInFlight = false;
 let stressRunning = false;
 let stressAbort = false;
@@ -900,6 +908,27 @@ async function pollMetrics() {
     const netStr = (m.network || 'live').toLowerCase();
     document.getElementById('hdr-net').textContent = 'NET: ' + netStr.toUpperCase();
     const isDev = netStr === 'dev';
+    const walletEnabled = m.dashboard_wallet_enabled !== false;
+    const posEnabled = m.dashboard_pos_enable !== false;
+
+    const walletTabBtn = document.getElementById('nav-wallet-btn');
+    if (walletTabBtn) {
+      walletTabBtn.style.display = walletEnabled ? '' : 'none';
+      if (!walletEnabled && document.getElementById('tab-wallet').classList.contains('active')) {
+        switchTab('metrics', document.getElementById('nav-metrics-btn'));
+      }
+    }
+    const posTabBtn = document.getElementById('nav-pos-btn');
+    if (posTabBtn) {
+      posTabBtn.style.display = posEnabled ? '' : 'none';
+      if (!posEnabled && document.getElementById('tab-pos').classList.contains('active')) {
+        if (posPollTimer) {
+          clearInterval(posPollTimer);
+          posPollTimer = null;
+        }
+        switchTab('metrics', document.getElementById('nav-metrics-btn'));
+      }
+    }
     const stressTabBtn = document.getElementById('nav-stress-btn');
     if (stressTabBtn) {
       stressTabBtn.style.display = isDev ? '' : 'none';
@@ -1163,24 +1192,179 @@ async function deriveKeypairFromPrivateHex(privHex) {
   };
 }
 
-async function computeWasmWorkForRoot(rootHex) {
+function getPowThresholdHiLo(isReceive, customHi) {
+  if (typeof customHi === 'number' && customHi > 0) {
+    return { hi: customHi >>> 0, lo: 0x00000000 };
+  }
+  const net = ((lastMetrics && lastMetrics.network) || 'live').toLowerCase();
+  if (net === 'dev') {
+    // WorkThresholds::publish_dev(): epoch_2_receive = 0xf0000000_00000000, epoch_2 = 0xffc00000_00000000
+    return { hi: (isReceive ? 0xf0000000 : 0xffc00000) >>> 0, lo: 0x00000000 };
+  }
+  if (net === 'beta') {
+    // WorkThresholds::publish_beta(): epoch_2_receive = 0xffffe000_00000000, epoch_2 = 0xfffff000_00000000
+    return { hi: (isReceive ? 0xffffe000 : 0xfffff000) >>> 0, lo: 0x00000000 };
+  }
+  // WorkThresholds::publish_full() (live):
+  // - epoch_2_receive (open / receive): 0xfffffe00_00000000 (~8.39M avg hashes)
+  // - epoch_2 (send / change / sweep):  0xfffffff8_00000000 (~536.9M avg hashes)
+  return { hi: (isReceive ? 0xfffffe00 : 0xfffffff8) >>> 0, lo: 0x00000000 };
+}
+
+function ensurePowWorkerPool() {
+  if (powWorkerPool.length > 0 || !wasmModuleBytes || typeof Worker === 'undefined' || typeof Blob === 'undefined') {
+    return powWorkerPool;
+  }
+  try {
+    const workerCode = `
+      let exports = null;
+      let mem = null;
+      let activeJobId = 0;
+
+      function bytesToHex(bytes) {
+        return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+      }
+
+      function stepLoop(jobId, hi, lo) {
+        if (activeJobId !== jobId || !exports) return;
+        const found = exports.wasm_compute_pow_step(hi >>> 0, lo >>> 0, 262144);
+        if (found === 1) {
+          activeJobId = 0;
+          const outPtr = exports.wasm_get_pow_out_ptr();
+          const workHex = bytesToHex(new Uint8Array(mem.buffer, outPtr, 8));
+          self.postMessage({ type: 'found', jobId, workHex });
+          return;
+        }
+        setTimeout(() => stepLoop(jobId, hi, lo), 0);
+      }
+
+      self.onmessage = async (ev) => {
+        const msg = ev.data;
+        if (msg.type === 'init') {
+          const { instance } = await WebAssembly.instantiate(msg.wasmBytes, {});
+          exports = instance.exports;
+          mem = exports.memory;
+          exports.wasm_init();
+          if (exports.wasm_seed_pow_rng) {
+            exports.wasm_seed_pow_rng(msg.seedHi >>> 0, msg.seedLo >>> 0);
+          }
+          self.postMessage({ type: 'ready' });
+        } else if (msg.type === 'start') {
+          activeJobId = msg.jobId;
+          if (!exports) return;
+          if (exports.wasm_seed_pow_rng) {
+            exports.wasm_seed_pow_rng(msg.seedHi >>> 0, msg.seedLo >>> 0);
+          }
+          const rootPtr = exports.wasm_get_pow_root_ptr();
+          new Uint8Array(mem.buffer, rootPtr, 32).set(msg.rootBytes);
+          stepLoop(msg.jobId, msg.hi, msg.lo);
+        } else if (msg.type === 'stop') {
+          if (activeJobId === msg.jobId) activeJobId = 0;
+        }
+      };
+    `;
+    const blobUrl = URL.createObjectURL(new Blob([workerCode], { type: 'application/javascript' }));
+    const count = Math.min(16, Math.max(2, Number(navigator.hardwareConcurrency) || 4));
+    for (let i = 0; i < count; i++) {
+      const w = new Worker(blobUrl);
+      const seedBuf = new Uint32Array(2);
+      window.crypto.getRandomValues(seedBuf);
+      w._readyPromise = new Promise(resolve => {
+        const onInit = (ev) => {
+          if (ev.data && ev.data.type === 'ready') {
+            w.removeEventListener('message', onInit);
+            resolve();
+          }
+        };
+        w.addEventListener('message', onInit);
+      });
+      w.postMessage({
+        type: 'init',
+        wasmBytes: wasmModuleBytes,
+        seedHi: seedBuf[0] >>> 0,
+        seedLo: (seedBuf[1] | 1) >>> 0
+      });
+      powWorkerPool.push(w);
+    }
+  } catch (_) {
+    powWorkerPool = [];
+  }
+  return powWorkerPool;
+}
+
+async function computeWasmWorkForRoot(rootHex, isReceive = false, customHi = null) {
   if (!wasmExports) await initStressWasm();
   if (!wasmExports || !rootHex || rootHex.length !== 64) return null;
-  const rootBytes = hexToBytes(rootHex);
-  const rootPtr = wasmExports.wasm_get_pow_root_ptr();
-  new Uint8Array(wasmMemory.buffer, rootPtr, 32).set(rootBytes);
-  const isDev = (lastMetrics && lastMetrics.network === 'dev');
-  const hi = isDev ? 0xffc00000 : 0xffffffc0;
-  const lo = 0x00000000;
-  for (let round = 0; round < 500; round++) {
-    const found = wasmExports.wasm_compute_pow_step(hi, lo, 16384);
-    if (found === 1) {
-      const outPtr = wasmExports.wasm_get_pow_out_ptr();
-      return bytesToHex(new Uint8Array(wasmMemory.buffer, outPtr, 8));
+
+  // Serialize PoW jobs so concurrent calls (e.g. background Open precompute vs Sweep) never collide
+  const runJob = async () => {
+    const rootBytes = hexToBytes(rootHex);
+    const { hi, lo } = getPowThresholdHiLo(!!isReceive, customHi);
+    const workers = ensurePowWorkerPool();
+
+    if (workers.length > 0) {
+      await Promise.all(workers.map(w => w._readyPromise));
+      return await new Promise(resolve => {
+        const jobId = ++powJobSeq;
+        let settled = false;
+        const listeners = [];
+
+        const cleanup = () => {
+          workers.forEach((w, idx) => {
+            if (listeners[idx]) w.removeEventListener('message', listeners[idx]);
+            w.postMessage({ type: 'stop', jobId });
+          });
+        };
+
+        workers.forEach((w, idx) => {
+          const seedBuf = new Uint32Array(2);
+          window.crypto.getRandomValues(seedBuf);
+          const onMsg = (ev) => {
+            if (!settled && ev.data && ev.data.type === 'found' && ev.data.jobId === jobId) {
+              settled = true;
+              cleanup();
+              resolve(ev.data.workHex);
+            }
+          };
+          listeners[idx] = onMsg;
+          w.addEventListener('message', onMsg);
+          w.postMessage({
+            type: 'start',
+            jobId,
+            rootBytes,
+            hi,
+            lo,
+            seedHi: seedBuf[0] >>> 0,
+            seedLo: (seedBuf[1] | ((idx + 1) * 2 + 1)) >>> 0
+          });
+        });
+      });
     }
-    await new Promise(r => setTimeout(r, 0));
-  }
-  return null;
+
+    // Fallback: time-sliced main-thread WASM execution (no premature 500-round abort)
+    const rootPtr = wasmExports.wasm_get_pow_root_ptr();
+    new Uint8Array(wasmMemory.buffer, rootPtr, 32).set(rootBytes);
+    if (wasmExports.wasm_seed_pow_rng) {
+      const seedBuf = new Uint32Array(2);
+      window.crypto.getRandomValues(seedBuf);
+      wasmExports.wasm_seed_pow_rng(seedBuf[0] >>> 0, (seedBuf[1] | 1) >>> 0);
+    }
+    while (true) {
+      const sliceStart = performance.now();
+      while (performance.now() - sliceStart < 32) {
+        const found = wasmExports.wasm_compute_pow_step(hi, lo, 65536);
+        if (found === 1) {
+          const outPtr = wasmExports.wasm_get_pow_out_ptr();
+          return bytesToHex(new Uint8Array(wasmMemory.buffer, outPtr, 8));
+        }
+      }
+      await new Promise(r => setTimeout(r, 0));
+    }
+  };
+
+  const next = powQueueChain.then(runJob, runJob);
+  powQueueChain = next.catch(() => {});
+  return await next;
 }
 
 async function signStateBlockInBrowser({
@@ -1190,7 +1374,8 @@ async function signStateBlockInBrowser({
   representative,
   balanceRawStr,
   linkHex,
-  workHex
+  workHex,
+  isReceive
 }) {
   if (!wasmExports) await initStressWasm();
   const accPubHex = decodeNanoAccountToPubHex(account);
@@ -1216,8 +1401,13 @@ async function signStateBlockInBrowser({
 
   const hashHex = bytesToHex(new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_signed_hash_ptr(), 32));
   const sigHex = bytesToHex(new Uint8Array(wasmMemory.buffer, wasmExports.wasm_get_signed_sig_ptr(), 64));
-  const powRoot = prevHex === '0'.repeat(64) ? accPubHex : prevHex;
-  const finalWork = workHex || (await computeWasmWorkForRoot(powRoot)) || '0000000000000000';
+  const isOpenBlock = prevHex === '0'.repeat(64);
+  const powRoot = isOpenBlock ? accPubHex : prevHex;
+  const useReceiveThreshold = isOpenBlock || !!isReceive;
+  const finalWork = workHex || (await computeWasmWorkForRoot(powRoot, useReceiveThreshold));
+  if (!finalWork || finalWork === '0000000000000000') {
+    throw new Error('Failed to generate valid Proof-of-Work in browser WASM');
+  }
 
   return {
     hash: hashHex,
@@ -1553,15 +1743,26 @@ async function receiveAccountPendingInBrowser(wallet, accEntry) {
       previousHex: prevHash,
       representative: repAccount,
       balanceRawStr: newBal,
-      linkHex: sendHash
+      linkHex: sendHash,
+      isReceive: true
     });
 
-    const proc = await rpcCall({
+    let proc = await rpcCall({
       action: 'process',
       json_block: 'true',
       subtype: hasFrontier ? 'receive' : 'open',
       block: signed.block
     });
+    if (proc && proc.error && proc.error.toLowerCase().includes('insufficient')) {
+      const powRoot = hasFrontier ? prevHash : accEntry.publicKey;
+      signed.block.work = await computeWasmWorkForRoot(powRoot, false, 0xffffffc0);
+      proc = await rpcCall({
+        action: 'process',
+        json_block: 'true',
+        subtype: hasFrontier ? 'receive' : 'open',
+        block: signed.block
+      });
+    }
     if (proc && proc.hash) {
       received++;
     }
@@ -1659,6 +1860,80 @@ let posActive = null;
 let posPollTimer = null;
 let posBusy = false;
 let posHistory = [];
+let posMerchantDestFull = '';
+
+function isFullNanoAddress(str) {
+  str = (str || '').trim();
+  return /^(nano_|nano-|xrb_|xrb-)[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(str);
+}
+
+function maskNanoAddress(addr) {
+  addr = (addr || '').trim();
+  if (!addr || addr.length < 24) return addr;
+  return `${addr.slice(0, 12)}...••••••••••••...${addr.slice(-6)}`;
+}
+
+function setPosMerchantDest(fullAddr) {
+  fullAddr = (fullAddr || '').trim();
+  const input = document.getElementById('pos-merchant-dest');
+  if (isFullNanoAddress(fullAddr)) {
+    posMerchantDestFull = fullAddr;
+    try {
+      localStorage.setItem('barely_nano_pos_dest', fullAddr);
+    } catch (_) {}
+    if (input) input.value = maskNanoAddress(fullAddr);
+  } else if (!fullAddr) {
+    posMerchantDestFull = '';
+    try {
+      localStorage.removeItem('barely_nano_pos_dest');
+    } catch (_) {}
+    if (input) input.value = '';
+  } else if (input && posMerchantDestFull) {
+    input.value = maskNanoAddress(posMerchantDestFull);
+  }
+}
+
+function getPosMerchantDest() {
+  const input = document.getElementById('pos-merchant-dest');
+  const rawVal = input ? input.value.trim() : '';
+  if (isFullNanoAddress(rawVal)) {
+    setPosMerchantDest(rawVal);
+  }
+  return posMerchantDestFull;
+}
+
+function onPosMerchantDestFocus(input) {
+  if (posMerchantDestFull && input.value === maskNanoAddress(posMerchantDestFull)) {
+    input.value = '';
+    input.placeholder = `Current: ${maskNanoAddress(posMerchantDestFull)} (paste new nano_... to change)`;
+  }
+}
+
+function onPosMerchantDestInput(input) {
+  const val = (input.value || '').trim();
+  if (isFullNanoAddress(val)) {
+    setPosMerchantDest(val);
+    input.blur();
+    updatePosAmountLive();
+  }
+}
+
+function onPosMerchantDestBlur(input) {
+  const val = (input.value || '').trim();
+  if (isFullNanoAddress(val)) {
+    setPosMerchantDest(val);
+  } else if (val === '' && posMerchantDestFull) {
+    input.value = maskNanoAddress(posMerchantDestFull);
+  } else if (val !== '' && !val.includes('•')) {
+    if (posMerchantDestFull) {
+      input.value = maskNanoAddress(posMerchantDestFull);
+    } else {
+      input.value = '';
+    }
+  }
+  input.placeholder = 'Paste nano_1... address (auto-masked on screen)';
+  updatePosAmountLive();
+}
 
 function posLog(msg) {
   const el = document.getElementById('pos-log');
@@ -1685,18 +1960,15 @@ function updatePosAmountLive() {
   posActive.amountNano = amountNano;
   posActive.uri = `nano:${posActive.account}?amount=${amountRaw}`;
   document.getElementById('pos-eph-uri').value = posActive.uri;
-  const merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+  const merchantDest = getPosMerchantDest();
   posActive.merchantDest = merchantDest;
-  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + maskNanoAddress(merchantDest) : 'Hold in Ephemeral'}`;
   renderQrCodeToCanvas(posActive.uri, document.getElementById('pos-qr'));
   savePosHistory();
 }
 
 function savePosSettings() {
-  try {
-    const dest = document.getElementById('pos-merchant-dest').value.trim();
-    if (dest) localStorage.setItem('barely_nano_pos_dest', dest);
-  } catch (_) {}
+  getPosMerchantDest();
   updatePosAmountLive();
 }
 
@@ -1710,11 +1982,12 @@ function savePosHistory() {
 async function initPosTab() {
   try {
     const savedDest = localStorage.getItem('barely_nano_pos_dest');
-    const destInput = document.getElementById('pos-merchant-dest');
-    if (savedDest && !destInput.value) {
-      destInput.value = savedDest;
-    } else if (!destInput.value) {
+    if (savedDest && isFullNanoAddress(savedDest) && !posMerchantDestFull) {
+      setPosMerchantDest(savedDest);
+    } else if (!posMerchantDestFull) {
       await fillPosFromWallet();
+    } else {
+      setPosMerchantDest(posMerchantDestFull);
     }
     const savedHist = localStorage.getItem('barely_nano_pos_history');
     if (savedHist && posHistory.length === 0) {
@@ -1723,20 +1996,82 @@ async function initPosTab() {
   } catch (_) {}
   renderPosHistory();
   if (!posActive) {
-    createPosPayment();
+    const existingWaiting = posHistory.find(inv => inv && inv.status === 'WAITING');
+    if (existingWaiting) {
+      activateWaitingPosInvoice(existingWaiting);
+    } else {
+      createPosPayment();
+    }
   }
+}
+
+function activateWaitingPosInvoice(inv) {
+  if (!inv) return;
+  if (posPollTimer) {
+    clearInterval(posPollTimer);
+    posPollTimer = null;
+  }
+  posActive = inv;
+  const merchantDest = (inv.merchantDest && isFullNanoAddress(inv.merchantDest))
+    ? inv.merchantDest
+    : getPosMerchantDest();
+  inv.merchantDest = merchantDest;
+
+  document.getElementById('pos-amount').value = inv.amountNano || '0.1';
+  document.getElementById('pos-memo').value = inv.memo || '';
+  document.getElementById('pos-disp-amount').textContent = inv.amountNano;
+  document.getElementById('pos-disp-memo').textContent = `${inv.memo} • ${merchantDest ? 'Sweep -> ' + maskNanoAddress(merchantDest) : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-eph-account').value = inv.account;
+  document.getElementById('pos-eph-uri').value = inv.uri;
+  document.getElementById('pos-privkey-box').style.display = 'none';
+  document.getElementById('pos-cancel-btn').disabled = false;
+  document.getElementById('pos-check-btn').disabled = false;
+  document.getElementById('pos-key-btn').disabled = false;
+  document.getElementById('pos-progress').style.width = '25%';
+
+  const badge = document.getElementById('pos-state-badge');
+  badge.textContent = 'WAITING FOR PAYMENT';
+  badge.className = 'badge warn';
+
+  renderQrCodeToCanvas(inv.uri, document.getElementById('pos-qr'));
+  posLog(`Resumed waiting invoice ${inv.memo}: ${inv.account}`);
+
+  const powStatusEl = document.getElementById('pos-pow-status');
+  if (inv.openWork) {
+    powStatusEl.textContent = `Open PoW Ready (${inv.openWork}) ✓`;
+    powStatusEl.style.color = 'var(--green)';
+  } else {
+    powStatusEl.textContent = 'Precomputing Open PoW in WASM...';
+    powStatusEl.style.color = 'var(--accent)';
+    const targetPub = inv.publicKey;
+    computeWasmWorkForRoot(targetPub, true).then(workHex => {
+      if (inv && inv.publicKey === targetPub && workHex) {
+        inv.openWork = workHex;
+        savePosHistory();
+        if (posActive && posActive.publicKey === targetPub) {
+          powStatusEl.textContent = `Open PoW Ready (${workHex}) ✓`;
+          powStatusEl.style.color = 'var(--green)';
+          posLog(`Precomputed Open Block PoW in browser WASM: ${workHex}`);
+        }
+      }
+    });
+  }
+
+  posPollTimer = setInterval(() => {
+    checkAndSweepPosNow();
+  }, 1500);
 }
 
 async function fillPosFromWallet() {
   const sendSel = document.getElementById('w-send-source');
   if (sendSel && sendSel.options.length > 0 && sendSel.value) {
-    document.getElementById('pos-merchant-dest').value = sendSel.value;
+    setPosMerchantDest(sendSel.value);
     savePosSettings();
     return;
   }
   loadBrowserWalletsFromStorage();
   if (browserWallets.length > 0 && browserWallets[0].accounts && browserWallets[0].accounts.length > 0) {
-    document.getElementById('pos-merchant-dest').value = browserWallets[0].accounts[0].account;
+    setPosMerchantDest(browserWallets[0].accounts[0].account);
     savePosSettings();
   }
 }
@@ -1767,11 +2102,11 @@ async function createPosPayment() {
   if (BigInt(amountRaw) <= 0n) {
     return alert('Enter a payment amount greater than 0 NANO');
   }
-  let merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+  let merchantDest = getPosMerchantDest();
   const autoSweep = document.getElementById('pos-autosweep').checked;
   if (autoSweep && !merchantDest) {
     await fillPosFromWallet();
-    merchantDest = document.getElementById('pos-merchant-dest').value.trim();
+    merchantDest = getPosMerchantDest();
   }
   savePosSettings();
 
@@ -1827,7 +2162,7 @@ async function createPosPayment() {
   }
 
   document.getElementById('pos-disp-amount').textContent = posActive.amountNano;
-  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + merchantDest.slice(0, 18) + '...' : 'Hold in Ephemeral'}`;
+  document.getElementById('pos-disp-memo').textContent = `${posActive.memo} • ${merchantDest ? 'Sweep -> ' + maskNanoAddress(merchantDest) : 'Hold in Ephemeral'}`;
   document.getElementById('pos-eph-account').value = posActive.account;
   document.getElementById('pos-eph-uri').value = posActive.uri;
   document.getElementById('pos-privkey-box').style.display = 'none';
@@ -1847,7 +2182,7 @@ async function createPosPayment() {
 
   // Precompute Open-Block PoW in browser WASM so receiving is instant when customer pays!
   document.getElementById('pos-pow-status').textContent = 'Precomputing Open PoW in WASM...';
-  computeWasmWorkForRoot(posActive.publicKey).then(workHex => {
+  computeWasmWorkForRoot(posActive.publicKey, true).then(workHex => {
     if (posActive && posActive.publicKey === keyRes.publicKey && workHex) {
       posActive.openWork = workHex;
       document.getElementById('pos-pow-status').textContent = `Open PoW Ready (${workHex}) ✓`;
@@ -1921,7 +2256,7 @@ async function checkAndSweepPosNow(targetInvoice) {
           ? inv.merchantDest
           : inv.account;
 
-        const workHex = (!hasFrontier && inv.openWork) ? inv.openWork : await computeWasmWorkForRoot(powRoot);
+        const workHex = (!hasFrontier && inv.openWork) ? inv.openWork : await computeWasmWorkForRoot(powRoot, true);
         const signedOpen = await signStateBlockInBrowser({
           privateKeyHex: inv.privateKey,
           account: inv.account,
@@ -1929,15 +2264,26 @@ async function checkAndSweepPosNow(targetInvoice) {
           representative: repAccount,
           balanceRawStr: newBal,
           linkHex: sendHash,
-          workHex
+          workHex,
+          isReceive: true
         });
 
-        const proc = await rpcCall({
+        let proc = await rpcCall({
           action: 'process',
           json_block: 'true',
           subtype: hasFrontier ? 'receive' : 'open',
           block: signedOpen.block
         });
+        if (proc && proc.error && proc.error.toLowerCase().includes('insufficient')) {
+          posLog('Sender is legacy Epoch 1; upgrading Open/Receive PoW threshold...');
+          signedOpen.block.work = await computeWasmWorkForRoot(powRoot, false, 0xffffffc0);
+          proc = await rpcCall({
+            action: 'process',
+            json_block: 'true',
+            subtype: hasFrontier ? 'receive' : 'open',
+            block: signedOpen.block
+          });
+        }
         if (proc && proc.hash) {
           inv.openHash = proc.hash;
           inv.status = 'RECEIVED';
@@ -1956,17 +2302,36 @@ async function checkAndSweepPosNow(targetInvoice) {
       const expectedBal = BigInt(inv.amountRaw || '0');
 
       if (currentBal >= expectedBal || targetInvoice) {
-        if (inv.autoSweep && inv.merchantDest && inv.merchantDest.startsWith('nano_') && inv.merchantDest !== inv.account) {
-          posLog(`Sweeping ${rawToNanoStr(currentBal.toString())} NANO to merchant account ${inv.merchantDest.slice(0, 20)}...`);
-          const sweepWork = await computeWasmWorkForRoot(accInfo.frontier);
+        const effectiveDest = (inv.merchantDest && isFullNanoAddress(inv.merchantDest))
+          ? inv.merchantDest
+          : getPosMerchantDest();
+        const shouldSweep = (inv.autoSweep || !!targetInvoice)
+          && effectiveDest
+          && isFullNanoAddress(effectiveDest)
+          && effectiveDest !== inv.account;
+
+        if (shouldSweep) {
+          inv.merchantDest = effectiveDest;
+          const workerCnt = powWorkerPool.length || Math.min(16, Math.max(2, Number(navigator.hardwareConcurrency) || 4));
+          posLog(`Sweeping ${rawToNanoStr(currentBal.toString())} NANO to merchant account ${maskNanoAddress(effectiveDest)} (computing Epoch-2 Send PoW across ${workerCnt} WASM threads)...`);
+          const t0 = performance.now();
+          const sweepWork = (inv.sweepWork && inv.sweepFrontier === accInfo.frontier)
+            ? inv.sweepWork
+            : await computeWasmWorkForRoot(accInfo.frontier, false);
+          inv.sweepWork = sweepWork;
+          inv.sweepFrontier = accInfo.frontier;
+          const powSec = ((performance.now() - t0) / 1000).toFixed(2);
+          posLog(`Computed Sweep PoW (${sweepWork}) in ${powSec}s. Broadcasting settlement block...`);
+
           const signedSweep = await signStateBlockInBrowser({
             privateKeyHex: inv.privateKey,
             account: inv.account,
             previousHex: accInfo.frontier,
-            representative: inv.merchantDest,
+            representative: effectiveDest,
             balanceRawStr: '0',
-            linkHex: inv.merchantDest,
-            workHex: sweepWork
+            linkHex: effectiveDest,
+            workHex: sweepWork,
+            isReceive: false
           });
 
           const sweepProc = await rpcCall({
@@ -1982,7 +2347,7 @@ async function checkAndSweepPosNow(targetInvoice) {
             // If the merchant account belongs to a local Browser Wallet, auto-receive it in browser too!
             loadBrowserWalletsFromStorage();
             for (const bw of browserWallets) {
-              const destEntry = bw.accounts.find(a => a.account === inv.merchantDest);
+              const destEntry = bw.accounts.find(a => a.account === effectiveDest);
               if (destEntry && (!bw.encrypted || unlockedPassphrases[bw.id])) {
                 receiveAccountPendingInBrowser(bw, destEntry).catch(() => {});
               }
@@ -1995,7 +2360,7 @@ async function checkAndSweepPosNow(targetInvoice) {
         }
 
         savePosHistory();
-        if (inv === posActive) {
+        if (inv === posActive && inv.status.startsWith('PAID')) {
           if (posPollTimer) {
             clearInterval(posPollTimer);
             posPollTimer = null;
@@ -2015,11 +2380,27 @@ async function checkAndSweepPosNow(targetInvoice) {
   }
 }
 
-function sweepHistoryInvoice(id) {
+async function sweepHistoryInvoice(id) {
   const inv = posHistory.find(x => x.id === id);
   if (!inv) return;
   posLog(`Checking / sweeping invoice ${inv.memo} (${inv.account.slice(0, 16)}...)...`);
-  checkAndSweepPosNow(inv);
+  while (posBusy) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  await checkAndSweepPosNow(inv);
+}
+
+function cancelHistoryInvoice(id) {
+  const inv = posHistory.find(x => x.id === id);
+  if (!inv || inv.status !== 'WAITING') return;
+  if (posActive && posActive.id === inv.id) {
+    cancelPosPayment();
+    return;
+  }
+  inv.status = 'CANCELLED';
+  inv.selectedForSweep = false;
+  savePosHistory();
+  posLog(`Cancelled waiting invoice ${inv.memo} (${inv.account.slice(0, 16)}...).`);
 }
 
 function showHistoryKey(id) {
@@ -2028,23 +2409,120 @@ function showHistoryKey(id) {
   prompt(`Backup Private Key for ${inv.account}:`, inv.privateKey);
 }
 
-function clearPosHistory() {
-  posHistory = [];
+function isPosInvoiceSwept(inv) {
+  return !!(inv && (inv.status === 'PAID & SWEPT' || inv.sweepHash));
+}
+
+function isPosInvoiceClearable(inv) {
+  return !!(inv && (inv.status === 'CANCELLED' || isPosInvoiceSwept(inv)));
+}
+
+function isPosInvoiceBatchSelectable(inv) {
+  return !!(inv && !isPosInvoiceSwept(inv) && inv.status !== 'CANCELLED');
+}
+
+function togglePosInvoiceSelect(id, checked) {
+  const inv = posHistory.find(x => x.id === id);
+  if (!inv) return;
+  inv.selectedForSweep = !!checked && isPosInvoiceBatchSelectable(inv);
   savePosHistory();
+}
+
+function toggleSelectAllPosInvoices(checked) {
+  posHistory.forEach(inv => {
+    inv.selectedForSweep = !!checked && isPosInvoiceBatchSelectable(inv);
+  });
+  savePosHistory();
+}
+
+async function sweepSelectedHistoryInvoices() {
+  const selected = posHistory.filter(inv => inv.selectedForSweep && isPosInvoiceBatchSelectable(inv));
+  if (selected.length === 0) {
+    posLog('No unswept invoices selected for batch sweep.');
+    return;
+  }
+  const btn = document.getElementById('pos-batch-sweep-btn');
+  if (btn) btn.disabled = true;
+  posLog(`Starting batch sweep for ${selected.length} selected invoice(s)...`);
+  let sweptCount = 0;
+  try {
+    for (let i = 0; i < selected.length; i++) {
+      const inv = selected[i];
+      posLog(`[Batch ${i + 1}/${selected.length}] Checking / sweeping ${inv.memo} (${inv.account.slice(0, 16)}...)...`);
+      while (posBusy) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      await checkAndSweepPosNow(inv);
+      if (isPosInvoiceSwept(inv)) {
+        inv.selectedForSweep = false;
+        sweptCount++;
+      }
+    }
+    savePosHistory();
+    posLog(`Batch sweep finished: ${sweptCount}/${selected.length} invoice(s) swept.`);
+  } finally {
+    renderPosHistory();
+  }
+}
+
+function clearPosHistory() {
+  const totalBefore = posHistory.length;
+  if (totalBefore === 0) return;
+  const kept = posHistory.filter(inv => !isPosInvoiceClearable(inv));
+  const clearedCount = totalBefore - kept.length;
+  posHistory = kept;
+  savePosHistory();
+  if (clearedCount === 0 && kept.length > 0) {
+    posLog(`History not cleared: ${kept.length} unswept invoice(s) protected. Only cancelled or swept invoices can be cleared.`);
+  } else if (kept.length > 0) {
+    posLog(`Cleared ${clearedCount} cancelled/swept invoice(s). Protected ${kept.length} unswept invoice(s) from deletion.`);
+  } else {
+    posLog(`Cleared ${clearedCount} cancelled/swept invoice(s).`);
+  }
 }
 
 function renderPosHistory() {
   const tbody = document.getElementById('pos-history-tbody');
   const countEl = document.getElementById('pos-hist-count');
+  const selCountEl = document.getElementById('pos-selected-count');
+  const batchBtn = document.getElementById('pos-batch-sweep-btn');
+  const selectAllChk = document.getElementById('pos-select-all-chk');
   if (!tbody || !countEl) return;
+
+  posHistory.forEach(inv => {
+    if (!isPosInvoiceBatchSelectable(inv)) {
+      inv.selectedForSweep = false;
+    }
+  });
+
+  const selectableList = posHistory.filter(isPosInvoiceBatchSelectable);
+  const selectedList = selectableList.filter(inv => !!inv.selectedForSweep);
+
   countEl.textContent = `${posHistory.length} Invoice${posHistory.length === 1 ? '' : 's'}`;
+  if (selCountEl) selCountEl.textContent = selectedList.length;
+  if (batchBtn) batchBtn.disabled = selectedList.length === 0;
+  if (selectAllChk) {
+    selectAllChk.disabled = selectableList.length === 0;
+    selectAllChk.checked = selectableList.length > 0 && selectedList.length === selectableList.length;
+  }
+
   if (posHistory.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No PoS invoices generated yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted)">No PoS invoices generated yet.</td></tr>';
     return;
   }
   tbody.innerHTML = posHistory.map(inv => {
-    const stColor = inv.status.startsWith('PAID') ? 'var(--green)' : (inv.status === 'WAITING' ? 'var(--amber)' : 'var(--muted)');
+    const stColor = isPosInvoiceSwept(inv)
+      ? 'var(--green)'
+      : (inv.status === 'RECEIVED' || inv.status === 'PAID' || inv.status === 'WAITING' ? 'var(--amber)' : 'var(--muted)');
+    const canSelect = isPosInvoiceBatchSelectable(inv);
+    const isChecked = canSelect && !!inv.selectedForSweep;
     return `<tr>
+      <td style="text-align:center">
+        <input type="checkbox" style="width:auto;height:auto;cursor:${canSelect ? 'pointer' : 'not-allowed'}"
+          ${isChecked ? 'checked' : ''} ${canSelect ? '' : 'disabled'}
+          onchange="togglePosInvoiceSelect('${inv.id}', this.checked)"
+          title="${canSelect ? 'Select invoice for batch sweep' : 'Already swept or cancelled'}">
+      </td>
       <td class="mono">${inv.createdAt}</td>
       <td>${inv.memo}</td>
       <td class="mono">${inv.amountNano}</td>
@@ -2052,7 +2530,8 @@ function renderPosHistory() {
       <td><span class="pill" style="color:${stColor}">${inv.status}</span></td>
       <td>
         <div class="btn-row">
-          <button class="btn btn-sec" style="height:26px;padding:0 8px;font-size:11px" onclick="sweepHistoryInvoice('${inv.id}')">Sweep</button>
+          <button class="btn btn-sec" style="height:26px;padding:0 8px;font-size:11px" onclick="sweepHistoryInvoice('${inv.id}')" ${isPosInvoiceSwept(inv) ? 'disabled' : ''}>Sweep</button>
+          ${inv.status === 'WAITING' ? `<button class="btn btn-danger" style="height:26px;padding:0 8px;font-size:11px" onclick="cancelHistoryInvoice('${inv.id}')">Cancel</button>` : ''}
           <button class="btn btn-sec" style="height:26px;padding:0 8px;font-size:11px" onclick="showHistoryKey('${inv.id}')">Key</button>
         </div>
       </td>
@@ -2301,10 +2780,12 @@ async function initStressWasm() {
         const resp = await fetch('/nano_stress.wasm');
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const bytes = await resp.arrayBuffer();
+        wasmModuleBytes = bytes.slice(0);
         const { instance } = await WebAssembly.instantiate(bytes, {});
         wasmExports = instance.exports;
         wasmMemory = wasmExports.memory;
         wasmExports.wasm_init();
+        ensurePowWorkerPool();
         stEl.textContent = 'READY (WASM32)';
         stEl.style.color = 'var(--green)';
         document.getElementById('st-wasm-sub').textContent = `Module: ${(bytes.byteLength / 1024).toFixed(1)} KB • Ed25519 + Blake2b`;

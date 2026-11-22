@@ -13,7 +13,7 @@ where
     exhausted: bool,
 }
 
-const SEQUENTIAL_ATTEMPTS: usize = 10;
+const SEQUENTIAL_ATTEMPTS: usize = 64;
 
 impl<'a, T> DatabaseCrawler<'a, T>
 where

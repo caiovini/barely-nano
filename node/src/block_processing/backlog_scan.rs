@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use rsnano_core::{Account, AccountInfo, ConfirmationHeightInfo};
-use rsnano_ledger::{AnySet, ConfirmedSet, Ledger};
+use rsnano_ledger::Ledger;
 use rsnano_nullable_clock::SteadyClock;
 use rsnano_stats::{StatsCollection, StatsSource};
 
@@ -25,8 +25,8 @@ impl Default for BacklogScanConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            batch_size: 256,
-            rate_limit: 10_000,
+            batch_size: 2048,
+            rate_limit: 20_480,
         }
     }
 }
@@ -180,35 +180,54 @@ struct BacklogScanLoop {
 
 impl BacklogScanLoop {
     fn scan_batch(ledger: &Ledger, next: Account, batch_size: usize) -> BacklogScanResult {
-        let mut result = BacklogScanResult {
-            next,
-            done: true,
-            ..Default::default()
-        };
-        let any = ledger.any();
-        let it = any.accounts_range(result.next..);
-        for (account, account_info) in it {
-            let conf_info = any.confirmed().get_conf_info(&account).unwrap_or_default();
-            let is_confirmed = conf_info.height >= account_info.block_count;
+        let mut fully_confirmed = ledger.drain_recently_confirmed(batch_size);
+        let (candidates, last_acc, done) =
+            ledger.unconfirmed_accounts_next_batch(next, batch_size);
 
-            if is_confirmed {
-                result.fully_confirmed.push(account);
+        if candidates.is_empty() {
+            return BacklogScanResult {
+                fully_confirmed,
+                unconfirmed: Vec::new(),
+                next,
+                done: true,
+            };
+        }
+
+        let mut unconfirmed = Vec::with_capacity(candidates.len());
+        for account in candidates {
+            let Some(account_info) = ledger.store.account.get(&account) else {
+                ledger.unconfirmed_account_resolve_clean(&account, u64::MAX);
+                fully_confirmed.push(account);
+                continue;
+            };
+            let conf_info = ledger
+                .store
+                .confirmation_height
+                .get(&account)
+                .unwrap_or_default();
+            if conf_info.height >= account_info.block_count {
+                ledger.unconfirmed_account_resolve_clean(&account, conf_info.height);
+                fully_confirmed.push(account);
             } else {
-                result.unconfirmed.push(UnconfirmedInfo {
+                unconfirmed.push(UnconfirmedInfo {
                     account,
                     account_info,
                     conf_info,
                 });
             }
-
-            result.next = account.inc_or_max();
-            if result.len() >= batch_size {
-                result.done = false;
-                break;
-            }
         }
 
-        result
+        let next_cursor = match last_acc {
+            Some(last) => last.inc_or_max(),
+            None => next,
+        };
+
+        BacklogScanResult {
+            fully_confirmed,
+            unconfirmed,
+            next: next_cursor,
+            done,
+        }
     }
 
     fn notify_observers(&self, result: BacklogScanResult) {
