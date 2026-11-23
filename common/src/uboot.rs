@@ -122,16 +122,31 @@ pub struct JumpTable {
 
 static UBOOT_JT: AtomicPtr<JumpTable> = AtomicPtr::new(core::ptr::null_mut());
 
-pub unsafe fn init(jt_ptr: *const JumpTable) {
+pub unsafe fn init(jt_ptr: *const JumpTable, uboot_gp: usize) {
     if !jt_ptr.is_null() {
         UBOOT_JT.store(jt_ptr as *mut _, Ordering::SeqCst);
     }
-    let mut gp_val = 0usize;
-    #[cfg(target_arch = "riscv64")]
-    core::arch::asm!("mv {}, gp", out(reg) gp_val);
-    #[cfg(not(target_arch = "riscv64"))]
-    let _ = &mut gp_val;
+    let gp_val = if uboot_gp != 0 {
+        uboot_gp
+    } else {
+        let mut cur_gp = 0usize;
+        #[cfg(target_arch = "riscv64")]
+        core::arch::asm!("mv {}, gp", out(reg) cur_gp);
+        #[cfg(not(target_arch = "riscv64"))]
+        let _ = &mut cur_gp;
+        cur_gp
+    };
     UBOOT_GP.store(gp_val, Ordering::SeqCst);
+}
+
+#[inline]
+pub fn gp_addr() -> usize {
+    UBOOT_GP.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn jt_addr() -> usize {
+    UBOOT_JT.load(Ordering::Relaxed) as usize
 }
 
 #[inline]

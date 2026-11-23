@@ -869,7 +869,31 @@ fn init_shards(mut storage: StorageContext) {
     let use_high_dram = is_uboot
         && crate::trap::probe_rw_u64(bpm::HIGH_DRAM_BASE)
         && crate::trap::probe_rw_u64(bpm::HIGH_DRAM_BASE + (high_dram_end - bpm::HIGH_DRAM_BASE) / 2)
-        && crate::trap::probe_rw_u64(high_dram_end - 8);
+        && crate::trap::probe_rw_u64(high_dram_end - 8)
+        && {
+            // Guard against DRAM address wrap-around (e.g. bit 33 aliasing onto low DRAM):
+            // verify writing `high_dram_end - 8` does NOT alias `(high_dram_end - 8) - 0x2_0000_0000`
+            // if `high_dram_end > 0x3_0000_0000`.
+            if high_dram_end > 0x3_0000_0000 {
+                let low_alias = (high_dram_end - 8) - 0x2_0000_0000;
+                // SAFETY: `low_alias` is an 8-byte aligned DRAM address in `0x1_0000_0000 .. 0x3_0000_0000`;
+                // we save and restore `low_alias` if safe, or reject if in kernel/stack range.
+                if low_alias >= crate::soc::HEAP_START {
+                    unsafe {
+                        let saved_low = core::ptr::read_volatile(low_alias as *const u64);
+                        core::ptr::write_volatile((high_dram_end - 8) as *mut u64, saved_low ^ 0x55AA_55AA_55AA_55AA);
+                        core::arch::asm!("fence rw, rw", options(nostack));
+                        let after_low = core::ptr::read_volatile(low_alias as *const u64);
+                        core::ptr::write_volatile(low_alias as *mut u64, saved_low);
+                        after_low == saved_low
+                    }
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        };
 
     if use_high_dram {
         tracing::info!(

@@ -19,7 +19,7 @@ build-stress-wasm:
 
 # ── S-mode (SpacemiT K3 Pico-ITX: 16 GB LPDDR5, 8x X100 + 8x A100) ───────────
 # OpenSBI runs in M-mode; our bare-metal node runs in S-mode via U-Boot.
-K3_RUSTFLAGS := -C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicbop,+zicboz,+zicond,+zihintntl,+zihintpause,+zvbb,+zvbc,+zvkb
+K3_RUSTFLAGS := -C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zicond,+zihintpause,+zvbb,+zvbc,+zvkb
 
 build-smode: boot.scr build-stress-wasm
 	RUSTFLAGS="$(K3_RUSTFLAGS)" \

@@ -23,12 +23,13 @@ It establishes a self-contained operating environment on top of OpenSBI and U-Bo
   - [3. Configuring a Representative via RPC (Port `7076`)](#3-configuring-a-representative-via-rpc-port-7076)
   - [4. Dynamic Invoice QR & Watch-Only Stealth Derivation](#4-dynamic-invoice-qr--watch-only-stealth-derivation)
 - [Hardware Requirements](#hardware-requirements)
-- [Step-by-Step Setup: Toolchain, U-Boot, Fastboot / FDL & NVMe Boot Partition](#step-by-step-setup-toolchain-u-boot-fastboot--fdl--nvme-boot-partition)
+- [Step-by-Step Setup: Toolchain, U-Boot, SPI NOR (`mtd6`) & NVMe Boot Partition](#step-by-step-setup-toolchain-u-boot-spi-nor-mtd6--nvme-boot-partition)
   - [1. Install Host Prerequisites (RISC-V Tools, `fastboot`, `mkimage` & Rust Target)](#1-install-host-prerequisites-risc-v-tools-fastboot-mkimage--rust-target)
-  - [2. Build Custom SpacemiT K3 U-Boot (`/mnt/data/rust-workspace/u-boot`) & Flash via Fastboot / FDL](#2-build-custom-spacemit-k3-u-boot-mntdatarust-workspaceu-boot--flash-via-fastboot--fdl)
-  - [3. Create the `NANO_NODE` Boot Partition on NVMe (`nvme 0:1`, First 255 MB) or eMMC (`mmc 0:1`)](#3-create-the-nano_node-boot-partition-on-nvme-nvme-01-first-255-mb-or-emmc-mmc-01)
-  - [4. Force SpacemiT K3 Pico-ITX to Probe 10GbE, NVMe & HDMI via `boot.scr`](#4-force-spacemit-k3-pico-itx-to-probe-10gbe-nvme--hdmi-via-bootscr)
-  - [5. Build Firmware & Deploy `barely-nano.bin`, `boot.scr`, and `config.toml`](#5-build-firmware--deploy-barely-nanobin-bootscr-and-configtoml)
+  - [2. Build Custom SpacemiT K3 U-Boot (`u-boot-pico-itx-k3/`) & Prepare NVMe (`./build_u-boot.sh /dev/sdX --flash`)](#2-build-custom-spacemit-k3-u-boot-u-boot-pico-itx-k3--prepare-nvme-build_u-bootsh-devsdx---flash)
+  - [3. (Optional) Migrate the Nano Ledger to NVMe While Connected to the Host PC (`./tools/lmdb_to_nvme.sh`)](#3-optional-migrate-the-nano-ledger-to-nvme-while-connected-to-the-host-pc-toolslmdb_to_nvmesh)
+  - [4. Flash Custom `u-boot.itb` to SPI NOR (`mtd6` @ `0x210000`)](#4-flash-custom-u-bootitb-to-spi-nor-mtd6--0x210000)
+  - [5. How `boot.scr` Probes PCIe, NVMe & USB and Boots `barely-nano.bin`](#5-how-bootscr-probes-pcie-nvme--usb-and-boots-barely-nanobin)
+  - [6. Updating `barely-nano.bin`, `boot.scr`, or `config.toml` Without Reflashing SPI NOR](#6-updating-barely-nanobin-bootscr-or-configtoml-without-reflashing-spi-nor)
 - [Build & Deployment System](#build--deployment-system)
   - [Build & Test Targets](#build--test-targets)
 - [Deployment & Configuration (`config.toml`)](#deployment--configuration-configtoml)
@@ -51,14 +52,14 @@ It establishes a self-contained operating environment on top of OpenSBI and U-Bo
 ## Features Implemented
 
 ### 1. S-Mode Execution on OpenSBI & U-Boot
-The kernel runs in **Supervisor Mode (S-mode)** launched from U-Boot on top of OpenSBI firmware, utilizing SBI `ecall`s for multi-hart management (HSM) and IPIs, and U-Boot's Standalone Jump Table (`gd->jt` at `gp + 0x20`) for 10GbE Ethernet, HDMI SimpleFB, and NVMe block device I/O.
-- **Boot & Firmware Delivery (USB Fastboot / FDL + NVMe Partition 1 `nvme 0:1` or Onboard eMMC `mmc 0:1`):** Because the SpacemiT K3 Pico-ITX has no MicroSD slot, U-Boot / OpenSBI is flashed over USB Type-C using **SpacemiT FDL / `fastboot`**, while `boot.scr`, `barely-nano.bin`, and `config.toml` are loaded from a `255 MB` FAT32/ext4 boot partition at the start of the NVMe SSD (`nvme 0:1`, `LBA 2048..524,287` — strictly below `BLOOM_HEADER_LBA = 524,288`), onboard eMMC (`mmc 0:1`), or staged directly via `fastboot` / PXE.
-- **Ledger Media (1 TB NVMe SSD):** Automatically discovered via U-Boot's primary NVMe namespace (`blk_get_capacity`, `blk_read_lba`, `blk_write_lba` at Jump Table indices `56..58`), with raw ledger structures starting at `256 MB` (`BLOOM_HEADER_LBA = 524,288`), `384 MB` (`WALLET_STORAGE_LBA = 786,432`), and `512 MB` (`STORAGE_BASE_LBA = 1,048,576`).
+The kernel runs in **Supervisor Mode (S-mode)** launched from U-Boot on top of OpenSBI firmware, utilizing SBI `ecall`s for multi-hart management (HSM) and IPIs, and U-Boot's Standalone Jump Table (`gd->jt` at `gp + 0x20`) for GbE/10GbE Ethernet, HDMI SimpleFB, and NVMe block device I/O.
+- **Boot & Firmware Delivery (Onboard 8 MB SPI NOR `/dev/mtd0..mtd6` + NVMe Partition 1 `nvme 0:1`):** The SpacemiT K3 Pico-ITX boots from an **8 MB onboard SPI NOR flash (`d420c000.spi`, `/dev/mtd0..mtd6`)**: `mtd1` (`bootinfo`), `mtd2` (`fsbl`), `mtd3` (`env` @ `0xA0000`), `mtd4` (`esos`), `mtd5` (`opensbi`), and `mtd6` (`uboot` @ `0x210000`, loading our custom `u-boot.itb` FIT image at `0x1_0200_0000` with `conf_11` / `fdt_11` `k3-pico-itx` DTB and relocating U-Boot to the top of 16 GB DRAM at `~0x4_FEED_xxxx`). Once U-Boot initializes PCIe Gen3 ×4 (`pcie@80000000` `PCIE-0` bonding dual 2-lane PHYs `phy@81d00000` + `phy@81e00000`) and USB, it automatically loads `boot.scr`, `config.toml`, and `barely-nano.bin` from a USB drive (`usb 0:1`) or the `255 MiB` FAT32 `NANO_NODE` boot partition at the start of the NVMe SSD (`nvme 0:1`, `LBA 2048..524,287` — strictly below `BLOOM_HEADER_LBA = 524,288`).
+- **Ledger Media (1 TB NVMe SSD):** Automatically discovered via U-Boot's primary NVMe namespace (`blk_get_capacity`, `blk_read_lba`, `blk_write_lba` at Jump Table indices `56..58`), with raw ledger structures starting at `256 MiB` (`BLOOM_HEADER_LBA = 524,288`), `384 MiB` (`WALLET_STORAGE_LBA = 786,432`), and `512 MiB` (`STORAGE_BASE_LBA = 1,048,576`).
 
 ### 2. Memory Management
-- **Boot sequence:** Written in custom assembly (`main/src/entry.S`) to set up stack pointers for all 16 harts, capture U-Boot's Jump Table pointer, zero BSS, and jump into Rust at `0x1_0400_0000`.
-- **Heap Allocator (`0x1_1800_0000 .. 0x1_D800_0000`):** Uses `linked_list_allocator` wrapped in `InterruptSafeAllocator` to provide a global dynamic memory allocator (`ALLOCATOR`) configured in `linker-smode.ld` with a **3.00 GB heap** and **256 MB stack** (16 MB per hart across 16 harts).
-- **High DRAM Sector Cache (`0x1_E000_0000 .. 0x4_E000_0000`):** Directly utilizes the SpacemiT K3 16 GB LPDDR5 memory window (`0x1_E000_0000+`) to host a **12.00 GB B-Tree Buffer Pool** (`49,152` × 4 KB frames per shard across 64 shards).
+- **Boot sequence:** Written in custom assembly (`main/src/entry.S`) to set up stack pointers for all 16 harts, preserve U-Boot's `gp` (`uboot_gp`) and Jump Table pointer (`gd->jt`), zero BSS, flush instruction/data caches across `_start .. _bss_end`, and jump into Rust at `0x1_0400_0000`.
+- **Heap Allocator (`0x1_1800_0000 .. 0x1_D800_0000`):** Uses `linked_list_allocator` wrapped in `InterruptSafeAllocator` to provide a global dynamic memory allocator (`ALLOCATOR`) configured in `linker-smode.ld` and [`common/src/soc.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/soc.rs) with a **3.00 GB heap** and **256 MB stack** (16 MB per hart across 16 harts).
+- **High DRAM Sector Cache (`0x1_E000_0000 .. 0x4_F000_0000`):** Directly utilizes the SpacemiT K3 16 GB dual-channel LPDDR5 memory window (`2 × MT62F2G32D4DS` across `ddrc0` @ `0xcb000000` + `ddrc1` @ `0xcc000000`, `0x1_0000_0000 .. 0x5_0000_0000`) to host a **12.00 GB B-Tree Buffer Pool** (`49,152` target / `50,176` max × 4 KB frames per shard across 64 shards, leaving the top `256 MB` `0x4_F000_0000 .. 0x5_0000_0000` untouched for relocated U-Boot). *(Note: SPL logs per-channel density `MT62F2G32D4DS, Size: 8192MB`; `fsbl` shifts this left across both 32-bit channels for `16,384 MB` total.)*
 
 ### 3. Exception and Trap Handling
 - **Trap Vector:** Custom S-mode assembly trap vector (`trap_vector`) saves and restores all 31 GPRs upon interrupts and exceptions and enables `sstatus.FS` and `sstatus.VS` for floating-point and RVV 1.0 vector instructions across all 16 harts (`VLEN=256` on X100 Harts `0..7` and `VLEN=1024` on A100 Harts `8..15`).
@@ -68,21 +69,21 @@ The kernel runs in **Supervisor Mode (S-mode)** launched from U-Boot on top of O
 ### 4. Hardware Watchdogs, Timers & Peer-Calibrated Wall Clock
 - **CLINT Timer:** Reads the 24 MHz hardware `time` CSR (`rdtime`) for cooperative async scheduling, sub-microsecond profiling, and monotonic `SteadyClock` durations.
 - **Peer-Telemetry-Calibrated Unix Wall Clock ([`core/src/utils/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/core/src/utils/mod.rs), [`node/src/telemetry/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/node/src/telemetry/mod.rs)):** Combines monotonic `SteadyClock` elapsed time with an atomic boot-epoch offset (`WALL_CLOCK_OFFSET_MS`) calibrated automatically from the median of up to 32 Ed25519-verified peer `TelemetryAck` timestamps—providing accurate Unix epoch timestamps (`UnixTimestamp::now()`, `UnixMillisTimestamp::now()`) for block sidebands, account modification times, outgoing `TelemetryAck` packets, WebSocket envelopes, and vote generation without an external RTC or NTP daemon.
-- **Watchdog Management:** Trap-safely probes, disables, and periodically kicks both the SpacemiT K3 SoC watchdog (`0xD408_0000`) and the PMIC watchdog over PWR I2C bus 8 (`0xD401_D800`).
+- **Watchdog Management:** Disables the SpacemiT P1 PMIC watchdog over PWR I2C bus 8 (`0xD401_D800`) at boot while leaving the APB clock-gated K3 SoC watchdog (`watchdog@d4014000`, [`common/src/watchdog.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/watchdog.rs)) quiesced so unclocked APB reads never stall `PREADY`.
 
 ### 5. Hardware Accelerated Cryptography & Optimizations
-To achieve maximum transaction throughput across the hybrid 16-core silicon, the node compiles with the full SpacemiT K3 RVA23 extension set (`+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicbop,+zicboz,+zicond,+zihintntl,+zihintpause,+zvbb,+zvbc,+zvkb`):
+To achieve maximum transaction throughput across the hybrid 16-core silicon, the node compiles with the SpacemiT K3 RVA23 extension set (`+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zicond,+zihintpause,+zvbb,+zvbc,+zvkb`):
 - **Vector Crypto Bit-Manipulation (`Zvkb`, `Zvbb`, `Zvbc`):** Single-instruction native vector rotates (`vror.vi v, v, 32/24/16/63`) in [`nullables/sha/src/blake2b.rs`](file:///mnt/data/rust-workspace/barely-nano/nullables/sha/src/blake2b.rs), replacing multi-instruction shift-and-XOR sequences across every Blake2b G-mixing round.
 - **Hybrid `VLEN=256` (4-Way) & `VLEN=1024` (16-Way) RVV 1.0 Batching:**
-  - **X100 Harts `2..3` (`VLEN=256`):** Execute zero-spill `LMUL=1` 4-way Blake2b (`compress_four_blocks`, `hash_batch_4`, `hash64_batch_4`) and 4-way Ed25519 signature verification (`verify_batch_4`).
+  - **X100 Harts `0..7` (`VLEN=256`):** Execute zero-spill `LMUL=1` 4-way Blake2b (`compress_four_blocks`, `hash_batch_4`, `hash64_batch_4`) and 4-way Ed25519 signature verification (`verify_batch_4`).
   - **A100 Harts `8..14` (`VLEN=1024`):** Runtime `csrr vlenb` (`>= 128`) detection in [`has_vlen_1024()`](file:///mnt/data/rust-workspace/barely-nano/nullables/sha/src/blake2b.rs) and [`SignatureChecker::help_verify()`](file:///mnt/data/rust-workspace/barely-nano/node/src/signatures.rs) automatically dispatches **16-way lockstep SIMD** Blake2b (`compress_16_blocks`, `hash_batch_16`, `hash64_batch_16`) and 16-way batch Montgomery inversion Ed25519 verification (`verify_batch_16`), verifying 16 blocks per call on each of the 7 A100 crypto harts.
 - **Scalar Bit-Manipulation & Conditional Ops (`Zba`, `Zbb`, `Zbs`, `Zbc`, `Zicond`):** Single-cycle shifted address generation (`sh1add`, `sh2add`, `sh3add`), branchless conditional moves (`czero.eqz`/`czero.nez`), and scalar `rori` rotations.
-- **Cache-Block Prefetch (`Zicbop`, `Zihintntl`):** Inline `prefetch.r` and `prefetch.w` hints ([`ledger_store/src/btree/arena.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/btree/arena.rs)) during B-Tree binary search, child page descent, and leaf mutation, plus branchless 8-byte big-endian `u64` prefix comparisons ([`NodePage::search_slot`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/btree/node.rs#L156-L202)).
+- **B-Tree Prefix Search & Optional `Zicbop` Prefetch:** Branchless 8-byte big-endian `u64` prefix comparisons ([`NodePage::search_slot`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/btree/node.rs#L156-L202)) plus feature-gated `prefetch.r` / `prefetch.w` helpers ([`ledger_store/src/btree/arena.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/btree/arena.rs)) during B-Tree binary search, child page descent, and leaf mutation.
 - **Cache-Block Zero & Management (`Zicboz`, `Zicbom`, `Zihintpause`):** Fast 64-byte cache-line zeroing (`cbo.zero`), explicit cross-cluster cache maintenance (`cbo.clean`, `cbo.inval`), and adaptive `pause` spinloop backoff.
 
 ### 6. U-Boot Networking, RPC, Nault Wallet Compatibility & WebSocket Stack
-- **10GbE SFP+ Hardware Probing (`RTL8127ATF`):** Discovers and drives the Realtek RTL8127 10GbE fiber controller via the U-Boot Standalone Jump Table API (`eth_init`, `eth_send`, `eth_rx`, `eth_receive` at indices `42..48`) with 64 TX / 512 RX 64-bit PCIe DMA descriptors, batched 4-descriptor cache-line RX re-arming, and burst RX draining (up to 64 frames per poll).
-- **TCP/IP Stack (`smoltcp` 0.12):** Full-featured `no_std` TCP/IP/DNS/ICMP stack integrated with the cooperative async executor, non-blocking Hart 1 maintenance polling, and automatic listener recovery.
+- **Onboard Gigabit (`eth0: ethernet@cac80000`) & 10GbE SFP+ (`RTL8127ATF`) Networking:** Drives the onboard RGMII Gigabit Ethernet controller (`dwc_eth_qos_spacemit`) actively via the U-Boot Standalone Jump Table API (`eth_init`, `eth_send`, `eth_rx`, `eth_receive` at indices `42..48`), and includes the custom 64-bit PCIe DMA Realtek RTL8127 10GbE SFP+ driver (64 TX / 512 RX descriptors, batched RX re-arming; pending optical SFP+ hardware validation).
+- **TCP/IP Stack (`smoltcp` 0.13):** Full-featured `no_std` TCP/IP/DNS/ICMP stack integrated with the cooperative async executor, non-blocking Hart 1 maintenance polling, and automatic listener recovery.
 - **Nano Services:**
   - **Port `7075` (Peering):** Live Nano P2P protocol peering and bootstrap (`96` concurrent peers).
   - **Port `7076` (HTTP JSON-RPC — Nault / Natrium Compatible):** 8-socket concurrent HTTP JSON-RPC pool (`RPC_SOCKET_COUNT = 8`) backed by `rsnano_rpc_messages`, `rsnano_rpc_handler`, and `rsnano_rpc_server`, including legacy wallet action/field aliases (`accounts_pending`, `pending`, `pending_exists`, `search_pending`, `wallet_pending`), both stringified and object `process` blocks, standard `json_block` string-vs-object `contents` serialization, and browser CORS preflight support (`OPTIONS`). To connect **Nault**, configure Custom Server API `http://192.168.1.200:7076`, WebSocket `ws://192.168.1.200:7078`, and set PoW Source to **Client WebGL / Client CPU** (or an external PoW server).
@@ -95,10 +96,11 @@ To achieve maximum transaction throughput across the hybrid 16-core silicon, the
 ### 7. 16-Hart Hybrid SMP Architecture (`8× X100` + `8× A100`)
 All 16 harts on the SpacemiT K3 are awakened via OpenSBI HSM (`sbi::hart_start`) and pinned by physical CPU cluster in [`main/src/bin.rs`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs):
 
-- **Cluster 0 — X100 Harts `0..=3` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb` — Ingress, Network & 4-Way Crypto):**
+- **Cluster 0 — X100 Harts `0..=3` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb` — Ingress, Network, Deserialization & Unchecked/Bootstrap):**
   - **Hart 0 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and cooperative async executor tasks (`WORKER_HARTS`).
-  - **Hart 1 (`Maint+Net`):** Boot initialization, 10GbE `smoltcp` network polling, HTTP JSON-RPC (`7076`), WebSocket (`7078`), Live Web Dashboard (`7080`), gateway ICMP keepalive, and watchdog kicking.
-  - **Harts 2 & 3 (`Crypto-X100`):** Dedicated 4-way `VLEN=256` (`Zvkb`) Ed25519 signature verification workers (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainers.
+  - **Hart 1 (`Maint+Net`):** Boot initialization, GbE/10GbE `smoltcp` network polling, HTTP JSON-RPC (`7076`), WebSocket (`7078`), Live Web Dashboard (`7080`), gateway ICMP keepalive, and offline link recovery.
+  - **Hart 2 (`MsgProc`):** Dedicated inbound network message deserialization (`MessageProcessor::run_batch()`) and 4-way `VLEN=256` (`Zvkb`) Ed25519 signature verification assist (`signature_checker.help_verify()`).
+  - **Hart 3 (`Unchecked+Boot`):** Dedicated `unchecked` dependency queue drainer and `bootstrap_server` response worker.
 - **Cluster 1 — X100 Harts `4..=7` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb` — Consensus & 3-Stripe Parallel 64-Shard Ledger Storage):**
   - **Hart 4 (`Consensus`):** Drives `aec_voter` and `aec_ticker` (300 ms ticks), `election_schedulers`, `backlog_scan`, `bootstrap_server`, and cooperative async executor tasks (`WORKER_HARTS`).
   - **Hart 5 (`Ledger-B`):** Parallel **Shards `21..=41`** (`[21, 42)`, 21 shards) B-Tree mutations ([`Ledger::try_run_ledger_b_job`](file:///mnt/data/rust-workspace/barely-nano/ledger/src/ledger.rs)), WAL segments, and `unchecked` dependency queue drain.
@@ -117,14 +119,14 @@ All 16 harts on the SpacemiT K3 are awakened via OpenSBI HSM (`sbi::hart_start`)
 Without an OS filesystem or traditional database (LMDB/RocksDB), `barely-nano` implements a crash-resilient **64-Shard B-Tree + 12 GB High-DRAM Buffer Pool + Atomic Write-Ahead Log (WAL)** directly on the 1 TB PCIe Gen3 ×4 NVMe SSD:
 
 1. **Physical Layer (`StorageBackend::UBoot`):** Transfers raw 4 KB pages (`8 × 512 B` sectors, batched up to 64 pages / 256 KB per write command via zero-copy 64-bit NVMe PRP DMA, and up to 16 contiguous pages / 64 KB per B-Tree range-scan read via `StorageContext::read_contiguous_into_frames`) over U-Boot's Jump Table block interface (`blk_get_capacity`, `blk_read_lba`, `blk_write_lba` at indices `56..58`, `NVME_Q_DEPTH = 64`). (`STORAGE_BASE_LBA = 1,048,576` leaves a 512 MB safety margin at the start of the drive, with a 64 MB persistent Bloom filter at `BLOOM_HEADER_LBA = 524,288`.)
-2. **12 GB High-DRAM Buffer Pool Manager ([`common/src/storage/bpm.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/bpm.rs)):** Manages `49,152` × 4 KB frames per shard (`192 MB/shard × 64 shards = 12.00 GB` target, `51,200` frames = `12.50 GB` max) in SpacemiT K3 LPDDR5 (`0x1_E000_0000 .. 0x4_E000_0000`), paired with compact 24-byte `FrameMeta` entries and a two-level chunked page directory (`page_to_frame`) in the 3.00 GB Heap (`0x1_1800_0000 .. 0x1_D800_0000`), and a **Table-ID-Aware Clock (second-chance)** eviction policy:
+2. **12 GB High-DRAM Buffer Pool Manager ([`common/src/storage/bpm.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/bpm.rs)):** Manages `49,152` × 4 KB frames per shard (`192 MB/shard × 64 shards = 12.00 GB` target, `50,176` frames = `12.25 GB` max) in SpacemiT K3 LPDDR5 (`0x1_E000_0000 .. 0x4_F000_0000`), paired with compact 24-byte `FrameMeta` entries and a two-level chunked page directory (`page_to_frame`) in the 3.00 GB Heap (`0x1_1800_0000 .. 0x1_D800_0000`), and a **Table-ID-Aware Clock (second-chance)** eviction policy:
    - Priority **`4`**: Shard metadata (`page_id == 0`) and internal B-Tree routing nodes (`is_leaf == 0`).
    - Priority **`2`**: Hot point-lookup leaf pages (`Account (1)`, `ConfirmationHeight (3)`, `Pending (7)`, `Version (11)`, `RepWeight (12)`).
    - Priority **`1`**: Cold `Block/Successor (2)` leaf pages.
    - Priority **`0` (`fetch_page_scan` / `prefetch_contiguous_scan`)**: Sequentially scanned leaf pages during full-table range scans (`FrontierChecker`, `BacklogScan`, `LEDGER_RECOUNT`), ensuring background scans are reclaimed immediately on the Clock hand's first pass without evicting hot point-lookup pages used by Hart 6 (`Ledger-A`).
    - Dirty frames are **never written during eviction**, preventing partial cross-shard updates from reaching disk.
 3. **Asynchronous Dual-Area Write-Ahead Log ([`common/src/storage/wal.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wal.rs)):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. When a checkpoint is triggered (`wal::checkpoint_nonblocking()`), dirty pages across all 64 shards are snapshotted in parallel into staging buffers in RAM while **Hart 7 (`Ledger-C + WAL`)** asynchronously writes `[descriptor pages][data pages][commit page]` with a 64-bit checksum and boot epoch, followed by zero-copy contiguous LBA home-page runs (`apply_sorted_home_runs`). On boot, `wal::recover()` idempotently replays the latest committed batch.
-4. **64-Shard Slotted-Page B-Tree Engine ([`common/src/storage/btree.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs)):** Prefix-partitioned across 64 shards by the top 6 bits of `key[1]` (`(key[1] >> 2) as usize`, striped across Hart 6 Shards `0..=20`, Hart 5 Shards `21..=41`, and Hart 7 Shards `42..=63`), featuring RVV 1.0 (`+v,+zvl256b`) 8-wide Structure-of-Arrays (SoA) 32-bit key-head vector searches, direct-mapped `HOT_ACCOUNTS` / `HOT_CONF_HEIGHT` / `HOT_BLOCKS` caches and an exact in-RAM `UNCONFIRMED_ACCOUNTS` index ([`ledger_store/src/account_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/account_store.rs), [`ledger_store/src/confirmation_height_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/confirmation_height_store.rs), [`ledger_store/src/block_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/block_store.rs)), `Zicbop`-prefetched (`prefetch.r`/`prefetch.w`) binary searches, 16-page contiguous sibling read-ahead (`BTree::prefetch_child_run`), proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and zero-allocation range iterators (`next_kv_with`).
+4. **64-Shard Slotted-Page B-Tree Engine ([`common/src/storage/btree.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs)):** Prefix-partitioned across 64 shards by the top 6 bits of `key[1]` (`(key[1] >> 2) as usize`, striped across Hart 6 Shards `0..=20`, Hart 5 Shards `21..=41`, and Hart 7 Shards `42..=63`), featuring RVV 1.0 (`+v,+zvl256b`) 8-wide Structure-of-Arrays (SoA) 32-bit key-head vector searches, direct-mapped `HOT_ACCOUNTS` / `HOT_CONF_HEIGHT` / `HOT_BLOCKS` caches and an exact in-RAM `UNCONFIRMED_ACCOUNTS` index ([`ledger_store/src/account_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/account_store.rs), [`ledger_store/src/confirmation_height_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/confirmation_height_store.rs), [`ledger_store/src/block_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/block_store.rs)), branchless 64-bit prefix binary searches, 16-page contiguous sibling read-ahead (`BTree::prefetch_child_run`), proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and zero-allocation range iterators (`next_kv_with`).
 5. **Isolated Wallet B-Tree & Atomic Redo Journal (`WALLET_SHARD` at `WALLET_STORAGE_LBA = 786,432`):** Wallet and representative keys live in a dedicated B-Tree partition at the `384 MB` NVMe mark (`LBA 786,432 .. 819,712`, `16 MB` B-Tree + `256 KB` checksummed redo journal), strictly below `STORAGE_BASE_LBA` (`512 MB`) and enforced by compile-time assertions and runtime LBA bounds guards so wallet mutations can never overwrite or contend with a synced ledger.
 
 ### Why the Bare-Metal NVMe Ledger is ~68–86 GB vs. ~123 GB in LMDB (& Architectural Advantages)
@@ -142,7 +144,7 @@ On the exact same unpruned Nano mainnet ledger (**220.89M blocks**, **37.44M acc
 | **SSD Write Amplification & Filesystem Overhead** | High (every commit writes COW leaf-to-root path + ext4/XFS journal + `msync`) | **Minimal** (dirty pages stay in 12 GB High-DRAM Buffer Pool; flushed in LBA-sorted 256 KB zero-copy PRP DMA batches) | Drastically lower NVMe wear and higher sustained IOPS |
 | **RAM & Cache Predictability (16 GB Board)** | Unbounded `mmap` RSS + OS page-cache thrashing + Linux OOM risk | **Fixed `12.00 GB` High-DRAM Sector Cache (`64 shards × 192 MB`) + `3.00 GB` Heap** | Zero OS page faults, zero swap, deterministic memory ceiling |
 | **Negative Block Lookup Cost** | Full B+Tree root-to-leaf traversal (`3–4` page reads per check) | **$O(1)$ in-RAM `64 MB` `BlockBloom` filter** (persisted on NVMe) | Instant duplicate/existence filtering before touching B-Tree shards |
-| **CPU Scheduling & Execution Model** | Linux CFS thread migration, syscalls, interrupts, and multi-thread DB lock contention | **Hard-pinned 16-Hart Hybrid SMP** (2× X100 4-way + 7× A100 16-way `VLEN=1024` Crypto harts, 3-Stripe Parallel 64-Shard Ledger harts on Cluster 1) | Zero context-switch or syscall overhead; 16-way `VLEN=1024` SIMD + 3-stripe 64-shard B-Tree parallelism |
+| **CPU Scheduling & Execution Model** | Linux CFS thread migration, syscalls, interrupts, and multi-thread DB lock contention | **Hard-pinned 16-Hart Hybrid SMP** (X100 `MsgProc` + `Unchecked/Boot` + 7× A100 16-way `VLEN=1024` Crypto harts, 3-Stripe Parallel 64-Shard Ledger harts on Cluster 1) | Zero context-switch or syscall overhead; 16-way `VLEN=1024` SIMD + 3-stripe 64-shard B-Tree parallelism |
 
 #### Why the Storage Size Difference Occurs
 1. **Self-Contained Bit-Packed Compact Block Encoding & Top-256 Representative Table (~22 GiB saved):**
@@ -161,8 +163,8 @@ To protect representative private keys against physical NVMe SSD theft, power lo
 ### 1. Physical & Cryptographic Isolation
 - **Strict NVMe Partition Separation:** Wallet storage uses [`WALLET_SHARD`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs) at `WALLET_STORAGE_LBA = 786,432` (`384 MB` offset) with its own 64-page redo journal. It never touches the 64 ledger [`SHARDS`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs) or the ledger WAL (`>= 512 MB`), and survives full ledger wipes (`wipe_blocks = true`).
 - **No Plaintext Keys or Passwords on Disk:** Neither the wallet `seed`, any account `priv_key`, nor the wallet `password` is ever written in plaintext to the NVMe SSD.
-- **Hardware-Bound Key Derivation (`SpacemiT SoC eFuse + Salt + Password`):**
-  1. At boot, [`hardware_wallet_key()`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wallet_crypto.rs#L99) derives a 256-bit SoC hardware root key from the **SpacemiT on-chip eFuse banks** (`0xD401_F000`), Chip ID Unit (`0xD428_2C00`), factory MAC registers (`0xCAC8_0040`), and U-Boot's eFuse-derived `serial#` / `ethaddr` / optional `wallet_hw_key` environment variables using trap-safe S-mode MMIO probes ([`trap::probe_read_u32`](file:///mnt/data/rust-workspace/barely-nano/common/src/trap.rs)).
+- **Hardware-Bound Key Derivation (`SpacemiT SoC Identity + Salt + Password`):**
+  1. At boot, [`hardware_wallet_key()`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wallet_crypto.rs#L99) derives a 256-bit SoC hardware root key from the always-clocked **SpacemiT K3 Chip ID Unit (`CIU`, `0xD428_2C00`)** and U-Boot's eFuse/TLV-derived `serial#` / `ethaddr` / optional `wallet_hw_key` environment variables using trap-safe S-mode MMIO probes ([`trap::probe_read_u32`](file:///mnt/data/rust-workspace/barely-nano/common/src/trap.rs)), avoiding unclocked APB slave stalls on K3.
   2. Each wallet generates a unique 256-bit random `salt` and derives its 256-bit wrapping key via **4,096 rounds of iterated `Blake2b-256`**:
      $$\text{WrappingKey} = \text{Blake2b-256}^{4096}\bigl(\text{SoCeFuseKey} \parallel \text{WalletSalt} \parallel \text{Password}\bigr)$$
   3. The wallet `seed` and each account `priv_key` are encrypted with domain-separated `Blake2b-256` keystream pads (`crypt_seed`, `crypt_priv_key`) and authenticated by a 256-bit `check_tag` (`compute_check_tag`). On unlock, every decrypted private key is also verified against its stored `PublicKey` (`priv_key.public_key() == pub_key`).
@@ -260,10 +262,10 @@ curl -s -d '{
 
 | Component | Minimum Specification | Purpose |
 | :--- | :--- | :--- |
-| **Single-Board Computer** | **SpacemiT K3 Pico-ITX (16 GB LPDDR5)** | 16-core hybrid RVA23 RISC-V SoC (`8× X100 @ 2.4 GHz, VLEN=256` + `8× A100 @ 2.0 GHz, VLEN=1024`; `16 GB` LPDDR5 at `0x1_0000_0000 .. 0x5_0000_0000` hosting a `3.00 GB` Heap and `12.00 GB` 64-shard B-Tree Buffer Pool) |
-| **NVMe SSD** | **$\ge 128\text{ GB}$ M.2 2280 PCIe Gen3 ×4** (up to 1 TB) | Installed in the **M.2 M-Key 2280 slot** (keep the M.2 B-Key slot empty to preserve all 4 PCIe Gen3 lanes). Partition 1 (`nvme 0:1`, `LBA 2048..524,287`, first `255 MB`) holds `boot.scr`, `barely-nano.bin`, and `config.toml`; raw sectors `>= 256 MB` (`LBA 524,288+`) store the `BlockBloom` filter, isolated hardware wallet B-Tree (`384 MB`), and 64-shard B-Tree + WAL ledger (`512 MB+`) |
-| **USB Type-C Cable (Fastboot / FDL)** | **USB Type-C data cable to host PC** | Used with **SpacemiT FDL / `fastboot`** to flash custom U-Boot (`u-boot.bin` / `u-boot-opensbi.itb`) to onboard SPI NOR / eMMC (the Pico-ITX board has no MicroSD slot) |
-| **10GbE SFP+ / Ethernet** | **Realtek RTL8127 10GbE SFP+ Fiber (or RJ45 transceiver)** | High-throughput 10GbE P2P peering, bootstrap, JSON-RPC, WebSocket, and telemetry |
+| **Single-Board Computer** | **SpacemiT K3 Pico-ITX (16 GB LPDDR5)** | 16-core hybrid RVA23 RISC-V SoC (`8× X100 @ 2.4 GHz, VLEN=256` + `8× A100 @ 2.0 GHz, VLEN=1024`; `16 GB` dual-channel LPDDR5 `2 × MT62F2G32D4DS` at `0x1_0000_0000 .. 0x5_0000_0000` hosting a `3.00 GB` Heap and `12.00 GB` 64-shard B-Tree Buffer Pool; onboard **8 MB SPI NOR** `/dev/mtd0..mtd6` for FSBL/OpenSBI/U-Boot + **128 GB UFS**) |
+| **NVMe SSD** | **$\ge 128\text{ GB}$ M.2 2280 PCIe Gen3 ×4** (up to 1 TB) | Installed in the **M.2 M-Key 2280 slot** (`pcie@80000000` `PCIE-0`, bonding dual 2-lane PHYs `phy@81d00000` + `phy@81e00000`; keep the M.2 B-Key slot empty to preserve all 4 PCIe Gen3 lanes). Partition 1 (`nvme 0:1`, `LBA 2048..524,287`, first `255 MiB`, FAT32 label `NANO_NODE`) holds `u-boot.itb`, `u-boot.bin`, `boot.scr`, `config.toml`, and `barely-nano.bin`; raw sectors `>= 256 MiB` (`LBA 524,288+`) store the `BlockBloom` filter, isolated hardware wallet B-Tree (`384 MiB`), and 64-shard B-Tree + WAL ledger (`512 MiB+`) |
+| **USB-C NVMe Enclosure** | **USB 3.x M.2 NVMe Enclosure to Host PC** | Used on the host workstation (`/dev/sdX`) with `./build_u-boot.sh /dev/sdX --flash` and `./tools/lmdb_to_nvme.sh` to partition the `255 MiB` `NANO_NODE` FAT32 boot partition, copy `u-boot.itb` / `boot.scr` / `barely-nano.bin` / `config.toml`, and write the 64-shard Nano ledger directly to raw NVMe sectors |
+| **GbE / 10GbE SFP+ Ethernet** | **Onboard Gigabit (`eth0: ethernet@cac80000`) or Realtek RTL8127 10GbE SFP+** | Active onboard RGMII 1GbE (plus RTL8127 10GbE SFP+ driver support) for P2P peering, bootstrap, JSON-RPC, WebSocket, and telemetry |
 | **USB-to-TTL UART Adapter** | **3.3V Logic (`115200 8N1`)**, e.g. **DSD TECH SH-U09C5** | Connects to the debug UART0 header (`TX`, `RX`, `GND`) to monitor serial logs (`orpi.log`) |
 
 ### Optional (Recommended) Accessories
@@ -286,11 +288,30 @@ curl -s -d '{
 
 ---
 
-## Step-by-Step Setup: Toolchain, U-Boot, Fastboot / FDL & NVMe Boot Partition
+## Step-by-Step Setup: Toolchain, U-Boot, SPI NOR (`mtd6`) & NVMe Boot Partition
 
-Because the **SpacemiT K3 Pico-ITX does not have a MicroSD card slot**, the bootloader (`FSBL` / OpenSBI / U-Boot) is flashed over USB using **SpacemiT FDL / `fastboot`**, while `boot.scr`, `barely-nano.bin`, and `config.toml` reside on either:
-- **Option A — NVMe Boot Partition (`nvme 0:1`):** A `255 MB` FAT32/ext4 partition in the first `256 MB` of the NVMe SSD (`LBA 2048 .. 524,287`), strictly below `BLOOM_HEADER_LBA = 524,288` (`256 MB`), `WALLET_STORAGE_LBA = 786,432` (`384 MB`), and `STORAGE_BASE_LBA = 1,048,576` (`512 MB`).
-- **Option B — Onboard eMMC (`mmc 0:1`) or Fastboot / TFTP RAM Staging:** Directly on the onboard eMMC boot partition (`mmc 0:1`) or staged into RAM over USB `fastboot` / Ethernet TFTP.
+The **SpacemiT K3 Pico-ITX** boots from an **8 MB onboard SPI NOR flash (`d420c000.spi`, `/dev/mtd0..mtd6`)** and comes from the factory with a 128 GB onboard UFS drive (`/dev/sda` on the board, pre-installed with Bianbu Linux):
+
+| SPI NOR MTD Partition | Size | Name | Role in Boot Chain |
+| :--- | :--- | :--- | :--- |
+| `/dev/mtd0` | `8.0 MiB` | `d420c000.spi` | Whole 8 MB SPI NOR flash device |
+| `/dev/mtd1` | `128 KiB` | `bootinfo` | Bootrom metadata and partition offsets (`0x00000`) |
+| `/dev/mtd2` | `512 KiB` | `fsbl` | First-Stage Bootloader (`0x20000`; initializes 16 GB dual-channel LPDDR5, loads `esos`, `opensbi`, and `uboot` from `mtd6`) |
+| `/dev/mtd3` | `64 KiB` | `env` | Factory U-Boot environment (`0xA0000`; ignored by our custom U-Boot via `CONFIG_ENV_IS_NOWHERE=y`) |
+| `/dev/mtd4` | `1.0 MiB` | `esos` | Embedded system firmware (`0xB0000`) |
+| `/dev/mtd5` | `384 KiB` | `opensbi` | OpenSBI M-mode firmware (`0x1B0000`, kept intact from factory) |
+| `/dev/mtd6` | `5.9 MiB` | `uboot` | **U-Boot FIT image (`u-boot.itb` @ `0x210000`)** — `fsbl` matches board EEPROM `product_name = "k3-pico-itx"` (`conf_11` / `fdt_11`), loads `opensbi` (`0x1_0000_0000`) and `uboot` (`0x1_0200_0000`), and jumps to U-Boot via OpenSBI |
+
+Because `barely-nano` starts its raw NVMe structures at **`256 MiB` (`BLOOM_HEADER_LBA = 524,288`)**, **`384 MiB` (`WALLET_STORAGE_LBA = 786,432`)**, and **`512 MiB` (`STORAGE_BASE_LBA = 1,048,576`)**, the first **`255 MiB` (`LBA 2048 .. 524,287`)** of the M.2 NVMe SSD safely hosts a standard MBR FAT32 Partition 1 (`NANO_NODE`, `nvme 0:1`) containing `u-boot.itb`, `u-boot.bin`, `boot.scr`, `config.toml`, and `barely-nano.bin` without ever overlapping the ledger or wallet partitions:
+
+| NVMe LBA Range (512 B Sectors) | Byte Offset | Size | Purpose |
+| :--- | :--- | :--- | :--- |
+| **`LBA 2048 .. 524,287`** (`nvme 0:1`) | `1 MiB .. 256 MiB` | **`255 MiB`** | **FAT32 Boot Partition (`NANO_NODE`)**: holds `u-boot.itb`, `u-boot.bin`, `boot.scr`, `config.toml`, and `barely-nano.bin` |
+| **`LBA 524,288 .. 655,367`** | `256 MiB .. 320 MiB` | `64 MiB + 4 KB` | Persistent `BlockBloom` filter (`BLOOM_HEADER_LBA = 524,288`) |
+| **`LBA 786,432 .. 819,719`** | `384 MiB .. 400.25 MiB` | `16.25 MiB` | Isolated Hardware Wallet B-Tree + Redo Journal (`WALLET_STORAGE_LBA = 786,432`) |
+| **`LBA 1,048,576` → End** | `512 MiB` → End | `~999.5 GB` | 64-Shard Ledger B-Tree + 256 MB Dual-Area WAL (`STORAGE_BASE_LBA = 1,048,576`) |
+
+---
 
 ### 1. Install Host Prerequisites (RISC-V Tools, `fastboot`, `mkimage` & Rust Target)
 
@@ -323,122 +344,148 @@ rustup component add llvm-tools-preview
 
 ---
 
-### 2. Build Custom SpacemiT K3 U-Boot ([`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3)) & Flash via Fastboot / FDL
+### 2. Build Custom SpacemiT K3 U-Boot ([`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3)) & Prepare NVMe (`./build_u-boot.sh /dev/sdX --flash`)
 
 The custom U-Boot submodule for the SpacemiT K3 Pico-ITX (`spacemit_k3_defconfig`) is located in [`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3) (`https://github.com/caiovini/u-boot-pico-itx-k3.git`) and includes:
 - **Extended 59-Entry Standalone Jump Table (`gd->jt` at `gp + 0x20`)** (`include/_exports.h`, `common/exports.c`) — Exports Ethernet (`eth_init`..`eth_set_current` at indices `42..48`), HDMI Video (`video_get_fb`..`bmp_display` at indices `49..55`), and primary NVMe Block I/O (`blk_get_capacity`, `blk_read_lba`, `blk_write_lba` at indices `56..58`).
-- **A100 Cluster 2 & 3 Clock Ungating & 16-Hart DTB (`hart 0..15`)** (`drivers/clk/spacemit/clk-k3.c`, `board/spacemit/k3/board.c`, `k3.dtsi`) — Ungates `cpu_c2_core_clk`, `cpu_c3_core_clk`, `c2_tcm_pipe_clk`, and `c3_tcm_pipe_clk`, enables `sstatus.VS`, and registers all 16 harts (`8× X100` + `8× A100`) with OpenSBI HSM.
-- **High-Throughput 64-Bit NVMe Driver (`NVME_Q_DEPTH = 64`, `MAX_PRP_POOL = 4096`)** (`drivers/nvme/nvme.c`) — Zero-copy 64-bit PRP DMA directly from High DRAM (`0x1_E000_0000+`) with `256 KB` (`512`-sector) transfers.
-- **Realtek RTL8127 10GbE SFP+ Fiber Driver (`64 TX / 512 RX` 64-Bit DMA Rings)** (`drivers/net/rtl8169.c`) — Full 64-bit PCIe DMA descriptor addressing (`>= 0x1_0000_0000`), SFP+ SerDes calibration, batched 4-descriptor cache-line RX re-arming, and zero-`udelay` TX polling.
+- **A100 Cluster 2 & 3 Clock Ungating, 16-Hart DTB & Top-of-16GB Relocation** (`drivers/clk/spacemit/clk-k3.c`, `arch/riscv/cpu/k3/dram.c`, `k3.dtsi`, `k3-pico-itx.dts`) — Ungates Cluster 2/3 clocks, registers all 16 harts (`8× X100` + `8× A100`), and relocates U-Boot to the top of 16 GB LPDDR5 (`~0x4_FEED_xxxx .. 0x5_0000_0000`) above `barely-nano`'s 3.00 GB Heap and 12.00 GB Buffer Pool.
+- **4-Lane PCIe Gen3 M.2 NVMe (`pcie@80000000`, `phy@81d00000` + `phy@81e00000`) & High-Throughput 64-Bit NVMe Driver (`NVME_Q_DEPTH = 64`, `MAX_PRP_POOL = 4096`)** (`drivers/phy/spacemit/phy-k1-pcie.c`, `k3.dtsi`, `k3-pico-itx.dts`, `drivers/nvme/nvme.c`) — Dual-PHY 4-lane PCIe Gen3 calibration for the Pico-ITX M.2 2280 NVMe slot (`~950 MiB/s` read) and zero-copy 64-bit PRP DMA directly from High DRAM (`0x1_E000_0000+`) with `256 KB` (`512`-sector) transfers.
+- **Factory-SPL-Compatible External-Data `u-boot.itb` FIT Image for `/dev/mtd6` (`0x210000`)** ([`u-boot-pico-itx-k3/compile.sh`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3/compile.sh), [`u-boot-pico-itx-k3/firmware/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3/firmware)) — Emits an `-E -B 8` external-data FIT image bundling `fw_dynamic.bin` (`0x1_0000_0000`), `u-boot.bin` (`0x1_0200_0000`, `CONFIG_OF_EMBED=y`), and `opensbi_fdt.dtb` (`fdt_11` / `conf_11` = `"k3-pico-itx"`) so factory `fsbl` (`mtd2`) boots it directly from SPI NOR `0x210000`.
+- **Onboard Gigabit (`eth0: ethernet@cac80000`) & Realtek RTL8127 10GbE SFP+ Drivers** (`drivers/net/dwc_eth_qos_spacemit.c`, `drivers/net/rtl8169.c`) — Active onboard RGMII GbE (`CONFIG_PHY_ANEG_TIMEOUT=500` fast offline boot) plus 64-bit PCIe DMA RTL8127 10GbE driver support.
 - **Waveshare HDMI LCD SimpleFB (`CONFIG_VIDEO_DT_SIMPLEFB=y`)** — Initializes the HDMI framebuffer before jumping to `barely-nano.bin`.
 
-1. Build U-Boot using [`build_u-boot.sh`](file:///mnt/data/rust-workspace/barely-nano/build_u-boot.sh) (which invokes `u-boot-pico-itx-k3/build.sh`):
+#### One-Command Build, Repartition, Format & Copy to NVMe (`./build_u-boot.sh /dev/sdX --flash`)
+
+1. Edit [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) on your host workstation to match your LAN (`ipv4_address`, `gateway`, `dns_server`, `mac_address`).
+2. Build `barely-nano.bin` and `boot.scr` first using `make build`:
    ```bash
-   ./build_u-boot.sh
+   make build
    ```
-2. Put the SpacemiT K3 Pico-ITX into **USB Download / FDL mode** (hold the **FDL / Boot** button while powering on or resetting with the USB Type-C cable connected to your host PC) and flash the bootloader stages via `fastboot`:
+3. Plug your 1 TB M.2 NVMe SSD into your host PC via a USB-C NVMe enclosure and check its block device name with `lsblk` (for example, `/dev/sda`).
+4. Run [`build_u-boot.sh`](file:///mnt/data/rust-workspace/barely-nano/build_u-boot.sh) with the target disk and `--flash`:
    ```bash
-   # Stage FDL1 / FSBL and U-Boot via SpacemiT fastboot protocol:
-   fastboot stage u-boot-pico-itx-k3/FSBL.bin
-   fastboot continue
-   # Once in U-Boot fastboot mode, flash U-Boot + OpenSBI to onboard storage (eMMC / SPI NOR):
-   fastboot flash uboot u-boot-pico-itx-k3/u-boot.bin
-   fastboot reboot
+   ./build_u-boot.sh /dev/sda --flash
    ```
+   What `./build_u-boot.sh /dev/sda --flash` does automatically:
+   - Compiles custom U-Boot (`u-boot-pico-itx-k3/u-boot.itb` and `u-boot.bin`) and ensures `boot.scr` and `barely-nano.bin` are up to date.
+   - Unmounts any active partitions on `/dev/sda` (while refusing to touch the host OS's internal `/dev/nvme0n1` or `/dev/nvme1n1` drives).
+   - Deletes all existing partitions on `/dev/sda` (`wipefs -a` + `sfdisk --wipe always`) and creates a single bootable **`255 MiB` FAT32 partition (`start=2048, size=522240, type=0c`)** at `/dev/sda1` (`LBA 2048..524,287`).
+   - Formats `/dev/sda1` as FAT32 with label **`NANO_NODE`** (`mkfs.vfat -F 32 -n NANO_NODE /dev/sda1`).
+   - Mounts `/dev/sda1` and copies `u-boot.itb`, `u-boot.bin`, `boot.scr`, `config.toml`, and `barely-nano.bin` onto it.
+
+   Verify with `lsblk`:
+   ```text
+   NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+   sda      8:0    0 931.5G  0 disk
+   └─sda1   8:1    0   255M  0 part
+   ```
+
+*(If you only want to compile U-Boot without flashing a disk, run `./build_u-boot.sh` with no arguments.)*
 
 ---
 
-### 3. Create the `NANO_NODE` Boot Partition on NVMe (`nvme 0:1`, First 255 MB) or eMMC (`mmc 0:1`)
+### 3. (Optional) Migrate the Nano Ledger to NVMe While Connected to the Host PC (`./tools/lmdb_to_nvme.sh`)
 
-Because `barely-nano` starts its raw NVMe structures at `256 MB` (`BLOOM_HEADER_LBA = 524,288`), `384 MB` (`WALLET_STORAGE_LBA = 786,432`), and `512 MB` (`STORAGE_BASE_LBA = 1,048,576`), the first **`255 MB` (`LBA 2048 .. 524,287`)** of the NVMe SSD can safely host a standard MBR/GPT Partition 1 (`NANO_NODE`, `nvme 0:1`) for `boot.scr`, `barely-nano.bin`, and `config.toml` without ever overlapping the ledger or wallet partitions:
-
-| NVMe LBA Range (512 B Sectors) | Byte Offset | Size | Purpose |
-| :--- | :--- | :--- | :--- |
-| **`LBA 2048 .. 524,287`** (`nvme 0:1`) | `1 MiB .. 256 MiB` | **`255 MiB`** | **FAT32 Boot Partition (`NANO_NODE`)**: holds `boot.scr`, `barely-nano.bin`, and `config.toml` |
-| **`LBA 524,288 .. 655,367`** | `256 MiB .. 320 MiB` | `64 MiB + 4 KB` | Persistent `BlockBloom` filter (`BLOOM_HEADER_LBA = 524,288`) |
-| **`LBA 786,432 .. 819,719`** | `384 MiB .. 400.25 MiB` | `16.25 MiB` | Isolated Hardware Wallet B-Tree + Redo Journal (`WALLET_STORAGE_LBA = 786,432`) |
-| **`LBA 1,048,576` → End** | `512 MiB` → End | `~999.5 GB` | 64-Shard Ledger B-Tree + 256 MB Dual-Area WAL (`STORAGE_BASE_LBA = 1,048,576`) |
-
-When the NVMe SSD is attached to your host workstation (e.g. via a USB-C NVMe adapter at `/dev/sdX`), create the `255 MiB` boot partition in `LBA 2048 .. 524,287` (this leaves all sectors `>= 524,288` untouched):
+While the NVMe SSD is still connected to your host PC at `/dev/sda` right after `./build_u-boot.sh /dev/sda --flash`, you can pre-populate the 64-shard B-Tree ledger from a standard Nano `data.ldb` snapshot in minutes:
 
 ```bash
-export NVME_DEV=/dev/sdX
+# Optional dry-run check first:
+./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --dry-run
 
-# Create Partition 1 strictly within LBA 2048..524287 (522,240 sectors = 255 MiB)
-sudo sfdisk "${NVME_DEV}" << 'EOF'
-label: dos
-start=2048, size=522240, type=0c, bootable
-EOF
+# Stream & convert data.ldb directly to /dev/sda raw sectors >= 256 MiB (leaves /dev/sda1 untouched!):
+./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda
 
-# Format Partition 1 as FAT32 with volume label NANO_NODE
-sudo mkfs.vfat -F 32 -n NANO_NODE "${NVME_DEV}1"
+# Or migrate with on-the-fly ledger pruning (--prune):
+./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --prune
 ```
+
+Because `lmdb-to-nvme` writes strictly at **`LBA >= 524,288` (`256 MiB+`)** (`BlockBloom` at `256 MiB`, `SHARDSH4` and 64 B-Tree shards at `512 MiB+`), your `255 MiB` `NANO_NODE` boot partition (`/dev/sda1`, `LBA 2048..524,287`) and its boot files (`u-boot.itb`, `u-boot.bin`, `boot.scr`, `config.toml`, `barely-nano.bin`) remain completely intact.
 
 ---
 
-### 4. Force SpacemiT K3 Pico-ITX to Probe 10GbE, NVMe & HDMI via `boot.scr`
+### 4. Flash Custom `u-boot.itb` to SPI NOR (`mtd6` @ `0x210000`)
 
-[`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) (compiled into `boot.scr`) initializes PCIe, the Realtek RTL8127 10GbE NIC, and the M.2 NVMe SSD before loading `config.toml` at `0x1_03F0_0000` and `barely-nano.bin` at `0x1_0400_0000` from NVMe (`nvme 0:1`), onboard eMMC (`mmc 0:1`), or USB (`usb 0:1`):
+Once your NVMe SSD is installed in the **M.2 2280 M-Key slot**, flash custom `u-boot.itb` to onboard SPI NOR (`mtd6`, offset `0x210000`) using **Option A (recommended, over USB Type-C from your host PC)** or **Option B (from factory Bianbu Linux)**:
+
+- **Option A — One-Command USB Type-C SPI NOR Flash from Host PC ([`flash_spi_k3.sh`](file:///mnt/data/rust-workspace/barely-nano/flash_spi_k3.sh)):**
+  1. Connect a USB Type-C data cable from your host PC to the SpacemiT K3 Pico-ITX **USB Type-C download port**.
+  2. Hold the **FEL / Download** button while pressing **RESET** (or powering on) so the board enumerates in BootROM USB mode (`361c:1001`).
+  3. Run:
+     ```bash
+     ./build_u-boot.sh
+     ./flash_spi_k3.sh
+     ```
+     [`flash_spi_k3.sh`](file:///mnt/data/rust-workspace/barely-nano/flash_spi_k3.sh) stages `fsbl.bin` to BootROM, stages `usb_stage_factory.itb` to SPL, stages `u-boot-pico-itx-k3/u-boot.itb` into DRAM (`0x1_4000_0000`), writes it to SPI NOR offset `0x210000` (`sf update`), verifies every byte via `sf read` + `cmp.b`, and resets into standalone NVMe boot.
+
+- **Option B — Back Up `mtd0..mtd6` & Flash `/dev/mtd6` from Factory Bianbu Linux:**
+  If the board is still running factory Bianbu Linux from onboard UFS (`root`):
+  ```bash
+  # 1. Back up all factory SPI NOR partitions (mtd0..mtd6)
+  mkdir -p /root/spi_backup
+  for i in 0 1 2 3 4 5 6; do dd if=/dev/mtdblock$i of=/root/spi_backup/mtd$i.bin bs=64K; done
+
+  # 2. Mount NANO_NODE (/dev/nvme0n1p1) or USB drive (/dev/sdb1), save backup, and flash mtd6
+  mkdir -p /mnt/boot && (mount /dev/nvme0n1p1 /mnt/boot || mount /dev/sdb1 /mnt/boot)
+  cp -rv /root/spi_backup /mnt/boot/k3_spi_backup
+  flashcp -v /mnt/boot/u-boot.itb /dev/mtd6
+  cmp -n $(stat -c %s /mnt/boot/u-boot.itb) /mnt/boot/u-boot.itb /dev/mtdblock6 && echo "MTD6 VERIFIED OK!"
+  sync && umount /mnt/boot && reboot
+  ```
+
+---
+
+### 5. How `boot.scr` Probes PCIe, NVMe & USB and Boots `barely-nano.bin`
+
+Our custom U-Boot in `/dev/mtd6` (`CONFIG_ENV_IS_NOWHERE=y`, [`spacemit_k3_defconfig`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3/configs/spacemit_k3_defconfig)) ignores any stale factory environment in `mtd3` and runs `CONFIG_BOOTCOMMAND` automatically on boot:
+1. Scans PCIe (`pci enum`), M.2 NVMe (`nvme scan`), and USB (`usb start`).
+2. If staged over USB Type-C via [`stage_k3.sh`](file:///mnt/data/rust-workspace/barely-nano/stage_k3.sh), decompresses `barely-nano.bin.gz` from `0x1_2000_0000` to `0x1_0400_0000`, persists the updated `barely-nano.bin` and `boot.scr` onto `nvme 0:1` (`fatwrite`), loads `config.toml`, and jumps to `0x1_0400_0000`.
+3. On normal cold boots, loads `boot.scr` (`0x1_3830_0000`) from `usb 0:1` (USB override first), `nvme 0:1`, or `mmc 0:1` and executes [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd):
 
 ```text
-# Enumerate PCIe buses (Realtek RTL8127 10GbE SFP+ NIC & M.2 NVMe SSD)
+# Enumerate PCIe buses & M.2 NVMe SSD
 pci enum
 nvme scan
 
-# Force the active Ethernet driver to initialize
-ethaddr
-
 # Load config.toml into K3 DRAM at 0x103F00000 (64 KB zeroed buffer, 1 MB below kernel _start)
-# Checks NVMe Partition 1 (nvme 0:1, LBA 2048..524287 below 256 MB Bloom/Ledger), eMMC (mmc 0:1), or USB (usb 0:1)
+# Checks USB drive FIRST (usb 0:1), then NVMe Partition 1 (nvme 0:1), then eMMC (mmc 0:1)
 mw.b 0x103F00000 0 0x10000
 setenv config_size 0
-if load nvme 0:1 0x103F00000 config.toml || load mmc 0:1 0x103F00000 config.toml || load usb 0:1 0x103F00000 config.toml; then
+if load usb 0:1 0x103F00000 config.toml || load nvme 0:1 0x103F00000 config.toml || load mmc 0:1 0x103F00000 config.toml; then
     setenv config_addr 0x103F00000
     setenv config_size ${filesize}
 fi
 
-if load nvme 0:1 0x104000000 barely-nano.bin || load mmc 0:1 0x104000000 barely-nano.bin || load usb 0:1 0x104000000 barely-nano.bin; then
+if load usb 0:1 0x104000000 barely-nano.bin || load nvme 0:1 0x104000000 barely-nano.bin || load mmc 0:1 0x104000000 barely-nano.bin; then
     go 0x104000000
 fi
 ```
 
-At the U-Boot prompt (`=>`), configure `bootcmd` once to auto-run `boot.scr` from NVMe (or eMMC):
-
-```text
-=> setenv bootcmd "pci enum; nvme scan; if load nvme 0:1 0x138300000 boot.scr || load mmc 0:1 0x138300000 boot.scr; then source 0x138300000; fi"
-=> saveenv
-```
-
 ---
 
-### 5. Build Firmware & Deploy `barely-nano.bin`, `boot.scr`, and `config.toml`
+### 6. Updating `barely-nano.bin`, `boot.scr`, or `config.toml` Without Reflashing SPI NOR
 
-1. Edit [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) to match your local LAN subnet (`ipv4_address`, `gateway`, `dns_server`, `mac_address`).
-2. Build the firmware and `boot.scr` using `make build`:
-   ```bash
-   make build
-   ```
-   - `make build` compiles [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) → `boot.scr` using `mkimage`, compiles `barely-nano` in release mode for `riscv64gc-unknown-none-elf` with RVA23 / `Zvkb` features, and extracts `barely-nano.bin` via `llvm-objcopy`.
-3. **Deploy to NVMe Partition 1 (`NANO_NODE`) or via Fastboot:**
-   - **Stage directly into RAM over USB Fastboot (`make fastboot-stage`):**
-     At the U-Boot prompt, run `fastboot usb 0`, then from the host PC:
-     ```bash
-     make fastboot-stage
-     ```
-     And at the U-Boot prompt: `go 0x104000000` (or `tftpboot 0x104000000 barely-nano.bin; go 0x104000000` over 10GbE/GbE).
-   - **Or copy to the NVMe `NANO_NODE` partition (`nvme 0:1`):**
-     ```bash
-     sudo cp barely-nano.bin boot.scr config.toml /media/$USER/NANO_NODE/
-     sync
-     sudo umount /media/$USER/NANO_NODE
-     ```
+Once custom U-Boot (`u-boot.itb`) is flashed to `/dev/mtd6`, you **never need to reflash SPI NOR again** when updating `barely-nano.bin` or `config.toml`:
+- **Option A — One-Command USB Type-C Stage & NVMe Auto-Update ([`stage_k3.sh`](file:///mnt/data/rust-workspace/barely-nano/stage_k3.sh)):**
+  Without removing the NVMe SSD from the board, build `barely-nano.bin`, put the board into USB BootROM mode (`FEL + RESET`), and run:
+  ```bash
+  make build
+  ./stage_k3.sh
+  ```
+  [`stage_k3.sh`](file:///mnt/data/rust-workspace/barely-nano/stage_k3.sh) compresses `barely-nano.bin` (`~2 MiB`), stages custom U-Boot + `barely-nano.bin.gz` + `boot.scr` over USB Type-C in `< 7s`, writes the updated `barely-nano.bin` and `boot.scr` onto `nvme 0:1` automatically, and boots `barely-nano`.
+- **Option B — Update Files on a USB Drive (`usb 0:1`) or `NANO_NODE` (`nvme 0:1`):**
+  Because `boot.scr` checks `usb 0:1` before `nvme 0:1`, plugging in a FAT32 USB flash drive containing `barely-nano.bin`, `boot.scr`, and/or `config.toml` overrides `nvme 0:1` immediately on boot (or copy them directly onto `/media/$USER/NANO_NODE/`):
+  ```bash
+  make build
+  sudo cp -v barely-nano.bin boot.scr config.toml /media/$USER/NANO_NODE/
+  sync && sudo umount /media/$USER/NANO_NODE
+  ```
 
 ---
 
 ## Build & Deployment System
 
 - [`Makefile`](file:///mnt/data/rust-workspace/barely-nano/Makefile) is the authoritative build interface.
-- Cross-compiles for `riscv64gc-unknown-none-elf` with `K3_RUSTFLAGS="-C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicbop,+zicboz,+zicond,+zihintntl,+zihintpause,+zvbb,+zvbc,+zvkb"`.
+- Cross-compiles for `riscv64gc-unknown-none-elf` with `K3_RUSTFLAGS="-C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zicond,+zihintpause,+zvbb,+zvbc,+zvkb"`.
 - Compiles [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) into `boot.scr` via `mkimage` and converts the ELF into `barely-nano.bin`.
 
 ### Build & Test Targets
@@ -480,6 +527,7 @@ Node, RPC, WebSocket, and bare-metal network parameters are configured declarati
 ```toml
 [bare_metal]
 network = "live"
+log_level = "info"
 wipe_blocks = false
 mac_address = "c0:74:2b:f9:15:ec"
 ipv4_address = "192.168.1.200"
@@ -487,13 +535,19 @@ ipv4_prefix_len = 24
 gateway = "192.168.1.1"
 dns_server = "192.168.1.1"
 
+[dashboard]
+dashboard_enable = true
+dashboard_port = 7080
+dashboard_wallet_enabled = true
+dashboard_pos_enable = true
+
 [node]
 peering_port = 7075
-enable_voting = true
+enable_voting = false
 enable_bounded_backlog = false
 allow_local_peers = true
-online_weight_minimum = "130000000000000000000000000000000000000"
-representative_vote_weight_minimum = "0"
+online_weight_minimum = "60000000000000000000000000000000000000"
+representative_vote_weight_minimum = "10000000000000000000000000000000"
 preconfigured_peers = [
     "peering.nano.org:7075",
     "192.168.1.151:7075",
@@ -790,7 +844,9 @@ make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
 - [`nullables/`](file:///mnt/data/rust-workspace/barely-nano/nullables) — Hardware/OS abstraction crates (`sha` RVA23 / `Zvkb` `VLEN=256` & `VLEN=1024` crypto, `clock`, `random`, `tcp`, `http_client`, `output_tracker`) with nullable test doubles.
 - [`stats/`](file:///mnt/data/rust-workspace/barely-nano/stats) & [`work/`](file:///mnt/data/rust-workspace/barely-nano/work) — Node statistics collector and PoW work generation/validation.
 - [`tools/`](file:///mnt/data/rust-workspace/barely-nano/tools) — Host-side utilities: [`lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) & [`lmdb_to_nvme.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb_to_nvme.sh) (direct `data.ldb` to raw 64-shard NVMe B-Tree + Bloom migration tool), [`nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) & [`nvme_snapshot.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme_snapshot.sh) (direct NVMe to compact raw 64-shard ledger snapshot dump & restore tool), [`nano-stress`](file:///mnt/data/rust-workspace/barely-nano/tools/nano-stress) (P2P block streamer), and [`ws_subscribe.py`](file:///mnt/data/rust-workspace/barely-nano/tools/ws_subscribe.py) (WebSocket topic subscriber).
-- [`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3) — Custom SpacemiT K3 Pico-ITX (`spacemit_k3_defconfig`) U-Boot git submodule (`https://github.com/caiovini/u-boot-pico-itx-k3.git`) with 59-entry Standalone Jump Table (`eth_*`, `video_*`, `blk_*`), RTL8127 10GbE SFP+ driver, 64-bit NVMe PRP DMA, and A100 Cluster 2/3 clock ungating.
+- [`build_u-boot.sh`](file:///mnt/data/rust-workspace/barely-nano/build_u-boot.sh) — Builds `u-boot-pico-itx-k3` (`u-boot.itb`, `u-boot.bin`), `boot.scr`, and `barely-nano.bin`, and with `/dev/sdX --flash` automatically deletes old partitions, formats the `255 MiB` FAT32 `NANO_NODE` boot partition (`LBA 2048..524,287`), and copies all boot files.
+- [`flash_spi_k3.sh`](file:///mnt/data/rust-workspace/barely-nano/flash_spi_k3.sh) & [`stage_k3.sh`](file:///mnt/data/rust-workspace/barely-nano/stage_k3.sh) — One-command USB Type-C utilities: `flash_spi_k3.sh` permanently flashes and byte-verifies custom `u-boot.itb` in SPI NOR (`mtd6` @ `0x210000`), while `stage_k3.sh` stages `barely-nano.bin.gz` + `boot.scr` into RAM and updates `nvme 0:1` automatically.
+- [`u-boot-pico-itx-k3/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3) — Custom SpacemiT K3 Pico-ITX (`spacemit_k3_defconfig`) U-Boot git submodule (`https://github.com/caiovini/u-boot-pico-itx-k3.git`) with 59-entry Standalone Jump Table (`eth_*`, `video_*`, `blk_*`), 4-lane M.2 NVMe PCIe (`pcie@80000000`, `phy@81d00000` + `phy@81e00000`) & 64-bit NVMe PRP DMA, factory-SPL-compatible external-data `/dev/mtd6` FIT layout (`conf_11` / `k3-pico-itx` + [`firmware/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-pico-itx-k3/firmware)), onboard GbE + RTL8127 10GbE SFP+ drivers, and A100 Cluster 2/3 clock ungating.
 - [`linker-smode.ld`](file:///mnt/data/rust-workspace/barely-nano/linker-smode.ld) — S-mode linker script mapping the `0x1_0400_0000` physical memory layout for the SpacemiT K3 Pico-ITX (`16 GB LPDDR5`).
 
 ## Authors & Credits

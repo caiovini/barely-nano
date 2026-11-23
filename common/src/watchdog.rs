@@ -22,7 +22,7 @@ static HART6_LAST_HEARTBEAT_MTIME: AtomicU64 = AtomicU64::new(0);
 static HART0_LAST_HEARTBEAT_MTIME: AtomicU64 = AtomicU64::new(0);
 static FATAL_STALL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 #[cfg(target_arch = "riscv64")]
-static WDT_STATUS: AtomicU8 = AtomicU8::new(0); // 0 = unprobed, 1 = accessible, 2 = unmapped
+static WDT_STATUS: AtomicU8 = AtomicU8::new(2); // 2 = APB clock-gated on SpacemiT K3 (P1 PMIC WDT handled via I2C8)
 
 #[cfg(target_arch = "riscv64")]
 #[inline]
@@ -31,9 +31,11 @@ fn wdt_accessible() -> bool {
         1 => true,
         2 => false,
         _ => {
-            let ok = crate::trap::probe_read_u32(WDT_BASE + WDT_WMER).is_some();
-            WDT_STATUS.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
-            ok
+            // Do not probe unclocked APB watchdog slaves: on SpacemiT K3, `watchdog@d4014000`
+            // has its APB clock/reset gated in U-Boot, and reading an unclocked APB slave
+            // stalls PREADY indefinitely without raising a CPU exception.
+            WDT_STATUS.store(2, Ordering::Relaxed);
+            false
         }
     }
 }

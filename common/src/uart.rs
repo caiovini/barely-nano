@@ -4,16 +4,7 @@ pub static UART_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 use core::sync::atomic::AtomicBool;
 
-static SUPPRESS_LINE: [AtomicBool; 8] = [
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-    AtomicBool::new(false),
-];
+static SUPPRESS_LINE: [AtomicBool; 16] = [const { AtomicBool::new(false) }; 16];
 
 #[inline]
 pub fn current_hart_id() -> usize {
@@ -23,7 +14,7 @@ pub fn current_hart_id() -> usize {
         unsafe {
             core::arch::asm!("mv {0}, tp", out(reg) hart_id);
         }
-        if hart_id < 8 {
+        if hart_id < 16 {
             hart_id
         } else {
             0

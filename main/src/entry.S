@@ -77,6 +77,7 @@ _start_secondary:
     # gp: pointer to global_data (gd_t), where gd->jt is at byte offset 32 (0x20)
 
     # Capture gp and load Jump Table immediately ONLY for Hart 1 (boot hart)
+    li   s10, 0
     li   s11, 0
     li   t0, 1
     bne  tp, t0, 1f      # Only Hart 1 expects gp from U-Boot
@@ -95,6 +96,7 @@ _start_secondary:
     mv   a0, tp           # Pass sanitized logical hart_id (0..15)
     mv   a1, s1           # opaque
     mv   a2, s11          # Pass jt_ptr in a2
+    mv   a3, s10          # Pass uboot_gp in a3
     call rust_main
 
     # If rust_main returns, park the hart

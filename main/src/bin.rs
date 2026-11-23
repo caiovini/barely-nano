@@ -358,6 +358,7 @@ pub extern "C" fn rust_main(
     hart_id: usize,
     _opaque: usize,
     jt_ptr: *const kernel_common::uboot::JumpTable,
+    uboot_gp: usize,
 ) {
     // CRITICAL: Secondary harts (not Hart 1) must wait for boot to complete,
     // then grab the node from the global NODE static.
@@ -395,7 +396,6 @@ pub extern "C" fn rust_main(
         BOOT_HART_ID.compare_exchange(999, hart_id, Ordering::SeqCst, Ordering::SeqCst);
 
     if prev_boot_id.is_ok() {
-        kernel_common::watchdog::disable();
         let pmic_ok = kernel_common::pmic_wdt::disable();
         kernel_common::uart::print(b"[boot] pmic_wdt disable: ");
         kernel_common::uart::print(if pmic_ok {
@@ -420,9 +420,9 @@ pub extern "C" fn rust_main(
 
         BOOT_COMPLETE.store(true, Ordering::SeqCst);
 
-        // Now that BSS is zeroed, we can safely write to UBOOT_JT (which lives in BSS)
+        // Now that BSS is zeroed, we can safely write to UBOOT_JT and UBOOT_GP (which live in BSS)
         unsafe {
-            kernel_common::uboot::init(jt_ptr);
+            kernel_common::uboot::init(jt_ptr, uboot_gp);
         }
     } else {
         while !BOOT_COMPLETE.load(Ordering::SeqCst) {
@@ -451,7 +451,6 @@ pub extern "C" fn rust_main(
     kernel_common::uart::print(b"\n");
 
     if prev_boot_id.is_ok() {
-        kernel_common::watchdog::disable();
         boot_hart_main(hart_id);
     } else {
         loop {
@@ -489,6 +488,7 @@ fn boot_hart_main(hart_id: usize) {
         }
         HEAP_MAGIC.store(MAGIC_VAL, Ordering::SeqCst);
     }
+    kernel_common::uart::print(b"[boot] heap init ok\n");
 
     kernel_common::logger::init();
 
@@ -511,6 +511,15 @@ fn boot_hart_main(hart_id: usize) {
         HART_DISPATCH_READY.store(false, Ordering::SeqCst);
         NODE_INIT_COMPLETE.store(false, Ordering::SeqCst);
         trap::init();
+    }
+    kernel_common::watchdog::disable();
+    {
+        let _guard = uart::UART_LOCK.lock();
+        uart::print_no_lock(b"[boot] logger+trap ok | uboot gp=");
+        uart::print_hex_no_lock(kernel_common::uboot::gp_addr());
+        uart::print_no_lock(b" jt=");
+        uart::print_hex_no_lock(kernel_common::uboot::jt_addr());
+        uart::print_no_lock(b"\n");
     }
 
     let seed = kernel_common::sbi::get_time();
@@ -633,13 +642,21 @@ fn boot_hart_main(hart_id: usize) {
         }
 
         tracing::debug!("[boot] net init...");
+        kernel_common::uart::print(b"[boot] net init starting...\n");
         let net_ctx = kernel_common::net::init_uboot_net();
+        kernel_common::uart::print(if net_ctx.is_some() {
+            b"[boot] net init: link up\n"
+        } else {
+            b"[boot] net init: link down (continuing offline)\n"
+        });
         tracing::debug!("[boot] net init done");
         if let Some(ctx) = net_ctx {
             *kernel_common::net::NET.lock() = Some(ctx);
         }
 
+        kernel_common::uart::print(b"[boot] storage init starting...\n");
         kernel_common::storage::init_uboot_blk();
+        kernel_common::uart::print(b"[boot] storage init ok\n");
 
         let wipe_requested = daemon_toml
             .bare_metal
@@ -783,7 +800,8 @@ fn boot_hart_main(hart_id: usize) {
         // not in BSS. Without flushing the heap before secondary harts dereference Arc<T>,
         // Cluster 1 harts can read stale DRAM lines.
         let start_addr = unsafe { &_start as *const u8 as usize };
-        clean_cache_range(start_addr, 3 * 1024 * 1024);
+        let image_end = unsafe { &_bss_end as *const u8 as usize };
+        clean_cache_range(start_addr, image_end.saturating_sub(start_addr));
 
         {
             let heap = ALLOCATOR.0.lock();
@@ -3201,7 +3219,7 @@ fn run_maintenance_and_network_loop(
                     last_ping = mtime;
                 }
             } else {
-                if mtime - last_ping > seconds(5) {
+                if mtime - last_ping > seconds(30) {
                     retry_net = true;
                     last_ping = mtime;
                 }

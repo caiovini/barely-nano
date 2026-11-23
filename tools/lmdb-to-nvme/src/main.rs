@@ -1995,7 +1995,8 @@ fn run() -> Result<(), String> {
             total_pages
         );
         println!(
-            "      Layout: 16 shards x {} pages ({:.2} GB/shard), WAL base={} pages={} epoch={}",
+            "      Layout: {} shards x {} pages ({:.2} GB/shard), WAL base={} pages={} epoch={}",
+            SHARD_COUNT,
             shard_size,
             (shard_size as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0),
             wal_base,
@@ -2112,7 +2113,7 @@ fn run() -> Result<(), String> {
 
     let conf_index = if prune {
         let idx_t0 = Instant::now();
-        print!("      Building global confirmation_height index across 16 shards... ");
+        print!("      Building global confirmation_height index across {} shards... ", SHARD_COUNT);
         std::io::stdout().flush().ok();
         let (idx, total_conf_acc, multi_acc, conf_sum) =
             ConfHeightIndex::build(&mmap, &shard_table_pages);
@@ -2135,9 +2136,12 @@ fn run() -> Result<(), String> {
 
     let file = nvme_file.as_ref().unwrap();
 
-    // Pass 2: Build and write all 16 shards sequentially, processing Shard 4 last so that
-    // TABLE_VERSION (11, key b"CACHCNTS" which hashes to Shard 4) receives the exact global counts!
-    println!("[4/5] Building & writing 16 Slotted-Page B-Tree shards + 64 MB Block Bloom Filter...");
+    // Pass 2: Build and write all 64 shards sequentially, processing Shard 16 last so that
+    // TABLE_VERSION (11, key b"CACHCNTS" which hashes to Shard 16: b'C' >> 2 == 16) receives the exact global counts!
+    println!(
+        "[4/5] Building & writing {} Slotted-Page B-Tree shards + 64 MB Block Bloom Filter...",
+        SHARD_COUNT
+    );
     let build_start = Instant::now();
 
     let mut bloom = BlockBloom::new();
@@ -2346,8 +2350,9 @@ fn run() -> Result<(), String> {
 
         if prune {
             println!(
-                "      [{:2}/16] Shard {:2}: {:9} entries (kept_blk={:8}, pruned={:9}) -> {:7} pages ({:5.2} GB, depth={}, root={}) in {:.2}s",
+                "      [{:2}/{}] Shard {:2}: {:9} entries (kept_blk={:8}, pruned={:9}) -> {:7} pages ({:5.2} GB, depth={}, root={}) in {:.2}s",
                 step_idx + 1,
+                SHARD_COUNT,
                 shard_idx,
                 entries_in_shard,
                 blk_cnt,
@@ -2360,8 +2365,9 @@ fn run() -> Result<(), String> {
             );
         } else {
             println!(
-                "      [{:2}/16] Shard {:2}: {:9} entries -> {:7} pages ({:5.2} GB, depth={}, root={}) in {:.2}s",
+                "      [{:2}/{}] Shard {:2}: {:9} entries -> {:7} pages ({:5.2} GB, depth={}, root={}) in {:.2}s",
                 step_idx + 1,
+                SHARD_COUNT,
                 shard_idx,
                 entries_in_shard,
                 next_free_page,
@@ -2418,9 +2424,10 @@ fn run() -> Result<(), String> {
     println!("  Pending entries migrated : {:12}", global_pending_count);
     println!("  Rep weights migrated     : {:12}", global_rep_weight_count);
     println!(
-        "  Total B-Tree pages       : {:12} ({:.2} GB across 16 shards)",
+        "  Total B-Tree pages       : {:12} ({:.2} GB across {} shards)",
         total_btree_pages_written,
-        (total_btree_pages_written as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0)
+        (total_btree_pages_written as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0),
+        SHARD_COUNT
     );
     println!(
         "  Build & NVMe write time  : {:12.2}s",

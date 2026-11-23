@@ -2,11 +2,11 @@
 //!
 //! Reads a synced `barely-nano` NVMe SSD (e.g. `/dev/sda` over USB-C) and writes a compact,
 //! checksummed raw ledger snapshot file containing only the allocated B-Tree pages (`0..next_free_page`)
-//! of each of the 16 shards plus the 64 MB `BlockBloom` filter (and optionally the 16 MB hardware-bound
+//! of each of the 64 shards plus the 64 MB `BlockBloom` filter (and optionally the 16 MB hardware-bound
 //! wallet partition), with an option to write/restore the raw snapshot file back to any NVMe SSD.
 //!
 //! ### Key Capabilities
-//! 1. **Compact Sparse-Shard Streaming (`~90.4 GiB` unpruned / `~30 GiB` pruned vs `1,000 GB` raw disk):**
+//! 1. **Compact Sparse-Shard Streaming (`~78 GiB` unpruned / `~26 GiB` pruned vs `1,000 GB` raw disk):**
 //!    Instead of `dd`-ing 1 TB of mostly empty LBA space, `nvme-snapshot` reads each shard's
 //!    `MetaData` page (`0xBEEFCB03`) and streams only the allocated pages (`0 .. next_free_page`)
 //!    in **16 MB sequential chunks**.
@@ -19,9 +19,9 @@
 //! 3. **Cross-Drive Capacity Portability on Restore:**
 //!    Restoring a snapshot onto a different NVMe drive (e.g. 1 TB $\rightarrow$ 256 GB or 512 GB)
 //!    automatically recalculates `target_shard_size`, `wal_base`, and `wal_pages` for the target
-//!    drive and places each shard `0..16` at its proper target `base_page`.
+//!    drive and places each shard `0..64` at its proper target `base_page`.
 //! 4. **End-to-End 64-Bit Integrity Checksums & Hardware Wallet Protection:**
-//!    Every region (64 MB Bloom filter, each of the 16 B-Tree shards, and optional wallet region)
+//!    Every region (64 MB Bloom filter, each of the 64 B-Tree shards, and optional wallet region)
 //!    carries a 64-bit checksum in the 4 KB `BNSNAPV1` file header, verified on restore before
 //!    committing `STORAGE_MAGIC` (`"SHARDSH4"`). By default, restoring a ledger snapshot never
 //!    touches `WALLET_STORAGE_LBA` (`384 MB` mark), preserving the node's eFuse-bound wallet keys.
@@ -514,9 +514,10 @@ where
 }
 
 const COUNTS_MAGIC: u64 = 0x4E41_4E4F_434E_5431; // "NANOCNT1"
+const CACHCNTS_SHARD: usize = (b'C' >> 2) as usize; // Shard 16 on 64-shard layout
 
-/// Reads `CACHCNTS` (`TABLE_VERSION = 11`, key `b"CACHCNTS"`) from Shard 4.
-fn read_cached_counts_from_shard4<F>(root_page: u32, read_page: F) -> (u64, u64, u64, u64)
+/// Reads `CACHCNTS` (`TABLE_VERSION = 11`, key `b"CACHCNTS"`) from Shard 16 (`b'C' >> 2 == 16`).
+fn read_cached_counts_from_shard<F>(root_page: u32, read_page: F) -> (u64, u64, u64, u64)
 where
     F: FnMut(u32, &mut [u8; BLOCK_SIZE]) -> io::Result<()>,
 {
@@ -648,11 +649,11 @@ fn run_dump(
         total_allocated_pages += next_free_page as u64;
     }
 
-    // Read cached counts from Shard 4
-    let shard4_base = 1 + 4 * (shard_size + 1);
+    // Read cached counts from Shard 16 (`b'C' >> 2 == 16`)
+    let counts_shard_base = 1 + CACHCNTS_SHARD * (shard_size + 1);
     let (cached_accounts, cached_blocks, cached_confirmed, cached_pruned) =
-        read_cached_counts_from_shard4(shard_entries[4].root_page_id, |pg, buf| {
-            read_storage_block_with_overlay(&nvme, shard4_base + pg as usize, &wal_overlay, buf)
+        read_cached_counts_from_shard(shard_entries[CACHCNTS_SHARD].root_page_id, |pg, buf| {
+            read_storage_block_with_overlay(&nvme, counts_shard_base + pg as usize, &wal_overlay, buf)
         });
 
     println!(
@@ -660,8 +661,9 @@ fn run_dump(
         cached_accounts, cached_blocks, cached_confirmed, cached_pruned
     );
     println!(
-        "      Active Pages  : {} pages across 16 shards ({:.2} GiB / {:.1}% of raw disk)",
+        "      Active Pages  : {} pages across {} shards ({:.2} GiB / {:.1}% of raw disk)",
         total_allocated_pages,
+        SHARD_COUNT,
         (total_allocated_pages as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0),
         (total_allocated_pages as f64 * 100.0) / (total_pages as f64)
     );
@@ -742,9 +744,10 @@ fn run_dump(
         println!("OK (checksum=0x{:016X})", wallet_checksum);
     }
 
-    // [3/4] Stream all 16 shards' allocated pages (`0 .. next_free_page`)
+    // [3/4] Stream all 64 shards' allocated pages (`0 .. next_free_page`)
     println!(
-        "[3/4] Streaming 16 B-Tree shards ({:.2} GiB total)...",
+        "[3/4] Streaming {} B-Tree shards ({:.2} GiB total)...",
+        SHARD_COUNT,
         (total_allocated_pages as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0)
     );
     let mut io_buf = vec![0u8; IO_CHUNK_BYTES];
@@ -786,8 +789,9 @@ fn run_dump(
         shard_entries[shard_idx].checksum = shard_hash;
         let pct = (pages_done as f64 * 100.0) / (total_allocated_pages.max(1) as f64);
         println!(
-            "      Shard {:2}/16: {:8} pages ({:6.2} GiB) | root={:7} | csum=0x{:016X} | {:5.2}s [{:5.1}%]",
+            "      Shard {:2}/{}: {:8} pages ({:6.2} GiB) | root={:7} | csum=0x{:016X} | {:5.2}s [{:5.1}%]",
             shard_idx + 1,
+            SHARD_COUNT,
             n_pages,
             (n_pages as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0),
             shard_entries[shard_idx].root_page_id,
@@ -878,8 +882,9 @@ fn run_restore(
         hdr.cached_accounts, hdr.cached_blocks, hdr.cached_confirmed, hdr.cached_pruned
     );
     println!(
-        "      B-Tree Pages  : {} pages across 16 shards ({:.2} GiB)",
+        "      B-Tree Pages  : {} pages across {} shards ({:.2} GiB)",
         total_snap_pages,
+        SHARD_COUNT,
         (total_snap_pages as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0)
     );
 
@@ -990,9 +995,10 @@ fn run_restore(
         println!("OK (checksum=0x{:016X})", h);
     }
 
-    // [3/4] Verify & restore all 16 B-Tree shards
+    // [3/4] Verify & restore all 64 B-Tree shards
     println!(
-        "[3/4] Restoring 16 B-Tree shards ({:.2} GiB total)...",
+        "[3/4] Restoring {} B-Tree shards ({:.2} GiB total)...",
+        SHARD_COUNT,
         (total_snap_pages as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0)
     );
     let mut io_buf = vec![0u8; IO_CHUNK_BYTES];
@@ -1038,8 +1044,9 @@ fn run_restore(
 
         let pct = (pages_done as f64 * 100.0) / (total_snap_pages.max(1) as f64);
         println!(
-            "      Shard {:2}/16: {:8} pages ({:6.2} GiB) | root={:7} | csum=0x{:016X} OK | {:5.2}s [{:5.1}%]",
+            "      Shard {:2}/{}: {:8} pages ({:6.2} GiB) | root={:7} | csum=0x{:016X} OK | {:5.2}s [{:5.1}%]",
             shard_idx + 1,
+            SHARD_COUNT,
             n_pages,
             (n_pages as f64 * 4096.0) / (1024.0 * 1024.0 * 1024.0),
             s.root_page_id,
@@ -1073,7 +1080,7 @@ fn run_restore(
         nvme.sync_all()?;
         println!("OK!");
     } else {
-        println!("[4/4] [DRY RUN] All 16 shard checksums verified! Target NVMe was not modified.");
+        println!("[4/4] [DRY RUN] All {} shard checksums verified! Target NVMe was not modified.", SHARD_COUNT);
     }
 
     let elapsed = t0.elapsed().as_secs_f64();

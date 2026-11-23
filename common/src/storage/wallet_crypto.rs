@@ -40,38 +40,18 @@ fn derive_soc_hardware_key() -> [u8; 32] {
 
     #[cfg(target_arch = "riscv64")]
     {
-        // 1. Probe Ky X1 4K-bit eFuse shadow registers (16 banks × 32 bytes = 512 bytes)
-        //    and Chip ID Unit (CIU) using trap-safe S-mode loads so PMP restrictions never fault.
-        const KY_X1_EFUSE_BASE: usize = 0xD401_F000;
-        const KY_X1_CIU_BASE: usize = 0xD428_2C00;
-        const KY_X1_EMAC0_MAC_HI: usize = 0xCAC8_0040;
-        const KY_X1_EMAC0_MAC_LO: usize = 0xCAC8_0044;
-
-        let mut efuse_words = 0usize;
-        for off in (0..0x200usize).step_by(4) {
-            if let Some(w) = crate::trap::probe_read_u32(KY_X1_EFUSE_BASE + off) {
-                hasher.update(&w.to_le_bytes());
-                if w != 0 {
-                    efuse_words += 1;
-                }
-            } else {
-                break;
-            }
-        }
+        // 1. Probe SpacemiT K3 Chip ID Unit (CIU `0xD428_2C00`, always clocked at boot) using
+        //    trap-safe S-mode loads. Note: Do NOT probe unclocked APB/AXI slaves (`0xD401_F000`
+        //    does not exist on K3 where eFuse is `fuse@f0702800` behind gated `aes_core_wtm`,
+        //    and `0xCAC8_0040` EMAC0 is clock/reset-gated when `eqos_stop` halts the MAC).
+        const K3_CIU_BASE: usize = 0xD428_2C00;
 
         for off in (0..0x10usize).step_by(4) {
-            if let Some(w) = crate::trap::probe_read_u32(KY_X1_CIU_BASE + off) {
+            if let Some(w) = crate::trap::probe_read_u32(K3_CIU_BASE + off) {
                 hasher.update(&w.to_le_bytes());
             } else {
                 break;
             }
-        }
-
-        if let Some(mac_hi) = crate::trap::probe_read_u32(KY_X1_EMAC0_MAC_HI) {
-            hasher.update(&mac_hi.to_le_bytes());
-        }
-        if let Some(mac_lo) = crate::trap::probe_read_u32(KY_X1_EMAC0_MAC_LO) {
-            hasher.update(&mac_lo.to_le_bytes());
         }
 
         // 2. Mix U-Boot eFuse-derived hardware identifiers (`serial#`, `ethaddr`, and optional
@@ -85,8 +65,6 @@ fn derive_soc_hardware_key() -> [u8; 32] {
                 }
             }
         }
-
-        let _ = efuse_words;
     }
 
     let digest = hasher.finalize();
