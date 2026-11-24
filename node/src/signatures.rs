@@ -282,10 +282,11 @@ impl SignatureChecker {
     }
 
     fn verify_tasks_slice(&self, tasks: &mut [Option<SignatureTask>]) {
-        if tasks.len() == 16 {
+        let n_tasks = tasks.len();
+        if n_tasks == 16 || (n_tasks > 4 && rsnano_sha::blake2b::has_vlen_1024()) {
             let mut all_have_account = true;
             let mut accounts = [rsnano_core::Account::zero(); 16];
-            for i in 0..16 {
+            for i in 0..n_tasks {
                 let t = tasks[i].as_ref().unwrap();
                 if let Some(acc) = t.account {
                     accounts[i] = acc;
@@ -298,22 +299,29 @@ impl SignatureChecker {
             }
 
             if all_have_account {
+                for i in n_tasks..16 {
+                    accounts[i] = accounts[0];
+                }
                 let keys_val: [rsnano_core::PublicKey; 16] =
                     core::array::from_fn(|i| accounts[i].as_key());
                 let keys: [&[u8; 32]; 16] =
                     core::array::from_fn(|i| keys_val[i].as_bytes());
-                let hashes: [rsnano_core::BlockHash; 16] =
-                    core::array::from_fn(|i| tasks[i].as_ref().unwrap().ctx.block.hash());
+                let hashes: [rsnano_core::BlockHash; 16] = core::array::from_fn(|i| {
+                    let src = if i < n_tasks { i } else { 0 };
+                    tasks[src].as_ref().unwrap().ctx.block.hash()
+                });
                 let msgs: [&[u8]; 16] =
                     core::array::from_fn(|i| hashes[i].as_bytes() as &[u8]);
-                let sigs_val: [rsnano_core::Signature; 16] =
-                    core::array::from_fn(|i| tasks[i].as_ref().unwrap().ctx.block.signature().clone());
+                let sigs_val: [rsnano_core::Signature; 16] = core::array::from_fn(|i| {
+                    let src = if i < n_tasks { i } else { 0 };
+                    tasks[src].as_ref().unwrap().ctx.block.signature().clone()
+                });
                 let sigs: [&[u8; 64]; 16] =
                     core::array::from_fn(|i| sigs_val[i].as_bytes());
 
                 let results = rsnano_sha::ed25519::verify_batch_16(keys, msgs, sigs);
-                for i in 0..16 {
-                    let t = tasks[i].as_ref().unwrap();
+                for i in 0..n_tasks {
+                    let t = tasks[i].take().unwrap();
                     if results[i] {
                         t.ctx.block.set_signature_verified(true);
                     }

@@ -101,6 +101,110 @@ impl VoteApplier {
         results
     }
 
+    /// Applies a slice of pre-verified votes in bounded sub-batches (`<= 64`), coalescing
+    /// `online_reps`, `rep_weights`, and `active_elections.write()` lock acquisitions by ~64x
+    /// across Cluster 0 (`Hart 0`) and Cluster 1 (`Hart 4`).
+    pub fn vote_batch(&self, votes: &[FilteredVote]) {
+        const SUB_BATCH: usize = 64;
+        if votes.is_empty() {
+            return;
+        }
+
+        let has_observers = !self.event_senders.read().is_empty();
+
+        for chunk in votes.chunks(SUB_BATCH) {
+            let minimum_pr_weight = self.online_reps.lock().minimum_principal_weight();
+            let now = self.clock.now();
+
+            let mut weights = [Amount::zero(); SUB_BATCH];
+            let mut eligible = [false; SUB_BATCH];
+            let mut any_eligible = false;
+            {
+                let rep_weights = self.rep_weights.read();
+                for (i, v) in chunk.iter().enumerate() {
+                    debug_assert!(v.validate().is_ok());
+                    let w = rep_weights.get(&v.voter).copied().unwrap_or_default();
+                    weights[i] = w;
+                    if self.is_dev_network || w > minimum_pr_weight {
+                        eligible[i] = true;
+                        any_eligible = true;
+                    }
+                }
+            }
+
+            if !any_eligible {
+                if has_observers {
+                    let empty = HashMap::new();
+                    for (i, v) in chunk.iter().enumerate() {
+                        self.notify_vote_processed(v, weights[i], &empty);
+                    }
+                }
+                continue;
+            }
+
+            let mut is_active = [false; SUB_BATCH];
+            let mut any_active = false;
+            {
+                let active = self.active_elections.read();
+                for (i, v) in chunk.iter().enumerate() {
+                    if eligible[i] && v.filtered_blocks().any(|h| active.is_active_hash(h)) {
+                        is_active[i] = true;
+                        any_active = true;
+                    }
+                }
+            }
+
+            let quorum_specs = {
+                let mut online = self.online_reps.lock();
+                if any_active {
+                    for (i, v) in chunk.iter().enumerate() {
+                        if is_active[i] {
+                            online.vote_observed(v.voter, now);
+                        }
+                    }
+                }
+                online.quorum_specs()
+            };
+
+            let mut batch_results: Vec<Option<HashMap<BlockHash, Result<(), VoteError>>>> =
+                if has_observers {
+                    Vec::with_capacity(chunk.len())
+                } else {
+                    Vec::new()
+                };
+
+            {
+                let mut active = self.active_elections.write();
+                let rep_weights = self.rep_weights.read();
+                for (i, v) in chunk.iter().enumerate() {
+                    if eligible[i] {
+                        let res = active.apply_vote(ApplyVoteArgs {
+                            vote: v,
+                            rep_weights: &rep_weights,
+                            quorum_specs: &quorum_specs,
+                            now,
+                        });
+                        if has_observers {
+                            batch_results.push(Some(res));
+                        }
+                    } else if has_observers {
+                        batch_results.push(None);
+                    }
+                }
+            }
+
+            if has_observers {
+                let empty = HashMap::new();
+                for (i, v) in chunk.iter().enumerate() {
+                    match &batch_results[i] {
+                        Some(res) => self.notify_vote_processed(v, weights[i], res),
+                        None => self.notify_vote_processed(v, weights[i], &empty),
+                    }
+                }
+            }
+        }
+    }
+
     fn notify_vote_processed(
         &self,
         vote: &ReceivedVote,

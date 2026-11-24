@@ -1287,10 +1287,28 @@ fn run_a100_crypto_worker_loop(
         "[boot] Hart {}: A100 VLEN=1024 16-Way Vector Crypto Worker loop enter",
         hart_id
     );
+    if hart_id == 8 {
+        let b2_fail = rsnano_sha::blake2b::self_test();
+        let ed_fail = rsnano_sha::ed25519::self_test();
+        if b2_fail == 0 && ed_fail == 0 {
+            tracing::info!(
+                "[boot] Hart 8 (A100 VLEN=1024={}): 16-way Blake2b & Fe51x16 Ed25519 self-test OK",
+                rsnano_sha::blake2b::has_vlen_1024()
+            );
+        } else {
+            tracing::error!(
+                "[boot] Hart 8 (A100): SIMD self-test FAILED (blake2b={:#x}, ed25519={:#x})",
+                b2_fail,
+                ed_fail
+            );
+        }
+    }
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut iterations = 0;
     let mut verified_count = 0usize;
+    let mut vote_verified_count = 0usize;
+    let mut pow_chunks = 0usize;
     let mut idle_spins = 1u32;
     loop {
         let mtime = kernel_common::clint::mtime();
@@ -1301,16 +1319,20 @@ fn run_a100_crypto_worker_loop(
 
         if mtime - last_heartbeat > seconds(10) {
             tracing::debug!(
-                "[heartbeat] Hart {} (A100 Crypto) | Iters: {} | Verified: {}",
+                "[heartbeat] Hart {} (A100 Crypto) | Iters: {} | BlkSig: {} | VoteSig: {} | PoWChunks: {}",
                 hart_id,
                 iterations,
-                verified_count
+                verified_count,
+                vote_verified_count,
+                pow_chunks
             );
             iterations = 0;
             last_heartbeat = mtime;
         }
 
         let mut worked = false;
+
+        // 1. Highest priority: synchronous BlockBatchProcessor 16-way Ed25519 tasks
         while node_arc.signature_checker.has_sync_tasks() {
             let n = node_arc.signature_checker.help_verify();
             if n > 0 {
@@ -1321,6 +1343,38 @@ fn run_a100_crypto_worker_loop(
             }
         }
 
+        // 2. Consensus ConfirmAck 16-way vote hashing & Ed25519 pre-verification for Hart 0
+        if node_arc.vote_processor.has_unverified_work() {
+            for _ in 0..4 {
+                let n = node_arc.vote_processor.help_verify();
+                if n > 0 {
+                    worked = true;
+                    vote_verified_count = vote_verified_count.wrapping_add(n);
+                } else {
+                    break;
+                }
+                if node_arc.signature_checker.has_sync_tasks() {
+                    break;
+                }
+            }
+        }
+
+        // 3. Cooperative 16-way VLEN=1024 PoW generation (`WorkPool` / RPC / local wallet)
+        if rsnano_node::work_has_active_job() {
+            for _ in 0..2 {
+                if rsnano_node::work_try_help_chunk() {
+                    worked = true;
+                    pow_chunks = pow_chunks.wrapping_add(1);
+                } else {
+                    break;
+                }
+                if node_arc.signature_checker.has_sync_tasks() {
+                    break;
+                }
+            }
+        }
+
+        // 4. Background block signature pre-verification
         if !node_arc.signature_checker.is_empty_relaxed() {
             for _ in 0..8 {
                 let n = node_arc.signature_checker.help_verify();
@@ -1330,6 +1384,13 @@ fn run_a100_crypto_worker_loop(
                 } else {
                     break;
                 }
+            }
+        }
+
+        // 5. Assist Hart 2 with 10GbE inbound MessageProcessor batches (16-way PoW entry check)
+        if !worked && node_arc.inbound_message_queue.size() >= 2 {
+            if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
+                worked = true;
             }
         }
 
@@ -2780,12 +2841,25 @@ fn run_ledger_a_loop(
 
 #[cfg(feature = "block-test")]
 fn drain_async_events(exec: &kernel_common::async_rt::Executor) {
-    for _ in 0..4 {
+    exec.poll_timers();
+    for _ in 0..8 {
+        let mut any = false;
         for h in 0..16 {
             let len = exec.local_queues[h].lock().len();
             for _ in 0..len {
-                exec.run_once(h);
+                if exec.run_once(h) {
+                    any = true;
+                }
             }
+        }
+        let inj_len = exec.injector_queue.lock().len();
+        for _ in 0..inj_len {
+            if exec.run_once(3) {
+                any = true;
+            }
+        }
+        if !any {
+            break;
         }
     }
 }
@@ -2796,29 +2870,18 @@ fn generate_deterministic_pow(
     threshold: u64,
     nonce_state: &mut u64,
 ) -> (rsnano_core::WorkNonce, u64, u64) {
-    use rsnano_core::{Difficulty, DifficultyV1, WorkNonce};
-    let diff = DifficultyV1::default();
+    use rsnano_core::DifficultyV1;
     let mut iters = 0u64;
     let start = kernel_common::clint::mtime_raw();
     loop {
-        let nonces = [
-            WorkNonce::from(nonce_state.wrapping_add(1)),
-            WorkNonce::from(nonce_state.wrapping_add(2)),
-            WorkNonce::from(nonce_state.wrapping_add(3)),
-            WorkNonce::from(nonce_state.wrapping_add(4)),
-        ];
+        let base = nonce_state.wrapping_add(1);
+        *nonce_state = nonce_state.wrapping_add(16);
+        iters += 16;
 
-        let difficulties = diff.get_difficulties_batch_4(root, nonces);
-        iters += 4;
-
-        for i in 0..4 {
-            if difficulties[i] >= threshold {
-                *nonce_state += 4;
-                let elapsed = kernel_common::clint::mtime_raw().wrapping_sub(start);
-                return (nonces[i], elapsed, iters);
-            }
+        if let Some(found) = DifficultyV1::pow_search_16(root, base, threshold, 1) {
+            let elapsed = kernel_common::clint::mtime_raw().wrapping_sub(start);
+            return (found, elapsed, iters);
         }
-        *nonce_state += 4;
 
         if iters % 16384 == 0 {
             kernel_common::watchdog::kick();
@@ -2874,7 +2937,11 @@ fn run_deterministic_block_test(
 
     let st = rsnano_sha::blake2b::self_test();
     assert_eq!(st, 0, "[block-test] blake2b SIMD self-test failed");
+    let ed_st = rsnano_sha::ed25519::self_test();
+    assert_eq!(ed_st, 0, "[block-test] ed25519 16-way SIMD self-test failed");
     rsnano_sha::ed25519::init_radix16_precomp();
+    // Drain one-time boot startup tasks before Phase 1 benchmark timing starts
+    drain_async_events(exec);
 
     let key = rsnano_core::DEV_GENESIS_KEY.clone();
     let account = key.public_key().as_account();
@@ -3058,9 +3125,18 @@ fn run_deterministic_block_test(
     let s1_end = kernel_common::clint::mtime_raw();
     let batch_s1 = s1_end.wrapping_sub(s1_start);
 
-    // Stage 2: Batch Entry PoW Validation (Difficulty threshold verification for all blocks)
+    // Stage 2: Batch Entry PoW Validation (16-way SIMD difficulty threshold verification)
     let s2_start = kernel_common::clint::mtime_raw();
-    for b in &blocks {
+    let mut pow_idx = 0usize;
+    while pow_idx + 16 <= blocks.len() {
+        let chunk: [&rsnano_core::Block; 16] = core::array::from_fn(|k| &blocks[pow_idx + k]);
+        let flags = node.network_params.work.validate_entry_blocks_16(chunk);
+        for ok in flags {
+            assert!(ok, "[block-test] Batch entry PoW validation failed");
+        }
+        pow_idx += 16;
+    }
+    for b in &blocks[pow_idx..] {
         let b_pow_ok = node.network_params.work.validate_entry_block(b);
         assert!(b_pow_ok, "[block-test] Batch entry PoW validation failed");
     }
@@ -3094,28 +3170,53 @@ fn run_deterministic_block_test(
     let mut batch_s5 = vote_t1.wrapping_sub(vote_t0);
 
     for i in 0..BATCH_COUNT as usize {
+        if node.block_confirmed(&hashes[i]) {
+            continue;
+        }
         kernel_common::watchdog::kick();
 
         let t4_0 = kernel_common::clint::mtime_raw();
         drain_async_events(exec);
-        node.election_schedulers.run_once();
-        drain_async_events(exec);
-        assert!(node.is_active_hash(&hashes[i]));
+        if !node.is_active_hash(&hashes[i]) && !node.block_confirmed(&hashes[i]) {
+            node.election_schedulers.run_once();
+            drain_async_events(exec);
+        }
         let t4_1 = kernel_common::clint::mtime_raw();
         batch_s4 += t4_1.wrapping_sub(t4_0);
 
+        if node.block_confirmed(&hashes[i]) {
+            continue;
+        }
+        assert!(
+            node.is_active_hash(&hashes[i]),
+            "[block-test] Batch block {} did not activate in AEC",
+            i
+        );
+
         let t5_0 = kernel_common::clint::mtime_raw();
-        assert!(node.vote_processor_queue.enqueue(
-            bundled_vote.clone(),
-            None,
-            rsnano_core::VoteSource::Live,
-            None,
-        ));
+        // Apply triggered cached votes from VoteCache first; enqueue bundled_vote if not yet cached
+        node.vote_cache_processor.run_once();
         node.vote_processor.run_once();
         drain_async_events(exec);
         node.confirming_set.run_once();
         drain_async_events(exec);
-        assert!(node.block_confirmed(&hashes[i]));
+        if !node.block_confirmed(&hashes[i]) {
+            assert!(node.vote_processor_queue.enqueue(
+                bundled_vote.clone(),
+                None,
+                rsnano_core::VoteSource::Live,
+                None,
+            ));
+            node.vote_processor.run_once();
+            drain_async_events(exec);
+            node.confirming_set.run_once();
+            drain_async_events(exec);
+        }
+        assert!(
+            node.block_confirmed(&hashes[i]),
+            "[block-test] Batch block {} not cemented after ConfirmingSet",
+            i
+        );
         let t5_1 = kernel_common::clint::mtime_raw();
         batch_s5 += t5_1.wrapping_sub(t5_0);
     }

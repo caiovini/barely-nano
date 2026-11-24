@@ -42,8 +42,10 @@ pub(crate) fn spawn_backpressure_processor<T, I>(
             }
             if processed > 0 {
                 async_rt::yield_now().await;
+            } else if receiver.is_disconnected() {
+                break;
             } else {
-                async_rt::sleep(core::time::Duration::from_millis(10)).await;
+                receiver.wait_for_data().await;
             }
         }
     });

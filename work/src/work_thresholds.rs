@@ -253,6 +253,21 @@ impl WorkThresholds {
         out
     }
 
+    pub fn validate_entry_blocks_16(&self, blocks: [&Block; 16]) -> [bool; 16] {
+        let roots: [Root; 16] = core::array::from_fn(|i| blocks[i].root());
+        let works: [WorkNonce; 16] = core::array::from_fn(|i| blocks[i].work());
+        let root_refs: [&Root; 16] = core::array::from_fn(|i| &roots[i]);
+        let difficulties = self.difficulty.get_difficulties_batch_16_roots(root_refs, works);
+        let mut out = [false; 16];
+        for i in 0..16 {
+            if difficulties[i] >= self.base {
+                blocks[i].set_pow_base_verified(true);
+            }
+            out[i] = difficulties[i] >= self.threshold_entry(blocks[i].block_type());
+        }
+        out
+    }
+
     pub fn is_valid_pow(&self, block: &Block, details: &BlockDetails) -> bool {
         self.difficulty_block(block) >= self.threshold(details)
     }

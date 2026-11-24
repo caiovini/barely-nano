@@ -35,3 +35,6 @@ pub mod work;
 pub use node::*;
 pub use node_builder::*;
 pub use representatives::OnlineWeightSampler;
+pub use rsnano_work::{
+    has_active_work as work_has_active_job, try_help_work as work_try_help_chunk,
+};

@@ -1,6 +1,6 @@
 use crate::{
     block_cementer::BlockCementer,
-    block_insertion::{BlockInserter, BlockValidatorFactory},
+    block_insertion::{BlockInserter, BlockValidatorFactory, PrefetchedBlockData},
     vote_verifier::VoteVerifier,
     AnySet, BlockRollbackPerformer, LedgerConstants, LedgerSet, OwningAnySet, OwningConfirmedSet,
     OwningUnconfirmedSet, RepWeightCache, RepWeightsUpdater, RollbackError,
@@ -243,6 +243,8 @@ impl<K: BatchHashKey, V> FastBatchMap<K, V> {
     }
 }
 
+static STRIPE_DISPATCH_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 static LEDGER_B_ONLINE: AtomicBool = AtomicBool::new(false);
 static LEDGER_B_JOB_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static LEDGER_B_JOB_DONE: AtomicBool = AtomicBool::new(false);
@@ -255,15 +257,330 @@ static LEDGER_C_JOB_DONE: AtomicBool = AtomicBool::new(false);
 pub static LEDGER_C_JOBS_COMPLETED: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-struct LedgerStripeFlushJob {
-    store: *const BtreeStore,
-    ext_succ: *const [(BlockHash, BlockHash)],
-    pending: *const [(rsnano_core::PendingKey, DeferredPendingOp)],
-    all_sorted_blocks: *const [(BlockHash, SavedBlock, BlockHash)],
-    blocks_slice: *const [(BlockHash, SavedBlock, BlockHash)],
-    accounts: *const [(Account, (AccountInfo, AccountInfo))],
-    shard_start: usize,
-    shard_end: usize,
+const PREFETCH_NEED_EXISTS: u8 = 1;
+const PREFETCH_NEED_BLOCK: u8 = 2;
+
+enum LedgerStripeJob {
+    PrefetchReads {
+        store: *const BtreeStore,
+        hash_queries: *const [(BlockHash, u8)],
+        hash_results: *mut [(bool, Option<SavedBlock>)],
+        acct_queries: *const [Account],
+        acct_results: *mut [Option<AccountInfo>],
+        pend_queries: *const [rsnano_core::PendingKey],
+        pend_results: *mut [Option<rsnano_core::PendingInfo>],
+    },
+    FlushWrites {
+        store: *const BtreeStore,
+        ext_succ: *const [(BlockHash, BlockHash)],
+        pending: *const [(rsnano_core::PendingKey, DeferredPendingOp)],
+        all_sorted_blocks: *const [(BlockHash, SavedBlock, BlockHash)],
+        blocks_slice: *const [(BlockHash, SavedBlock, BlockHash)],
+        accounts: *const [(Account, (AccountInfo, AccountInfo))],
+        shard_start: usize,
+        shard_end: usize,
+    },
+    CementPrefetch {
+        store: *const BtreeStore,
+        target_hashes: *const [BlockHash],
+        target_blocks: *mut [Option<SavedBlock>],
+    },
+    FlushConfHeights {
+        store: *const BtreeStore,
+        heights_slice: *const [(Account, rsnano_core::ConfirmationHeightInfo)],
+    },
+}
+
+#[inline]
+fn execute_prefetch_slice(
+    store: &BtreeStore,
+    hash_q: &[(BlockHash, u8)],
+    hash_r: &mut [(bool, Option<SavedBlock>)],
+    acct_q: &[Account],
+    acct_r: &mut [Option<AccountInfo>],
+    pend_q: &[rsnano_core::PendingKey],
+    pend_r: &mut [Option<rsnano_core::PendingInfo>],
+) {
+    for ((hash, flags), out) in hash_q.iter().zip(hash_r.iter_mut()) {
+        if (flags & PREFETCH_NEED_BLOCK) != 0 {
+            let blk = store.block.get(hash);
+            let exists =
+                blk.is_some() || ((flags & PREFETCH_NEED_EXISTS) != 0 && store.pruned.exists(hash));
+            *out = (exists, blk);
+        } else {
+            let exists = store.block.exists(hash) || store.pruned.exists(hash);
+            *out = (exists, None);
+        }
+    }
+    for (acc, out) in acct_q.iter().zip(acct_r.iter_mut()) {
+        *out = store.account.get(acc);
+    }
+    for (pk, out) in pend_q.iter().zip(pend_r.iter_mut()) {
+        *out = store.pending.get(pk);
+    }
+}
+
+#[inline]
+fn execute_cement_prefetch_slice(
+    store: &BtreeStore,
+    hashes: &[BlockHash],
+    blocks: &mut [Option<SavedBlock>],
+) {
+    for (h, out) in hashes.iter().zip(blocks.iter_mut()) {
+        *out = store.block.get(h);
+    }
+}
+
+#[inline]
+fn execute_conf_heights_slice(
+    store: &BtreeStore,
+    heights: &[(Account, rsnano_core::ConfirmationHeightInfo)],
+) {
+    for (account, conf_height) in heights {
+        store.confirmation_height.put(account, conf_height);
+    }
+}
+
+/// SAFETY: Caller must guarantee all raw pointers inside `job` remain valid and exclusively
+/// partitioned across harts until completion is acknowledged.
+#[inline]
+unsafe fn execute_stripe_job(job: &LedgerStripeJob) {
+    match *job {
+        LedgerStripeJob::PrefetchReads {
+            store,
+            hash_queries,
+            hash_results,
+            acct_queries,
+            acct_results,
+            pend_queries,
+            pend_results,
+        } => {
+            execute_prefetch_slice(
+                &*store,
+                &*hash_queries,
+                &mut *hash_results,
+                &*acct_queries,
+                &mut *acct_results,
+                &*pend_queries,
+                &mut *pend_results,
+            );
+        }
+        LedgerStripeJob::FlushWrites {
+            store,
+            ext_succ,
+            pending,
+            all_sorted_blocks,
+            blocks_slice,
+            accounts,
+            shard_start,
+            shard_end,
+        } => {
+            flush_shard_range(
+                &*store,
+                &*ext_succ,
+                &*pending,
+                &*all_sorted_blocks,
+                &*blocks_slice,
+                &*accounts,
+                shard_start,
+                shard_end,
+            );
+        }
+        LedgerStripeJob::CementPrefetch {
+            store,
+            target_hashes,
+            target_blocks,
+        } => {
+            execute_cement_prefetch_slice(&*store, &*target_hashes, &mut *target_blocks);
+        }
+        LedgerStripeJob::FlushConfHeights {
+            store,
+            heights_slice,
+        } => {
+            execute_conf_heights_slice(&*store, &*heights_slice);
+        }
+    }
+}
+
+pub(crate) fn prefetch_cement_blocks_parallel(
+    store: &BtreeStore,
+    sorted_hashes: &[BlockHash],
+) -> Vec<Option<SavedBlock>> {
+    let n = sorted_hashes.len();
+    let mut results = alloc::vec![None; n];
+    if n == 0 {
+        return results;
+    }
+
+    let stripe_guard = STRIPE_DISPATCH_LOCK.try_lock();
+    let b_online = stripe_guard.is_some() && LEDGER_B_ONLINE.load(Ordering::Relaxed);
+    let c_online = stripe_guard.is_some()
+        && LEDGER_C_ONLINE.load(Ordering::Relaxed)
+        && !kernel_common::storage::wal::is_wal_bg_pending();
+
+    if b_online && c_online && n >= 12 {
+        let cut1 = sorted_hashes.partition_point(|h| (h.as_bytes()[0] >> 2) < 21);
+        let cut2 = sorted_hashes.partition_point(|h| (h.as_bytes()[0] >> 2) < 42);
+        let (r0, rest) = results.split_at_mut(cut1);
+        let (r1, r2) = rest.split_at_mut(cut2 - cut1);
+
+        let job_b = LedgerStripeJob::CementPrefetch {
+            store: store as *const BtreeStore,
+            target_hashes: &sorted_hashes[cut1..cut2] as *const [BlockHash],
+            target_blocks: r1 as *mut [Option<SavedBlock>],
+        };
+        let job_c = LedgerStripeJob::CementPrefetch {
+            store: store as *const BtreeStore,
+            target_hashes: &sorted_hashes[cut2..] as *const [BlockHash],
+            target_blocks: r2 as *mut [Option<SavedBlock>],
+        };
+        let job_b_addr = &job_b as *const LedgerStripeJob as usize;
+        let job_c_addr = &job_c as *const LedgerStripeJob as usize;
+        LEDGER_B_JOB_DONE.store(false, Ordering::Release);
+        LEDGER_C_JOB_DONE.store(false, Ordering::Release);
+        LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+        LEDGER_C_JOB_PTR.store(job_c_addr, Ordering::Release);
+
+        execute_cement_prefetch_slice(store, &sorted_hashes[..cut1], r0);
+
+        let stole_b = LEDGER_B_JOB_PTR
+            .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if stole_b {
+            execute_cement_prefetch_slice(store, &sorted_hashes[cut1..cut2], r1);
+        }
+        let stole_c = LEDGER_C_JOB_PTR
+            .compare_exchange(job_c_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if stole_c {
+            execute_cement_prefetch_slice(store, &sorted_hashes[cut2..], r2);
+        }
+        if !stole_b {
+            while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+        if !stole_c {
+            while !LEDGER_C_JOB_DONE.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+    } else if b_online && n >= 8 {
+        let mid = sorted_hashes.partition_point(|h| (h.as_bytes()[0] >> 2) < 32);
+        let (r0, r1) = results.split_at_mut(mid);
+        let job_b = LedgerStripeJob::CementPrefetch {
+            store: store as *const BtreeStore,
+            target_hashes: &sorted_hashes[mid..] as *const [BlockHash],
+            target_blocks: r1 as *mut [Option<SavedBlock>],
+        };
+        let job_b_addr = &job_b as *const LedgerStripeJob as usize;
+        LEDGER_B_JOB_DONE.store(false, Ordering::Release);
+        LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+
+        execute_cement_prefetch_slice(store, &sorted_hashes[..mid], r0);
+
+        if LEDGER_B_JOB_PTR
+            .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            execute_cement_prefetch_slice(store, &sorted_hashes[mid..], r1);
+        } else {
+            while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+    } else {
+        execute_cement_prefetch_slice(store, sorted_hashes, &mut results);
+    }
+
+    results
+}
+
+pub(crate) fn flush_conf_heights_parallel(
+    store: &BtreeStore,
+    sorted_heights: &[(Account, rsnano_core::ConfirmationHeightInfo)],
+) {
+    let n = sorted_heights.len();
+    if n == 0 {
+        return;
+    }
+
+    let stripe_guard = STRIPE_DISPATCH_LOCK.try_lock();
+    let b_online = stripe_guard.is_some() && LEDGER_B_ONLINE.load(Ordering::Relaxed);
+    let c_online = stripe_guard.is_some()
+        && LEDGER_C_ONLINE.load(Ordering::Relaxed)
+        && !kernel_common::storage::wal::is_wal_bg_pending();
+
+    if b_online && c_online && n >= 12 {
+        let cut1 = sorted_heights.partition_point(|(a, _)| (a.as_bytes()[0] >> 2) < 21);
+        let cut2 = sorted_heights.partition_point(|(a, _)| (a.as_bytes()[0] >> 2) < 42);
+        let job_b = LedgerStripeJob::FlushConfHeights {
+            store: store as *const BtreeStore,
+            heights_slice: &sorted_heights[cut1..cut2]
+                as *const [(Account, rsnano_core::ConfirmationHeightInfo)],
+        };
+        let job_c = LedgerStripeJob::FlushConfHeights {
+            store: store as *const BtreeStore,
+            heights_slice: &sorted_heights[cut2..]
+                as *const [(Account, rsnano_core::ConfirmationHeightInfo)],
+        };
+        let job_b_addr = &job_b as *const LedgerStripeJob as usize;
+        let job_c_addr = &job_c as *const LedgerStripeJob as usize;
+        LEDGER_B_JOB_DONE.store(false, Ordering::Release);
+        LEDGER_C_JOB_DONE.store(false, Ordering::Release);
+        LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+        LEDGER_C_JOB_PTR.store(job_c_addr, Ordering::Release);
+
+        execute_conf_heights_slice(store, &sorted_heights[..cut1]);
+
+        let stole_b = LEDGER_B_JOB_PTR
+            .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if stole_b {
+            execute_conf_heights_slice(store, &sorted_heights[cut1..cut2]);
+        }
+        let stole_c = LEDGER_C_JOB_PTR
+            .compare_exchange(job_c_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if stole_c {
+            execute_conf_heights_slice(store, &sorted_heights[cut2..]);
+        }
+        if !stole_b {
+            while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+        if !stole_c {
+            while !LEDGER_C_JOB_DONE.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+    } else if b_online && n >= 8 {
+        let mid = sorted_heights.partition_point(|(a, _)| (a.as_bytes()[0] >> 2) < 32);
+        let job_b = LedgerStripeJob::FlushConfHeights {
+            store: store as *const BtreeStore,
+            heights_slice: &sorted_heights[mid..]
+                as *const [(Account, rsnano_core::ConfirmationHeightInfo)],
+        };
+        let job_b_addr = &job_b as *const LedgerStripeJob as usize;
+        LEDGER_B_JOB_DONE.store(false, Ordering::Release);
+        LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+
+        execute_conf_heights_slice(store, &sorted_heights[..mid]);
+
+        if LEDGER_B_JOB_PTR
+            .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            execute_conf_heights_slice(store, &sorted_heights[mid..]);
+        } else {
+            while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+    } else {
+        execute_conf_heights_slice(store, sorted_heights);
+    }
 }
 
 /// Marks Hart 5 (`Ledger-B`, Shards `21..=41`, half-open `[21, 42)`) as online so Hart 6 (`Ledger-A`, Shards `0..=20`)
@@ -329,7 +646,7 @@ fn flush_shard_range(
     }
 }
 
-/// Polled by Hart 5 (`Ledger-B`) in Cluster 1 to execute Shards `21..42` B-Tree mutations
+/// Polled by Hart 5 (`Ledger-B`) in Cluster 1 to execute Shards `21..42` B-Tree reads/writes
 /// in parallel while Hart 6 (`Ledger-A`) executes Shards `0..21` and Hart 7 (`Ledger-C`) executes `42..64`.
 #[inline]
 pub fn try_run_ledger_b_job() -> bool {
@@ -340,24 +657,14 @@ pub fn try_run_ledger_b_job() -> bool {
     // SAFETY: `job_addr` was published by Hart 6 on its stack and Hart 6 spins on
     // `LEDGER_B_JOB_DONE` with `Acquire` ordering before returning from the frame.
     unsafe {
-        let job = &*(job_addr as *const LedgerStripeFlushJob);
-        flush_shard_range(
-            &*job.store,
-            &*job.ext_succ,
-            &*job.pending,
-            &*job.all_sorted_blocks,
-            &*job.blocks_slice,
-            &*job.accounts,
-            job.shard_start,
-            job.shard_end,
-        );
+        execute_stripe_job(&*(job_addr as *const LedgerStripeJob));
     }
     LEDGER_B_JOBS_COMPLETED.fetch_add(1, Ordering::Relaxed);
     LEDGER_B_JOB_DONE.store(true, Ordering::Release);
     true
 }
 
-/// Polled by Hart 7 (`Ledger-C`) in Cluster 1 to execute Shards `42..64` B-Tree mutations
+/// Polled by Hart 7 (`Ledger-C`) in Cluster 1 to execute Shards `42..64` B-Tree reads/writes
 /// in parallel while Hart 6 (`Ledger-A`) executes Shards `0..21` and Hart 5 (`Ledger-B`) executes `21..42`.
 #[inline]
 pub fn try_run_ledger_c_job() -> bool {
@@ -368,17 +675,7 @@ pub fn try_run_ledger_c_job() -> bool {
     // SAFETY: `job_addr` was published by Hart 6 on its stack and Hart 6 spins on
     // `LEDGER_C_JOB_DONE` with `Acquire` ordering before returning from the frame.
     unsafe {
-        let job = &*(job_addr as *const LedgerStripeFlushJob);
-        flush_shard_range(
-            &*job.store,
-            &*job.ext_succ,
-            &*job.pending,
-            &*job.all_sorted_blocks,
-            &*job.blocks_slice,
-            &*job.accounts,
-            job.shard_start,
-            job.shard_end,
-        );
+        execute_stripe_job(&*(job_addr as *const LedgerStripeJob));
     }
     LEDGER_C_JOBS_COMPLETED.fetch_add(1, Ordering::Relaxed);
     LEDGER_C_JOB_DONE.store(true, Ordering::Release);
@@ -978,6 +1275,241 @@ impl Ledger {
         let mut old_tips: FastBatchMap<Account, BlockHash> = FastBatchMap::with_capacity(16);
         let batch_now = rsnano_core::utils::UnixMillisTimestamp::now();
 
+        // Parallel 3-Stripe Sorted B-Tree Read Pre-Fetch across Cluster 1 (Harts 5, 6, 7):
+        // Resolves deduplicated, shard-sorted `block`, `account`, and `pending` B-Tree lookups
+        // in parallel across Shards 0..21, 21..42, and 42..64 before sequential batch state validation.
+        let mut hash_queries: Vec<(BlockHash, u8)> = Vec::new();
+        let mut hash_results: Vec<(bool, Option<SavedBlock>)> = Vec::new();
+        let mut acct_queries: Vec<Account> = Vec::new();
+        let mut acct_results: Vec<Option<AccountInfo>> = Vec::new();
+        let mut pend_queries: Vec<rsnano_core::PendingKey> = Vec::new();
+        let mut pend_results: Vec<Option<rsnano_core::PendingInfo>> = Vec::new();
+
+        if len >= 4 {
+            let pf_t0 = kernel_common::clint::mtime();
+            let mut produced_in_batch: FastBatchMap<BlockHash, ()> = FastBatchMap::with_capacity(len);
+            let mut raw_hashes: Vec<(BlockHash, u8)> = Vec::with_capacity(len * 2);
+            acct_queries.reserve(len);
+            pend_queries.reserve(len / 2);
+
+            for &(block, _) in &items {
+                let h = block.hash();
+                raw_hashes.push((h, PREFETCH_NEED_EXISTS));
+
+                let prev = block.previous();
+                if !prev.is_zero()
+                    && !produced_in_batch.contains_key(&prev)
+                    && (cfg!(test) || self.store.block.may_exist(&prev))
+                {
+                    raw_hashes.push((prev, PREFETCH_NEED_BLOCK));
+                }
+
+                let src = block.source_or_link();
+                let is_epoch_link = matches!(
+                    block,
+                    Block::State(s) if self.constants.epochs.is_epoch_link(&s.link())
+                );
+                if !src.is_zero() && !is_epoch_link && !produced_in_batch.contains_key(&src) {
+                    raw_hashes.push((src, PREFETCH_NEED_EXISTS));
+                    if let Some(acc) = block.account_field() {
+                        if !acc.is_zero() {
+                            pend_queries.push(rsnano_core::PendingKey::new(acc, src));
+                        }
+                    }
+                }
+
+                if let Some(acc) = block.account_field() {
+                    if !acc.is_zero() {
+                        acct_queries.push(acc);
+                    }
+                }
+                produced_in_batch.insert(h, ());
+            }
+
+            raw_hashes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            hash_queries.reserve(raw_hashes.len());
+            for (h, f) in raw_hashes {
+                if let Some(last) = hash_queries.last_mut() {
+                    if last.0 == h {
+                        last.1 |= f;
+                        continue;
+                    }
+                }
+                hash_queries.push((h, f));
+            }
+            acct_queries.sort_unstable();
+            acct_queries.dedup();
+            pend_queries.sort_unstable();
+            pend_queries.dedup();
+
+            hash_results.resize(hash_queries.len(), (false, None));
+            acct_results.resize(acct_queries.len(), None);
+            pend_results.resize(pend_queries.len(), None);
+
+            let stripe_guard = STRIPE_DISPATCH_LOCK.try_lock();
+            let b_online = stripe_guard.is_some() && LEDGER_B_ONLINE.load(Ordering::Relaxed);
+            let c_online = stripe_guard.is_some()
+                && LEDGER_C_ONLINE.load(Ordering::Relaxed)
+                && !kernel_common::storage::wal::is_wal_bg_pending();
+
+            if b_online && c_online {
+                let h_cut1 = hash_queries.partition_point(|(k, _)| (k.as_bytes()[0] >> 2) < 21);
+                let h_cut2 = hash_queries.partition_point(|(k, _)| (k.as_bytes()[0] >> 2) < 42);
+                let a_cut1 = acct_queries.partition_point(|k| (k.as_bytes()[0] >> 2) < 21);
+                let a_cut2 = acct_queries.partition_point(|k| (k.as_bytes()[0] >> 2) < 42);
+                let p_cut1 =
+                    pend_queries.partition_point(|k| (k.receiving_account.as_bytes()[0] >> 2) < 21);
+                let p_cut2 =
+                    pend_queries.partition_point(|k| (k.receiving_account.as_bytes()[0] >> 2) < 42);
+
+                let (hr0, hr_rest) = hash_results.split_at_mut(h_cut1);
+                let (hr1, hr2) = hr_rest.split_at_mut(h_cut2 - h_cut1);
+                let (ar0, ar_rest) = acct_results.split_at_mut(a_cut1);
+                let (ar1, ar2) = ar_rest.split_at_mut(a_cut2 - a_cut1);
+                let (pr0, pr_rest) = pend_results.split_at_mut(p_cut1);
+                let (pr1, pr2) = pr_rest.split_at_mut(p_cut2 - p_cut1);
+
+                let job_b = LedgerStripeJob::PrefetchReads {
+                    store: &self.store as *const BtreeStore,
+                    hash_queries: &hash_queries[h_cut1..h_cut2] as *const [(BlockHash, u8)],
+                    hash_results: hr1 as *mut [(bool, Option<SavedBlock>)],
+                    acct_queries: &acct_queries[a_cut1..a_cut2] as *const [Account],
+                    acct_results: ar1 as *mut [Option<AccountInfo>],
+                    pend_queries: &pend_queries[p_cut1..p_cut2]
+                        as *const [rsnano_core::PendingKey],
+                    pend_results: pr1 as *mut [Option<rsnano_core::PendingInfo>],
+                };
+                let job_c = LedgerStripeJob::PrefetchReads {
+                    store: &self.store as *const BtreeStore,
+                    hash_queries: &hash_queries[h_cut2..] as *const [(BlockHash, u8)],
+                    hash_results: hr2 as *mut [(bool, Option<SavedBlock>)],
+                    acct_queries: &acct_queries[a_cut2..] as *const [Account],
+                    acct_results: ar2 as *mut [Option<AccountInfo>],
+                    pend_queries: &pend_queries[p_cut2..] as *const [rsnano_core::PendingKey],
+                    pend_results: pr2 as *mut [Option<rsnano_core::PendingInfo>],
+                };
+                let job_b_addr = &job_b as *const LedgerStripeJob as usize;
+                let job_c_addr = &job_c as *const LedgerStripeJob as usize;
+                LEDGER_B_JOB_DONE.store(false, Ordering::Release);
+                LEDGER_C_JOB_DONE.store(false, Ordering::Release);
+                LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+                LEDGER_C_JOB_PTR.store(job_c_addr, Ordering::Release);
+
+                execute_prefetch_slice(
+                    &self.store,
+                    &hash_queries[..h_cut1],
+                    hr0,
+                    &acct_queries[..a_cut1],
+                    ar0,
+                    &pend_queries[..p_cut1],
+                    pr0,
+                );
+
+                let stole_b = LEDGER_B_JOB_PTR
+                    .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+                if stole_b {
+                    execute_prefetch_slice(
+                        &self.store,
+                        &hash_queries[h_cut1..h_cut2],
+                        hr1,
+                        &acct_queries[a_cut1..a_cut2],
+                        ar1,
+                        &pend_queries[p_cut1..p_cut2],
+                        pr1,
+                    );
+                }
+                let stole_c = LEDGER_C_JOB_PTR
+                    .compare_exchange(job_c_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+                if stole_c {
+                    execute_prefetch_slice(
+                        &self.store,
+                        &hash_queries[h_cut2..],
+                        hr2,
+                        &acct_queries[a_cut2..],
+                        ar2,
+                        &pend_queries[p_cut2..],
+                        pr2,
+                    );
+                }
+                if !stole_b {
+                    while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
+                        core::hint::spin_loop();
+                    }
+                }
+                if !stole_c {
+                    while !LEDGER_C_JOB_DONE.load(Ordering::Acquire) {
+                        core::hint::spin_loop();
+                    }
+                }
+            } else if b_online {
+                let h_mid = hash_queries.partition_point(|(k, _)| (k.as_bytes()[0] >> 2) < 32);
+                let a_mid = acct_queries.partition_point(|k| (k.as_bytes()[0] >> 2) < 32);
+                let p_mid =
+                    pend_queries.partition_point(|k| (k.receiving_account.as_bytes()[0] >> 2) < 32);
+                let (hr0, hr1) = hash_results.split_at_mut(h_mid);
+                let (ar0, ar1) = acct_results.split_at_mut(a_mid);
+                let (pr0, pr1) = pend_results.split_at_mut(p_mid);
+
+                let job_b = LedgerStripeJob::PrefetchReads {
+                    store: &self.store as *const BtreeStore,
+                    hash_queries: &hash_queries[h_mid..] as *const [(BlockHash, u8)],
+                    hash_results: hr1 as *mut [(bool, Option<SavedBlock>)],
+                    acct_queries: &acct_queries[a_mid..] as *const [Account],
+                    acct_results: ar1 as *mut [Option<AccountInfo>],
+                    pend_queries: &pend_queries[p_mid..] as *const [rsnano_core::PendingKey],
+                    pend_results: pr1 as *mut [Option<rsnano_core::PendingInfo>],
+                };
+                let job_b_addr = &job_b as *const LedgerStripeJob as usize;
+                LEDGER_B_JOB_DONE.store(false, Ordering::Release);
+                LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
+
+                execute_prefetch_slice(
+                    &self.store,
+                    &hash_queries[..h_mid],
+                    hr0,
+                    &acct_queries[..a_mid],
+                    ar0,
+                    &pend_queries[..p_mid],
+                    pr0,
+                );
+
+                if LEDGER_B_JOB_PTR
+                    .compare_exchange(job_b_addr, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    execute_prefetch_slice(
+                        &self.store,
+                        &hash_queries[h_mid..],
+                        hr1,
+                        &acct_queries[a_mid..],
+                        ar1,
+                        &pend_queries[p_mid..],
+                        pr1,
+                    );
+                } else {
+                    while !LEDGER_B_JOB_DONE.load(Ordering::Acquire) {
+                        core::hint::spin_loop();
+                    }
+                }
+            } else {
+                execute_prefetch_slice(
+                    &self.store,
+                    &hash_queries,
+                    &mut hash_results,
+                    &acct_queries,
+                    &mut acct_results,
+                    &pend_queries,
+                    &mut pend_results,
+                );
+            }
+            LEDGER_PROF[0].fetch_add(
+                kernel_common::clint::mtime() - pf_t0,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+
         for (idx, &(block, signature_verified)) in items.iter().enumerate() {
             if idx + 4 < len {
                 let (ahead, _) = items[idx + 4];
@@ -1022,6 +1554,7 @@ impl Ledger {
 
             // If this is an epoch open block (or test mode) that queries `receivable_exists`,
             // flush any deferred pending entries first so B-Tree scan sees them.
+            let mut flushed_deferred_pending = false;
             if !deferred_pending.is_empty()
                 && (cfg!(test)
                     || (block.is_open()
@@ -1035,6 +1568,7 @@ impl Ledger {
                     }
                 }
                 deferred_pending.clear();
+                flushed_deferred_pending = true;
             }
 
             let in_batch_pending = match (candidate_account, source_hash.is_zero()) {
@@ -1049,6 +1583,73 @@ impl Ledger {
                 _ => None,
             };
 
+            let prefetched = if !hash_queries.is_empty() {
+                let disk_block_exists = if !in_batch_exists {
+                    hash_queries
+                        .binary_search_by(|(k, _)| k.cmp(&hash))
+                        .ok()
+                        .map(|i| hash_results[i].0)
+                } else {
+                    None
+                };
+                let disk_prev_block = if !prev_hash.is_zero() && in_batch_prev.is_none() {
+                    hash_queries
+                        .binary_search_by(|(k, _)| k.cmp(&prev_hash))
+                        .ok()
+                        .and_then(|i| {
+                            if (hash_queries[i].1 & PREFETCH_NEED_BLOCK) != 0 {
+                                Some(hash_results[i].1.clone())
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+                let direct_acc = block.account_field().filter(|a| !a.is_zero());
+                let disk_account = if in_batch_account.is_none() {
+                    direct_acc.and_then(|acc| {
+                        acct_queries
+                            .binary_search(&acc)
+                            .ok()
+                            .map(|i| acct_results[i].clone())
+                    })
+                } else {
+                    None
+                };
+                let disk_pending = if !flushed_deferred_pending
+                    && in_batch_pending.is_none()
+                    && !source_hash.is_zero()
+                {
+                    direct_acc.and_then(|acc| {
+                        let pk = rsnano_core::PendingKey::new(acc, source_hash);
+                        pend_queries
+                            .binary_search(&pk)
+                            .ok()
+                            .map(|i| pend_results[i].clone())
+                    })
+                } else {
+                    None
+                };
+                let disk_source_exists = if !source_hash.is_zero() && !in_batch_source_exists {
+                    hash_queries
+                        .binary_search_by(|(k, _)| k.cmp(&source_hash))
+                        .ok()
+                        .map(|i| hash_results[i].0)
+                } else {
+                    None
+                };
+                PrefetchedBlockData {
+                    disk_block_exists,
+                    disk_prev_block,
+                    disk_account,
+                    disk_pending,
+                    disk_source_exists,
+                }
+            } else {
+                PrefetchedBlockData::default()
+            };
+
             let any = OwningAnySet::new(&self.store, &self.constants);
             let validator = BlockValidatorFactory::new(&any, &self.constants, block)
                 .create_validator_with_batch_cache(
@@ -1058,6 +1659,7 @@ impl Ledger {
                     in_batch_account,
                     in_batch_source_exists,
                     in_batch_pending,
+                    prefetched,
                     batch_now,
                 );
             let tp1 = kernel_common::clint::mtime();
@@ -1144,7 +1746,11 @@ impl Ledger {
 
             #[cfg(not(test))]
             for (account, (first_old_info, final_new_info)) in deferred_accounts.entries_mut() {
-                let disk_info = self.store.account.get(account);
+                let disk_info = acct_queries
+                    .binary_search(account)
+                    .ok()
+                    .map(|i| acct_results[i].clone())
+                    .unwrap_or_else(|| self.store.account.get(account));
                 let best_old = match disk_info.as_ref() {
                     Some(d) if d.block_count > first_old_info.block_count => d.clone(),
                     _ => first_old_info.clone(),
@@ -1167,12 +1773,14 @@ impl Ledger {
             let pending_slice = deferred_pending.entries();
             let accounts_slice = deferred_accounts.entries();
 
-            let b_online = LEDGER_B_ONLINE.load(Ordering::Relaxed);
-            let c_online = LEDGER_C_ONLINE.load(Ordering::Relaxed)
+            let stripe_guard = STRIPE_DISPATCH_LOCK.try_lock();
+            let b_online = stripe_guard.is_some() && LEDGER_B_ONLINE.load(Ordering::Relaxed);
+            let c_online = stripe_guard.is_some()
+                && LEDGER_C_ONLINE.load(Ordering::Relaxed)
                 && !kernel_common::storage::wal::is_wal_bg_pending();
 
             if b_online && c_online {
-                let job_b = LedgerStripeFlushJob {
+                let job_b = LedgerStripeJob::FlushWrites {
                     store: &self.store as *const BtreeStore,
                     ext_succ: ext_succ_slice as *const [(BlockHash, BlockHash)],
                     pending: pending_slice as *const [(rsnano_core::PendingKey, DeferredPendingOp)],
@@ -1184,7 +1792,7 @@ impl Ledger {
                     shard_start: 21,
                     shard_end: 42,
                 };
-                let job_c = LedgerStripeFlushJob {
+                let job_c = LedgerStripeJob::FlushWrites {
                     store: &self.store as *const BtreeStore,
                     ext_succ: ext_succ_slice as *const [(BlockHash, BlockHash)],
                     pending: pending_slice as *const [(rsnano_core::PendingKey, DeferredPendingOp)],
@@ -1196,8 +1804,8 @@ impl Ledger {
                     shard_start: 42,
                     shard_end: 64,
                 };
-                let job_b_addr = &job_b as *const LedgerStripeFlushJob as usize;
-                let job_c_addr = &job_c as *const LedgerStripeFlushJob as usize;
+                let job_b_addr = &job_b as *const LedgerStripeJob as usize;
+                let job_c_addr = &job_c as *const LedgerStripeJob as usize;
                 LEDGER_B_JOB_DONE.store(false, Ordering::Release);
                 LEDGER_C_JOB_DONE.store(false, Ordering::Release);
                 LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
@@ -1260,7 +1868,7 @@ impl Ledger {
                 }
             } else if b_online {
                 let mid = sorted_blocks.partition_point(|e| (e.0.as_bytes()[0] >> 2) < 32);
-                let job_b = LedgerStripeFlushJob {
+                let job_b = LedgerStripeJob::FlushWrites {
                     store: &self.store as *const BtreeStore,
                     ext_succ: ext_succ_slice as *const [(BlockHash, BlockHash)],
                     pending: pending_slice as *const [(rsnano_core::PendingKey, DeferredPendingOp)],
@@ -1272,7 +1880,7 @@ impl Ledger {
                     shard_start: 32,
                     shard_end: 64,
                 };
-                let job_b_addr = &job_b as *const LedgerStripeFlushJob as usize;
+                let job_b_addr = &job_b as *const LedgerStripeJob as usize;
                 LEDGER_B_JOB_DONE.store(false, Ordering::Release);
                 LEDGER_B_JOB_PTR.store(job_b_addr, Ordering::Release);
 

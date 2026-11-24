@@ -42,6 +42,34 @@ pub trait Difficulty: Send + Sync {
             self.get_difficulty(roots[3], work[3]),
         ]
     }
+    fn get_difficulties_batch_16(&self, root: &Root, work: [WorkNonce; 16]) -> [u64; 16] {
+        let mut out = [0u64; 16];
+        for c in 0..4 {
+            let b = c * 4;
+            let r = self.get_difficulties_batch_4(
+                root,
+                [work[b], work[b + 1], work[b + 2], work[b + 3]],
+            );
+            out[b..b + 4].copy_from_slice(&r);
+        }
+        out
+    }
+    fn get_difficulties_batch_16_roots(
+        &self,
+        roots: [&Root; 16],
+        work: [WorkNonce; 16],
+    ) -> [u64; 16] {
+        let mut out = [0u64; 16];
+        for c in 0..4 {
+            let b = c * 4;
+            let r = self.get_difficulties_batch_4_roots(
+                [roots[b], roots[b + 1], roots[b + 2], roots[b + 3]],
+                [work[b], work[b + 1], work[b + 2], work[b + 3]],
+            );
+            out[b..b + 4].copy_from_slice(&r);
+        }
+        out
+    }
     fn clone(&self) -> Box<dyn Difficulty>;
 }
 
@@ -114,8 +142,48 @@ impl Difficulty for DifficultyV1 {
         tools::blake2b::hash8_batch_4(inputs_refs)
     }
 
+    fn get_difficulties_batch_16(&self, root: &Root, work: [WorkNonce; 16]) -> [u64; 16] {
+        let root_bytes = root.as_bytes();
+        let mut inputs = [[0u8; 40]; 16];
+        for i in 0..16 {
+            inputs[i][..8].copy_from_slice(&work[i].0.to_le_bytes());
+            inputs[i][8..].copy_from_slice(root_bytes);
+        }
+        let inputs_refs: [&[u8]; 16] = core::array::from_fn(|i| &inputs[i][..]);
+        tools::blake2b::hash8_batch_16(inputs_refs)
+    }
+
+    fn get_difficulties_batch_16_roots(
+        &self,
+        roots: [&Root; 16],
+        work: [WorkNonce; 16],
+    ) -> [u64; 16] {
+        let mut inputs = [[0u8; 40]; 16];
+        for i in 0..16 {
+            inputs[i][..8].copy_from_slice(&work[i].0.to_le_bytes());
+            inputs[i][8..].copy_from_slice(roots[i].as_bytes());
+        }
+        let inputs_refs: [&[u8]; 16] = core::array::from_fn(|i| &inputs[i][..]);
+        tools::blake2b::hash8_batch_16(inputs_refs)
+    }
+
     fn clone(&self) -> Box<dyn Difficulty> {
         Box::<DifficultyV1>::default()
+    }
+}
+
+impl DifficultyV1 {
+    /// Searches `16 * iterations` consecutive nonces starting at `start_nonce` in 16-way
+    /// `VLEN=1024` SIMD lockstep without re-unpacking `root`.
+    #[inline]
+    pub fn pow_search_16(
+        root: &Root,
+        start_nonce: u64,
+        min_difficulty: u64,
+        iterations: u32,
+    ) -> Option<WorkNonce> {
+        tools::blake2b::pow_search_16(root.as_bytes(), start_nonce, min_difficulty, iterations)
+            .map(WorkNonce::from)
     }
 }
 

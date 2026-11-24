@@ -425,6 +425,9 @@ impl FieldElement {
     /// Invert 8 field elements simultaneously using Montgomery's trick.
     /// Uses 1 inversion and 21 multiplications instead of 8 full inversions.
     pub fn batch_invert_8(elements: [&FieldElement; 8]) -> [FieldElement; 8] {
+        if elements.iter().any(|e| *e == &FieldElement::ZERO) {
+            return core::array::from_fn(|i| elements[i].invert());
+        }
         let mut c = [FieldElement::ZERO; 8];
         c[0] = *elements[0];
         for i in 1..8 {
@@ -439,6 +442,662 @@ impl FieldElement {
         }
         invs[0] = inv;
         invs
+    }
+
+    /// Invert 16 field elements simultaneously using Montgomery's trick.
+    /// Uses 1 inversion and 45 multiplications instead of 16 full inversions.
+    pub fn batch_invert_16(elements: [&FieldElement; 16]) -> [FieldElement; 16] {
+        if elements.iter().any(|e| *e == &FieldElement::ZERO) {
+            return core::array::from_fn(|i| elements[i].invert());
+        }
+        let mut c = [FieldElement::ZERO; 16];
+        c[0] = *elements[0];
+        for i in 1..16 {
+            c[i] = c[i - 1].mul(elements[i]);
+        }
+
+        let mut inv = c[15].invert();
+        let mut invs = [FieldElement::ZERO; 16];
+        for i in (1..16).rev() {
+            invs[i] = inv.mul(&c[i - 1]);
+            inv = inv.mul(elements[i]);
+        }
+        invs[0] = inv;
+        invs
+    }
+}
+
+const MASK51: u64 = (1u64 << 51) - 1;
+const TWO_P0: u64 = (1u64 << 52) - 38;
+const TWO_P14: u64 = (1u64 << 52) - 2;
+
+/// 16-lane transposed Curve25519 field element in Radix-`2^51` (`5 x 16 x u64` = `5` `VLEN=1024`
+/// `LMUL=1` vector registers). All arithmetic maintains the strict limb invariant `limb < 2^51 + 4096`.
+#[repr(C, align(128))]
+#[derive(Clone, Copy, Debug)]
+pub struct Fe51x16(pub [[u64; 16]; 5]);
+
+impl Fe51x16 {
+    pub const ZERO: Self = Self([[0u64; 16]; 5]);
+    pub const ONE: Self = Self([[1u64; 16], [0u64; 16], [0u64; 16], [0u64; 16], [0u64; 16]]);
+
+    #[inline]
+    pub fn from_fe_array(elems: &[FieldElement; 16]) -> Self {
+        let mut out = Self::ZERO;
+        for lane in 0..16 {
+            let r = elems[lane].reduce();
+            let w0 = r.0[0];
+            let w1 = r.0[1];
+            let w2 = r.0[2];
+            let w3 = r.0[3];
+            out.0[0][lane] = w0 & MASK51;
+            out.0[1][lane] = ((w0 >> 51) | (w1 << 13)) & MASK51;
+            out.0[2][lane] = ((w1 >> 38) | (w2 << 26)) & MASK51;
+            out.0[3][lane] = ((w2 >> 25) | (w3 << 39)) & MASK51;
+            out.0[4][lane] = (w3 >> 12) & MASK51;
+        }
+        out
+    }
+
+    #[inline]
+    pub fn to_fe_array(&self) -> [FieldElement; 16] {
+        let mut out = [FieldElement::ZERO; 16];
+        for lane in 0..16 {
+            let mut l0 = self.0[0][lane];
+            let mut l1 = self.0[1][lane];
+            let mut l2 = self.0[2][lane];
+            let mut l3 = self.0[3][lane];
+            let mut l4 = self.0[4][lane];
+
+            let c0 = l0 >> 51; l0 &= MASK51; l1 += c0;
+            let c1 = l1 >> 51; l1 &= MASK51; l2 += c1;
+            let c2 = l2 >> 51; l2 &= MASK51; l3 += c2;
+            let c3 = l3 >> 51; l3 &= MASK51; l4 += c3;
+            let c4 = l4 >> 51; l4 &= MASK51; l0 += c4 * 19;
+            let c0b = l0 >> 51; l0 &= MASK51; l1 += c0b;
+
+            let w0 = l0 | (l1 << 51);
+            let w1 = (l1 >> 13) | (l2 << 38);
+            let w2 = (l2 >> 26) | (l3 << 25);
+            let w3 = (l3 >> 39) | (l4 << 12);
+            out[lane] = FieldElement([w0, w1, w2, w3]).reduce();
+        }
+        out
+    }
+
+    #[inline]
+    pub fn add(&self, rhs: &Self) -> Self {
+        #[cfg(all(target_arch = "riscv64", feature = "simd"))]
+        if crate::blake2b::has_vlen_1024() {
+            let mut out = Self::ZERO;
+            // SAFETY: `has_vlen_1024()` verified `vlenb >= 128`, so `vsetivli zero, 16, e64, m1`
+            // sets `VL = 16` (`128` bytes per `LMUL=1` register). `self`, `rhs`, and `out` are
+            // valid `5 * 128`-byte `Fe51x16` buffers.
+            unsafe {
+                core::arch::asm!(
+                    "vsetivli zero, 16, e64, m1",
+                    "vle64.v v1, ({a})",
+                    "vle64.v v6, ({b})",
+                    "addi {ta}, {a}, 128",
+                    "addi {tb}, {b}, 128",
+                    "vle64.v v2, ({ta})",
+                    "vle64.v v7, ({tb})",
+                    "addi {ta}, {a}, 256",
+                    "addi {tb}, {b}, 256",
+                    "vle64.v v3, ({ta})",
+                    "vle64.v v8, ({tb})",
+                    "addi {ta}, {a}, 384",
+                    "addi {tb}, {b}, 384",
+                    "vle64.v v4, ({ta})",
+                    "vle64.v v9, ({tb})",
+                    "addi {ta}, {a}, 512",
+                    "addi {tb}, {b}, 512",
+                    "vle64.v v5, ({ta})",
+                    "vle64.v v10, ({tb})",
+
+                    "vadd.vv v1, v1, v6",
+                    "vadd.vv v2, v2, v7",
+                    "vadd.vv v3, v3, v8",
+                    "vadd.vv v4, v4, v9",
+                    "vadd.vv v5, v5, v10",
+
+                    "vsrl.vx v11, v1, {sh51}",
+                    "vsrl.vx v12, v2, {sh51}",
+                    "vsrl.vx v13, v3, {sh51}",
+                    "vsrl.vx v14, v4, {sh51}",
+                    "vsrl.vx v15, v5, {sh51}",
+
+                    "vand.vx v1, v1, {mask51}",
+                    "vand.vx v2, v2, {mask51}",
+                    "vand.vx v3, v3, {mask51}",
+                    "vand.vx v4, v4, {mask51}",
+                    "vand.vx v5, v5, {mask51}",
+
+                    "vmul.vx v15, v15, {c19}",
+                    "vadd.vv v1, v1, v15",
+                    "vadd.vv v2, v2, v11",
+                    "vadd.vv v3, v3, v12",
+                    "vadd.vv v4, v4, v13",
+                    "vadd.vv v5, v5, v14",
+
+                    "vse64.v v1, ({o})",
+                    "addi {ta}, {o}, 128",
+                    "vse64.v v2, ({ta})",
+                    "addi {ta}, {o}, 256",
+                    "vse64.v v3, ({ta})",
+                    "addi {ta}, {o}, 384",
+                    "vse64.v v4, ({ta})",
+                    "addi {ta}, {o}, 512",
+                    "vse64.v v5, ({ta})",
+
+                    a = in(reg) self.0.as_ptr(),
+                    b = in(reg) rhs.0.as_ptr(),
+                    o = in(reg) out.0.as_mut_ptr(),
+                    sh51 = in(reg) 51usize,
+                    mask51 = in(reg) MASK51,
+                    c19 = in(reg) 19u64,
+                    ta = out(reg) _,
+                    tb = out(reg) _,
+                    out("v1") _, out("v2") _, out("v3") _, out("v4") _, out("v5") _,
+                    out("v6") _, out("v7") _, out("v8") _, out("v9") _, out("v10") _,
+                    out("v11") _, out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+                    options(nostack),
+                );
+            }
+            return out;
+        }
+
+        let mut out = Self::ZERO;
+        for lane in 0..16 {
+            let s0 = self.0[0][lane] + rhs.0[0][lane];
+            let s1 = self.0[1][lane] + rhs.0[1][lane];
+            let s2 = self.0[2][lane] + rhs.0[2][lane];
+            let s3 = self.0[3][lane] + rhs.0[3][lane];
+            let s4 = self.0[4][lane] + rhs.0[4][lane];
+
+            out.0[0][lane] = (s0 & MASK51) + (s4 >> 51) * 19;
+            out.0[1][lane] = (s1 & MASK51) + (s0 >> 51);
+            out.0[2][lane] = (s2 & MASK51) + (s1 >> 51);
+            out.0[3][lane] = (s3 & MASK51) + (s2 >> 51);
+            out.0[4][lane] = (s4 & MASK51) + (s3 >> 51);
+        }
+        out
+    }
+
+    #[inline]
+    pub fn sub(&self, rhs: &Self) -> Self {
+        #[cfg(all(target_arch = "riscv64", feature = "simd"))]
+        if crate::blake2b::has_vlen_1024() {
+            let mut out = Self::ZERO;
+            // SAFETY: `has_vlen_1024()` verified `vlenb >= 128`, so `vsetivli zero, 16, e64, m1`
+            // sets `VL = 16`. `rhs` limbs satisfy `< 2^51 + 4096 < TWO_P0`, preventing underflow.
+            unsafe {
+                core::arch::asm!(
+                    "vsetivli zero, 16, e64, m1",
+                    "vle64.v v1, ({a})",
+                    "vle64.v v6, ({b})",
+                    "addi {ta}, {a}, 128",
+                    "addi {tb}, {b}, 128",
+                    "vle64.v v2, ({ta})",
+                    "vle64.v v7, ({tb})",
+                    "addi {ta}, {a}, 256",
+                    "addi {tb}, {b}, 256",
+                    "vle64.v v3, ({ta})",
+                    "vle64.v v8, ({tb})",
+                    "addi {ta}, {a}, 384",
+                    "addi {tb}, {b}, 384",
+                    "vle64.v v4, ({ta})",
+                    "vle64.v v9, ({tb})",
+                    "addi {ta}, {a}, 512",
+                    "addi {tb}, {b}, 512",
+                    "vle64.v v5, ({ta})",
+                    "vle64.v v10, ({tb})",
+
+                    "vadd.vx v1, v1, {tp0}",
+                    "vadd.vx v2, v2, {tp14}",
+                    "vadd.vx v3, v3, {tp14}",
+                    "vadd.vx v4, v4, {tp14}",
+                    "vadd.vx v5, v5, {tp14}",
+
+                    "vsub.vv v1, v1, v6",
+                    "vsub.vv v2, v2, v7",
+                    "vsub.vv v3, v3, v8",
+                    "vsub.vv v4, v4, v9",
+                    "vsub.vv v5, v5, v10",
+
+                    "vsrl.vx v11, v1, {sh51}",
+                    "vsrl.vx v12, v2, {sh51}",
+                    "vsrl.vx v13, v3, {sh51}",
+                    "vsrl.vx v14, v4, {sh51}",
+                    "vsrl.vx v15, v5, {sh51}",
+
+                    "vand.vx v1, v1, {mask51}",
+                    "vand.vx v2, v2, {mask51}",
+                    "vand.vx v3, v3, {mask51}",
+                    "vand.vx v4, v4, {mask51}",
+                    "vand.vx v5, v5, {mask51}",
+
+                    "vmul.vx v15, v15, {c19}",
+                    "vadd.vv v1, v1, v15",
+                    "vadd.vv v2, v2, v11",
+                    "vadd.vv v3, v3, v12",
+                    "vadd.vv v4, v4, v13",
+                    "vadd.vv v5, v5, v14",
+
+                    "vse64.v v1, ({o})",
+                    "addi {ta}, {o}, 128",
+                    "vse64.v v2, ({ta})",
+                    "addi {ta}, {o}, 256",
+                    "vse64.v v3, ({ta})",
+                    "addi {ta}, {o}, 384",
+                    "vse64.v v4, ({ta})",
+                    "addi {ta}, {o}, 512",
+                    "vse64.v v5, ({ta})",
+
+                    a = in(reg) self.0.as_ptr(),
+                    b = in(reg) rhs.0.as_ptr(),
+                    o = in(reg) out.0.as_mut_ptr(),
+                    tp0 = in(reg) TWO_P0,
+                    tp14 = in(reg) TWO_P14,
+                    sh51 = in(reg) 51usize,
+                    mask51 = in(reg) MASK51,
+                    c19 = in(reg) 19u64,
+                    ta = out(reg) _,
+                    tb = out(reg) _,
+                    out("v1") _, out("v2") _, out("v3") _, out("v4") _, out("v5") _,
+                    out("v6") _, out("v7") _, out("v8") _, out("v9") _, out("v10") _,
+                    out("v11") _, out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+                    options(nostack),
+                );
+            }
+            return out;
+        }
+
+        let mut out = Self::ZERO;
+        for lane in 0..16 {
+            let d0 = (self.0[0][lane] + TWO_P0) - rhs.0[0][lane];
+            let d1 = (self.0[1][lane] + TWO_P14) - rhs.0[1][lane];
+            let d2 = (self.0[2][lane] + TWO_P14) - rhs.0[2][lane];
+            let d3 = (self.0[3][lane] + TWO_P14) - rhs.0[3][lane];
+            let d4 = (self.0[4][lane] + TWO_P14) - rhs.0[4][lane];
+
+            out.0[0][lane] = (d0 & MASK51) + (d4 >> 51) * 19;
+            out.0[1][lane] = (d1 & MASK51) + (d0 >> 51);
+            out.0[2][lane] = (d2 & MASK51) + (d1 >> 51);
+            out.0[3][lane] = (d3 & MASK51) + (d2 >> 51);
+            out.0[4][lane] = (d4 & MASK51) + (d3 >> 51);
+        }
+        out
+    }
+
+    #[inline]
+    pub fn mul(&self, rhs: &Self) -> Self {
+        #[cfg(all(target_arch = "riscv64", feature = "simd"))]
+        if crate::blake2b::has_vlen_1024() {
+            let mut out = Self::ZERO;
+            // SAFETY: `has_vlen_1024()` verified `vlenb >= 128` (`VL = 16` for `e64, m1`).
+            // All 16 5-limb multiplications and 128-bit carries stay strictly in `v0..v28`
+            // without touching memory until the final 5 stores to `out`.
+            unsafe {
+                core::arch::asm!(
+                    "vsetivli zero, 16, e64, m1",
+                    "vle64.v v1, ({a})",
+                    "vle64.v v6, ({b})",
+                    "addi {ta}, {a}, 128",
+                    "addi {tb}, {b}, 128",
+                    "vle64.v v2, ({ta})",
+                    "vle64.v v7, ({tb})",
+                    "addi {ta}, {a}, 256",
+                    "addi {tb}, {b}, 256",
+                    "vle64.v v3, ({ta})",
+                    "vle64.v v8, ({tb})",
+                    "addi {ta}, {a}, 384",
+                    "addi {tb}, {b}, 384",
+                    "vle64.v v4, ({ta})",
+                    "vle64.v v9, ({tb})",
+                    "addi {ta}, {a}, 512",
+                    "addi {tb}, {b}, 512",
+                    "vle64.v v5, ({ta})",
+                    "vle64.v v10, ({tb})",
+
+                    "vmul.vx v11, v7, {c19}",
+                    "vmul.vx v12, v8, {c19}",
+                    "vmul.vx v13, v9, {c19}",
+                    "vmul.vx v14, v10, {c19}",
+
+                    // t0 = a0*b0 + a1*(19*b4) + a2*(19*b3) + a3*(19*b2) + a4*(19*b1)
+                    "vmul.vv   v15, v1, v6",
+                    "vmulhu.vv v16, v1, v6",
+                    "vmul.vv   v25, v2, v14", "vmulhu.vv v26, v2, v14",
+                    "vadd.vv   v27, v15, v25", "vmsltu.vv v0, v27, v15", "vmv.v.v v15, v27", "vadc.vvm v16, v16, v26, v0",
+                    "vmul.vv   v25, v3, v13", "vmulhu.vv v26, v3, v13",
+                    "vadd.vv   v27, v15, v25", "vmsltu.vv v0, v27, v15", "vmv.v.v v15, v27", "vadc.vvm v16, v16, v26, v0",
+                    "vmul.vv   v25, v4, v12", "vmulhu.vv v26, v4, v12",
+                    "vadd.vv   v27, v15, v25", "vmsltu.vv v0, v27, v15", "vmv.v.v v15, v27", "vadc.vvm v16, v16, v26, v0",
+                    "vmul.vv   v25, v5, v11", "vmulhu.vv v26, v5, v11",
+                    "vadd.vv   v27, v15, v25", "vmsltu.vv v0, v27, v15", "vmv.v.v v15, v27", "vadc.vvm v16, v16, v26, v0",
+
+                    // t1 = a0*b1 + a1*b0 + a2*(19*b4) + a3*(19*b3) + a4*(19*b2)
+                    "vmul.vv   v17, v1, v7",
+                    "vmulhu.vv v18, v1, v7",
+                    "vmul.vv   v25, v2, v6",  "vmulhu.vv v26, v2, v6",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v26, v0",
+                    "vmul.vv   v25, v3, v14", "vmulhu.vv v26, v3, v14",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v26, v0",
+                    "vmul.vv   v25, v4, v13", "vmulhu.vv v26, v4, v13",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v26, v0",
+                    "vmul.vv   v25, v5, v12", "vmulhu.vv v26, v5, v12",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v26, v0",
+
+                    // t2 = a0*b2 + a1*b1 + a2*b0 + a3*(19*b4) + a4*(19*b3)
+                    "vmul.vv   v19, v1, v8",
+                    "vmulhu.vv v20, v1, v8",
+                    "vmul.vv   v25, v2, v7",  "vmulhu.vv v26, v2, v7",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v26, v0",
+                    "vmul.vv   v25, v3, v6",  "vmulhu.vv v26, v3, v6",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v26, v0",
+                    "vmul.vv   v25, v4, v14", "vmulhu.vv v26, v4, v14",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v26, v0",
+                    "vmul.vv   v25, v5, v13", "vmulhu.vv v26, v5, v13",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v26, v0",
+
+                    // t3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*(19*b4)
+                    "vmul.vv   v21, v1, v9",
+                    "vmulhu.vv v22, v1, v9",
+                    "vmul.vv   v25, v2, v8",  "vmulhu.vv v26, v2, v8",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v26, v0",
+                    "vmul.vv   v25, v3, v7",  "vmulhu.vv v26, v3, v7",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v26, v0",
+                    "vmul.vv   v25, v4, v6",  "vmulhu.vv v26, v4, v6",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v26, v0",
+                    "vmul.vv   v25, v5, v14", "vmulhu.vv v26, v5, v14",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v26, v0",
+
+                    // t4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0
+                    "vmul.vv   v23, v1, v10",
+                    "vmulhu.vv v24, v1, v10",
+                    "vmul.vv   v25, v2, v9",  "vmulhu.vv v26, v2, v9",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v26, v0",
+                    "vmul.vv   v25, v3, v8",  "vmulhu.vv v26, v3, v8",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v26, v0",
+                    "vmul.vv   v25, v4, v7",  "vmulhu.vv v26, v4, v7",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v26, v0",
+                    "vmul.vv   v25, v5, v6",  "vmulhu.vv v26, v5, v6",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v26, v0",
+
+                    // Sequential 51-bit carry reduction
+                    "vmv.v.i   v28, 0",
+
+                    "vsrl.vx   v25, v15, {sh51}", "vsll.vi v26, v16, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v1,  v15, {mask51}",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v28, v0",
+
+                    "vsrl.vx   v25, v17, {sh51}", "vsll.vi v26, v18, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v2,  v17, {mask51}",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v28, v0",
+
+                    "vsrl.vx   v25, v19, {sh51}", "vsll.vi v26, v20, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v3,  v19, {mask51}",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v28, v0",
+
+                    "vsrl.vx   v25, v21, {sh51}", "vsll.vi v26, v22, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v4,  v21, {mask51}",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v28, v0",
+
+                    "vsrl.vx   v25, v23, {sh51}", "vsll.vi v26, v24, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v5,  v23, {mask51}",
+                    "vmul.vx   v25, v25, {c19}",
+                    "vadd.vv   v1,  v1,  v25",
+                    "vsrl.vx   v25, v1,  {sh51}",
+                    "vand.vx   v1,  v1,  {mask51}",
+                    "vadd.vv   v2,  v2,  v25",
+
+                    "vse64.v   v1, ({o})",
+                    "addi      {ta}, {o}, 128",
+                    "vse64.v   v2, ({ta})",
+                    "addi      {ta}, {o}, 256",
+                    "vse64.v   v3, ({ta})",
+                    "addi      {ta}, {o}, 384",
+                    "vse64.v   v4, ({ta})",
+                    "addi      {ta}, {o}, 512",
+                    "vse64.v   v5, ({ta})",
+
+                    a = in(reg) self.0.as_ptr(),
+                    b = in(reg) rhs.0.as_ptr(),
+                    o = in(reg) out.0.as_mut_ptr(),
+                    c19 = in(reg) 19u64,
+                    sh51 = in(reg) 51usize,
+                    mask51 = in(reg) MASK51,
+                    ta = out(reg) _,
+                    tb = out(reg) _,
+                    out("v0") _,
+                    out("v1") _, out("v2") _, out("v3") _, out("v4") _, out("v5") _,
+                    out("v6") _, out("v7") _, out("v8") _, out("v9") _, out("v10") _,
+                    out("v11") _, out("v12") _, out("v13") _, out("v14") _,
+                    out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+                    out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
+                    out("v25") _, out("v26") _, out("v27") _, out("v28") _,
+                    options(nostack),
+                );
+            }
+            return out;
+        }
+
+        let mut out = Self::ZERO;
+        for lane in 0..16 {
+            let a0 = self.0[0][lane] as u128;
+            let a1 = self.0[1][lane] as u128;
+            let a2 = self.0[2][lane] as u128;
+            let a3 = self.0[3][lane] as u128;
+            let a4 = self.0[4][lane] as u128;
+
+            let b0 = rhs.0[0][lane] as u128;
+            let b1 = rhs.0[1][lane] as u128;
+            let b2 = rhs.0[2][lane] as u128;
+            let b3 = rhs.0[3][lane] as u128;
+            let b4 = rhs.0[4][lane] as u128;
+
+            let b1_19 = b1 * 19;
+            let b2_19 = b2 * 19;
+            let b3_19 = b3 * 19;
+            let b4_19 = b4 * 19;
+
+            let t0 = a0 * b0 + a1 * b4_19 + a2 * b3_19 + a3 * b2_19 + a4 * b1_19;
+            let mut t1 = a0 * b1 + a1 * b0 + a2 * b4_19 + a3 * b3_19 + a4 * b2_19;
+            let mut t2 = a0 * b2 + a1 * b1 + a2 * b0 + a3 * b4_19 + a4 * b3_19;
+            let mut t3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0 + a4 * b4_19;
+            let mut t4 = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
+
+            let mut r0 = (t0 as u64) & MASK51;
+            t1 += t0 >> 51;
+            let mut r1 = (t1 as u64) & MASK51;
+            t2 += t1 >> 51;
+            let r2 = (t2 as u64) & MASK51;
+            t3 += t2 >> 51;
+            let r3 = (t3 as u64) & MASK51;
+            t4 += t3 >> 51;
+            let r4 = (t4 as u64) & MASK51;
+            let c4 = (t4 >> 51) as u64;
+
+            r0 += c4 * 19;
+            r1 += r0 >> 51;
+            r0 &= MASK51;
+
+            out.0[0][lane] = r0;
+            out.0[1][lane] = r1;
+            out.0[2][lane] = r2;
+            out.0[3][lane] = r3;
+            out.0[4][lane] = r4;
+        }
+        out
+    }
+
+    #[inline]
+    pub fn square(&self) -> Self {
+        #[cfg(all(target_arch = "riscv64", feature = "simd"))]
+        if crate::blake2b::has_vlen_1024() {
+            let mut out = Self::ZERO;
+            // SAFETY: `has_vlen_1024()` verified `vlenb >= 128` (`VL = 16` for `e64, m1`).
+            // Symmetric 5-limb squaring uses 15 `vmul`/`vmulhu` pairs completely in registers.
+            unsafe {
+                core::arch::asm!(
+                    "vsetivli zero, 16, e64, m1",
+                    "vle64.v v1, ({a})",
+                    "addi {ta}, {a}, 128",
+                    "vle64.v v2, ({ta})",
+                    "addi {ta}, {a}, 256",
+                    "vle64.v v3, ({ta})",
+                    "addi {ta}, {a}, 384",
+                    "vle64.v v4, ({ta})",
+                    "addi {ta}, {a}, 512",
+                    "vle64.v v5, ({ta})",
+
+                    "vadd.vv v6,  v1, v1",        // 2 * a0
+                    "vadd.vv v7,  v2, v2",        // 2 * a1
+                    "vmul.vx v8,  v5, {c19}",     // 19 * a4
+                    "vmul.vx v9,  v4, {c19}",     // 19 * a3
+                    "vmul.vx v11, v3, {c38}",     // 38 * a2
+                    "vmul.vx v12, v4, {c38}",     // 38 * a3
+                    "vmul.vx v13, v5, {c38}",     // 38 * a4
+
+                    // t0 = a0*a0 + a1*(38*a4) + a2*(38*a3)
+                    "vmul.vv   v15, v1, v1",
+                    "vmulhu.vv v16, v1, v1",
+                    "vmul.vv   v25, v2, v13", "vmulhu.vv v26, v2, v13",
+                    "vadd.vv   v27, v15, v25", "vmsltu.vv v0, v27, v15", "vmv.v.v v15, v27", "vadc.vvm v16, v16, v26, v0",
+                    "vmul.vv   v25, v3, v12", "vmulhu.vv v26, v3, v12",
+                    "vadd.vv   v27, v15, v25", "vmsltu.vv v0, v27, v15", "vmv.v.v v15, v27", "vadc.vvm v16, v16, v26, v0",
+
+                    // t1 = (2*a0)*a1 + a2*(38*a4) + a3*(19*a3)
+                    "vmul.vv   v17, v6, v2",
+                    "vmulhu.vv v18, v6, v2",
+                    "vmul.vv   v25, v3, v13", "vmulhu.vv v26, v3, v13",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v26, v0",
+                    "vmul.vv   v25, v4, v9",  "vmulhu.vv v26, v4, v9",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v26, v0",
+
+                    // t2 = (2*a0)*a2 + a1*a1 + a3*(38*a4)
+                    "vmul.vv   v19, v6, v3",
+                    "vmulhu.vv v20, v6, v3",
+                    "vmul.vv   v25, v2, v2",  "vmulhu.vv v26, v2, v2",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v26, v0",
+                    "vmul.vv   v25, v4, v13", "vmulhu.vv v26, v4, v13",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v26, v0",
+
+                    // t3 = (2*a0)*a3 + (2*a1)*a2 + a4*(19*a4)
+                    "vmul.vv   v21, v6, v4",
+                    "vmulhu.vv v22, v6, v4",
+                    "vmul.vv   v25, v7, v3",  "vmulhu.vv v26, v7, v3",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v26, v0",
+                    "vmul.vv   v25, v5, v8",  "vmulhu.vv v26, v5, v8",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v26, v0",
+
+                    // t4 = (2*a0)*a4 + (2*a1)*a3 + a2*a2
+                    "vmul.vv   v23, v6, v5",
+                    "vmulhu.vv v24, v6, v5",
+                    "vmul.vv   v25, v7, v4",  "vmulhu.vv v26, v7, v4",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v26, v0",
+                    "vmul.vv   v25, v3, v3",  "vmulhu.vv v26, v3, v3",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v26, v0",
+
+                    "vmv.v.i   v28, 0",
+                    "vsrl.vx   v25, v15, {sh51}", "vsll.vi v26, v16, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v1,  v15, {mask51}",
+                    "vadd.vv   v27, v17, v25", "vmsltu.vv v0, v27, v17", "vmv.v.v v17, v27", "vadc.vvm v18, v18, v28, v0",
+
+                    "vsrl.vx   v25, v17, {sh51}", "vsll.vi v26, v18, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v2,  v17, {mask51}",
+                    "vadd.vv   v27, v19, v25", "vmsltu.vv v0, v27, v19", "vmv.v.v v19, v27", "vadc.vvm v20, v20, v28, v0",
+
+                    "vsrl.vx   v25, v19, {sh51}", "vsll.vi v26, v20, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v3,  v19, {mask51}",
+                    "vadd.vv   v27, v21, v25", "vmsltu.vv v0, v27, v21", "vmv.v.v v21, v27", "vadc.vvm v22, v22, v28, v0",
+
+                    "vsrl.vx   v25, v21, {sh51}", "vsll.vi v26, v22, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v4,  v21, {mask51}",
+                    "vadd.vv   v27, v23, v25", "vmsltu.vv v0, v27, v23", "vmv.v.v v23, v27", "vadc.vvm v24, v24, v28, v0",
+
+                    "vsrl.vx   v25, v23, {sh51}", "vsll.vi v26, v24, 13", "vor.vv v25, v25, v26",
+                    "vand.vx   v5,  v23, {mask51}",
+                    "vmul.vx   v25, v25, {c19}",
+                    "vadd.vv   v1,  v1,  v25",
+                    "vsrl.vx   v25, v1,  {sh51}",
+                    "vand.vx   v1,  v1,  {mask51}",
+                    "vadd.vv   v2,  v2,  v25",
+
+                    "vse64.v   v1, ({o})",
+                    "addi      {ta}, {o}, 128",
+                    "vse64.v   v2, ({ta})",
+                    "addi      {ta}, {o}, 256",
+                    "vse64.v   v3, ({ta})",
+                    "addi      {ta}, {o}, 384",
+                    "vse64.v   v4, ({ta})",
+                    "addi      {ta}, {o}, 512",
+                    "vse64.v   v5, ({ta})",
+
+                    a = in(reg) self.0.as_ptr(),
+                    o = in(reg) out.0.as_mut_ptr(),
+                    c19 = in(reg) 19u64,
+                    c38 = in(reg) 38u64,
+                    sh51 = in(reg) 51usize,
+                    mask51 = in(reg) MASK51,
+                    ta = out(reg) _,
+                    out("v0") _,
+                    out("v1") _, out("v2") _, out("v3") _, out("v4") _, out("v5") _,
+                    out("v6") _, out("v7") _, out("v8") _, out("v9") _, out("v11") _,
+                    out("v12") _, out("v13") _,
+                    out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+                    out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
+                    out("v25") _, out("v26") _, out("v27") _, out("v28") _,
+                    options(nostack),
+                );
+            }
+            return out;
+        }
+
+        let mut out = Self::ZERO;
+        for lane in 0..16 {
+            let a0 = self.0[0][lane] as u128;
+            let a1 = self.0[1][lane] as u128;
+            let a2 = self.0[2][lane] as u128;
+            let a3 = self.0[3][lane] as u128;
+            let a4 = self.0[4][lane] as u128;
+
+            let a0_2 = a0 * 2;
+            let a1_2 = a1 * 2;
+            let a3_19 = a3 * 19;
+            let a4_19 = a4 * 19;
+            let a3_38 = a3 * 38;
+            let a4_38 = a4 * 38;
+
+            let t0 = a0 * a0 + a1 * a4_38 + a2 * a3_38;
+            let mut t1 = a0_2 * a1 + a2 * a4_38 + a3 * a3_19;
+            let mut t2 = a0_2 * a2 + a1 * a1 + a3 * a4_38;
+            let mut t3 = a0_2 * a3 + a1_2 * a2 + a4 * a4_19;
+            let mut t4 = a0_2 * a4 + a1_2 * a3 + a2 * a2;
+
+            let mut r0 = (t0 as u64) & MASK51;
+            t1 += t0 >> 51;
+            let mut r1 = (t1 as u64) & MASK51;
+            t2 += t1 >> 51;
+            let r2 = (t2 as u64) & MASK51;
+            t3 += t2 >> 51;
+            let r3 = (t3 as u64) & MASK51;
+            t4 += t3 >> 51;
+            let r4 = (t4 as u64) & MASK51;
+            let c4 = (t4 >> 51) as u64;
+
+            r0 += c4 * 19;
+            r1 += r0 >> 51;
+            r0 &= MASK51;
+
+            out.0[0][lane] = r0;
+            out.0[1][lane] = r1;
+            out.0[2][lane] = r2;
+            out.0[3][lane] = r3;
+            out.0[4][lane] = r4;
+        }
+        out
     }
 }
 
@@ -477,5 +1136,44 @@ mod tests {
         assert_eq!(b.mul(&invs[1]).reduce(), FieldElement::ONE);
         assert_eq!(c.mul(&invs[2]).reduce(), FieldElement::ONE);
         assert_eq!(d.mul(&invs[3]).reduce(), FieldElement::ONE);
+    }
+
+    #[test]
+    fn test_fe51x16_and_batch_invert_16() {
+        let a: [FieldElement; 16] = core::array::from_fn(|i| {
+            FieldElement([
+                0x75eb4dca135978a3u64.wrapping_add((i as u64) * 97),
+                0x00700a4d4141d8abu64.wrapping_add((i as u64) * 31),
+                0x8cc740797779e898u64,
+                0x52036cee2b6ffe73u64 ^ (i as u64),
+            ])
+        });
+        let b: [FieldElement; 16] = core::array::from_fn(|i| {
+            FieldElement([
+                0xc9562d608f25d51au64.wrapping_add((i as u64) * 53),
+                0x692cc7609525a7b2u64,
+                0xc0a4e231fdd6dc5cu64.wrapping_add((i as u64) * 19),
+                0x216936d3cd6e53feu64,
+            ])
+        });
+
+        let a16 = Fe51x16::from_fe_array(&a);
+        let b16 = Fe51x16::from_fe_array(&b);
+
+        let sum = a16.add(&b16).to_fe_array();
+        let diff = a16.sub(&b16).to_fe_array();
+        let prod = a16.mul(&b16).to_fe_array();
+        let sq = a16.square().to_fe_array();
+
+        let a_refs: [&FieldElement; 16] = core::array::from_fn(|i| &a[i]);
+        let invs = FieldElement::batch_invert_16(a_refs);
+
+        for i in 0..16 {
+            assert_eq!(sum[i], a[i].add(&b[i]).reduce());
+            assert_eq!(diff[i], a[i].sub(&b[i]).reduce());
+            assert_eq!(prod[i], a[i].mul(&b[i]).reduce());
+            assert_eq!(sq[i], a[i].square().reduce());
+            assert_eq!(a[i].mul(&invs[i]).reduce(), FieldElement::ONE);
+        }
     }
 }

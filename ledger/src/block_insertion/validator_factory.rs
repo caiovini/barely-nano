@@ -6,6 +6,15 @@ use crate::{AnySet, LedgerConstants};
 
 use super::BlockValidator;
 
+#[derive(Default)]
+pub(crate) struct PrefetchedBlockData {
+    pub disk_block_exists: Option<bool>,
+    pub disk_prev_block: Option<Option<SavedBlock>>,
+    pub disk_account: Option<Option<AccountInfo>>,
+    pub disk_pending: Option<Option<PendingInfo>>,
+    pub disk_source_exists: Option<bool>,
+}
+
 pub(crate) struct BlockValidatorFactory<'a> {
     any: &'a dyn AnySet,
     constants: &'a LedgerConstants,
@@ -34,10 +43,12 @@ impl<'a> BlockValidatorFactory<'a> {
             None,
             false,
             None,
+            PrefetchedBlockData::default(),
             UnixMillisTimestamp::now(),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_validator_with_batch_cache(
         &self,
         signature_verified: bool,
@@ -46,6 +57,7 @@ impl<'a> BlockValidatorFactory<'a> {
         in_batch_account: Option<AccountInfo>,
         in_batch_source_exists: bool,
         in_batch_pending: Option<Option<PendingInfo>>,
+        prefetched: PrefetchedBlockData,
         batch_now: UnixMillisTimestamp,
     ) -> BlockValidator<'a> {
         use crate::LEDGER_PROF as P;
@@ -59,7 +71,10 @@ impl<'a> BlockValidatorFactory<'a> {
         };
 
         let t3 = t();
-        let block_exists = in_batch_exists || self.any.block_exists_or_pruned(&self.block.hash());
+        let block_exists = in_batch_exists
+            || prefetched
+                .disk_block_exists
+                .unwrap_or_else(|| self.any.block_exists_or_pruned(&self.block.hash()));
         let t4 = t();
         P[6].fetch_add(t4 - t3, Relaxed); // hash + block_exists
 
@@ -84,11 +99,14 @@ impl<'a> BlockValidatorFactory<'a> {
         let t0 = t();
         let previous_block = match in_batch_prev {
             Some(prev) => Some(prev),
-            None => self.load_previous_block(),
+            None => prefetched
+                .disk_prev_block
+                .unwrap_or_else(|| self.load_previous_block()),
         };
         let t1 = t();
         P[3].fetch_add(t1 - t0, Relaxed); // previous block
 
+        let direct_account = self.block.account_field();
         let account = self.get_account(&previous_block).unwrap_or_default();
         if !self.block.previous().is_zero() && previous_block.is_none() && !cfg!(test) {
             return BlockValidator {
@@ -114,6 +132,11 @@ impl<'a> BlockValidatorFactory<'a> {
             None
         } else if let Some(info) = in_batch_account {
             Some(info)
+        } else if direct_account == Some(account) {
+            match prefetched.disk_account {
+                Some(cached) => cached,
+                None => self.any.get_account(&account),
+            }
         } else {
             self.any.get_account(&account)
         };
@@ -224,6 +247,11 @@ impl<'a> BlockValidatorFactory<'a> {
             None
         } else if let Some(cached_pending) = in_batch_pending {
             cached_pending
+        } else if direct_account == Some(account) {
+            match prefetched.disk_pending {
+                Some(cached_p) => cached_p,
+                None => self.any.get_pending(&PendingKey::new(account, source_block)),
+            }
         } else {
             self.any
                 .get_pending(&PendingKey::new(account, source_block))
@@ -236,7 +264,9 @@ impl<'a> BlockValidatorFactory<'a> {
         } else if (pending_receive_info.is_some() || in_batch_source_exists) && !cfg!(test) {
             true
         } else {
-            self.any.block_exists_or_pruned(&source_block)
+            prefetched
+                .disk_source_exists
+                .unwrap_or_else(|| self.any.block_exists_or_pruned(&source_block))
         };
         #[cfg(not(test))]
         if maybe_receive

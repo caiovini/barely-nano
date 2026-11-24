@@ -1,5 +1,8 @@
 use core::cmp::max;
+use core::future::Future;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::task::{Context, Poll, Waker};
 use alloc::sync::Arc;
 use alloc::collections::VecDeque;
 use spin::Mutex;
@@ -7,12 +10,16 @@ use spin::Mutex;
 pub struct BackpressureSender<T> {
     queue: Arc<Mutex<VecDeque<T>>>,
     queue_size: Arc<AtomicI32>,
+    waker: Arc<Mutex<Option<Waker>>>,
+    has_waker: Arc<AtomicBool>,
     hard_limit: usize,
 }
  
 pub struct BackpressureReceiver<T> {
     queue: Arc<Mutex<VecDeque<T>>>,
     queue_size: Arc<AtomicI32>,
+    waker: Arc<Mutex<Option<Waker>>>,
+    has_waker: Arc<AtomicBool>,
     soft_limit: usize,
     is_cooling_down: AtomicBool,
 }
@@ -36,16 +43,22 @@ pub fn backpressure_channel<T>(
     let hard_limit = if cap > 0 { cap * 2 } else { 0 };
     let queue = Arc::new(Mutex::new(VecDeque::with_capacity(hard_limit)));
     let queue_size = Arc::new(AtomicI32::new(0));
+    let waker = Arc::new(Mutex::new(None));
+    let has_waker = Arc::new(AtomicBool::new(false));
  
     let tx = BackpressureSender {
         queue: Arc::clone(&queue),
         queue_size: Arc::clone(&queue_size),
+        waker: Arc::clone(&waker),
+        has_waker: Arc::clone(&has_waker),
         hard_limit,
     };
  
     let rx = BackpressureReceiver {
         queue,
         queue_size,
+        waker,
+        has_waker,
         soft_limit,
         is_cooling_down: AtomicBool::new(false),
     };
@@ -55,14 +68,23 @@ pub fn backpressure_channel<T>(
 
 impl<T> BackpressureSender<T> {
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        let mut q = self.queue.lock();
-        if self.hard_limit == 0 || q.len() < self.hard_limit {
+        let was_empty;
+        {
+            let mut q = self.queue.lock();
+            if self.hard_limit != 0 && q.len() >= self.hard_limit {
+                return Err(SendError(t));
+            }
+            was_empty = q.is_empty();
             q.push_back(t);
-            self.queue_size.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        } else {
-            Err(SendError(t))
+            self.queue_size.fetch_add(1, Ordering::Release);
         }
+        if was_empty || self.has_waker.load(Ordering::Acquire) {
+            if let Some(w) = self.waker.lock().take() {
+                self.has_waker.store(false, Ordering::Release);
+                w.wake();
+            }
+        }
+        Ok(())
     }
 
     pub fn try_send(&self, t: T) -> Result<(), SendError<T>> {
@@ -79,6 +101,49 @@ impl<T> BackpressureSender<T> {
     }
 }
 
+impl<T> Drop for BackpressureSender<T> {
+    fn drop(&mut self) {
+        // When the last sender drops (`strong_count == 2`: this sender + the receiver),
+        // wake any parked receiver so it can observe disconnection and exit cleanly.
+        if Arc::strong_count(&self.queue) <= 2 && self.has_waker.load(Ordering::Acquire) {
+            if let Some(w) = self.waker.lock().take() {
+                self.has_waker.store(false, Ordering::Release);
+                w.wake();
+            }
+        }
+    }
+}
+
+pub struct WaitForData<'a, T> {
+    receiver: &'a BackpressureReceiver<T>,
+}
+
+impl<T> Future for WaitForData<'_, T> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if !self.receiver.queue.lock().is_empty() || self.receiver.is_disconnected() {
+            return Poll::Ready(());
+        }
+        {
+            let mut wg = self.receiver.waker.lock();
+            match wg.as_ref() {
+                Some(existing) if existing.will_wake(cx.waker()) => {}
+                _ => *wg = Some(cx.waker().clone()),
+            }
+            self.receiver.has_waker.store(true, Ordering::Release);
+        }
+        if !self.receiver.queue.lock().is_empty() || self.receiver.is_disconnected() {
+            if self.receiver.waker.lock().take().is_some() {
+                self.receiver.has_waker.store(false, Ordering::Release);
+            }
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
 impl<T> BackpressureReceiver<T> {
     /// Receive a value from the channel and update the size
     pub fn recv(&self) -> Result<T, RecvError> {
@@ -86,6 +151,9 @@ impl<T> BackpressureReceiver<T> {
             if let Some(t) = self.queue.lock().pop_front() {
                 self.received();
                 return Ok(t);
+            }
+            if self.is_disconnected() {
+                return Err(RecvError);
             }
             core::hint::spin_loop();
         }
@@ -95,9 +163,21 @@ impl<T> BackpressureReceiver<T> {
         if let Some(t) = self.queue.lock().pop_front() {
             self.received();
             Ok(t)
+        } else if self.is_disconnected() {
+            Err(TryRecvError::Disconnected)
         } else {
             Err(TryRecvError::Empty)
         }
+    }
+
+    #[inline]
+    pub fn is_disconnected(&self) -> bool {
+        Arc::strong_count(&self.queue) == 1
+    }
+
+    #[inline]
+    pub fn wait_for_data(&self) -> WaitForData<'_, T> {
+        WaitForData { receiver: self }
     }
 
     fn received(&self) {
@@ -135,6 +215,8 @@ impl<T> Clone for BackpressureSender<T> {
         BackpressureSender {
             queue: Arc::clone(&self.queue),
             queue_size: Arc::clone(&self.queue_size),
+            waker: Arc::clone(&self.waker),
+            has_waker: Arc::clone(&self.has_waker),
             hard_limit: self.hard_limit,
         }
     }
@@ -254,5 +336,39 @@ mod tests {
         assert_eq!(rx.should_cool_down(), true);
         rx.recv().unwrap();
         assert_eq!(rx.should_cool_down(), false);
+    }
+
+    #[test]
+    fn wakes_waiting_receiver_immediately_on_send_and_disconnect() {
+        use alloc::task::Wake;
+        use core::sync::atomic::AtomicUsize;
+
+        struct CountWaker(AtomicUsize);
+        impl Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let (tx, rx) = backpressure_channel(16);
+        let counter = Arc::new(CountWaker(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(rx.wait_for_data());
+        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+
+        tx.send(99).unwrap();
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(()));
+        assert_eq!(rx.try_recv().unwrap(), 99);
+
+        let mut fut2 = Box::pin(rx.wait_for_data());
+        assert_eq!(fut2.as_mut().poll(&mut cx), Poll::Pending);
+        drop(tx);
+        assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+        assert_eq!(fut2.as_mut().poll(&mut cx), Poll::Ready(()));
+        assert!(rx.is_disconnected());
     }
 }

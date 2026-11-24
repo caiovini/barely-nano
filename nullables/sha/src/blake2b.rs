@@ -1234,9 +1234,72 @@ pub fn hash8_batch_4(inputs: [&[u8]; 4]) -> [u64; 4] {
     [h[0][0], h[1][0], h[2][0], h[3][0]]
 }
 
+/// 16-way batched Blake2b with an 8-byte digest (Nano work/PoW) for SpacemiT K3 A100
+/// (`VLEN=1024`) cores. Returns the 8-byte digest as a little-endian `u64` per input.
+pub fn hash8_batch_16(inputs: [&[u8]; 16]) -> [u64; 16] {
+    let mut h = [IV; 16];
+    for i in 0..16 {
+        h[i][0] ^= 0x01010008;
+    }
+
+    hash_batch_16_impl(&mut h, inputs);
+
+    core::array::from_fn(|i| h[i][0])
+}
+
+/// Specialized zero-allocation 16-lane Nano PoW nonce search (`Blake2b-64(nonce_le || root)`).
+/// Keeps the 32-byte `root` pre-packed across all 16 lanes and tests `16 * iterations`
+/// consecutive nonces starting at `start_nonce`, returning the first nonce `>= min_difficulty`.
+pub fn pow_search_16(
+    root: &[u8; 32],
+    start_nonce: u64,
+    min_difficulty: u64,
+    iterations: u32,
+) -> Option<u64> {
+    let mut blocks = [[0u8; 128]; 16];
+    for j in 0..16 {
+        blocks[j][8..40].copy_from_slice(root);
+    }
+    let t = [40u128; 16];
+    let last = [true; 16];
+    let init_h0 = IV[0] ^ 0x01010008;
+
+    let mut base_nonce = start_nonce;
+    for _ in 0..iterations {
+        let mut h = [IV; 16];
+        for j in 0..16 {
+            h[j][0] = init_h0;
+            blocks[j][0..8].copy_from_slice(&base_nonce.wrapping_add(j as u64).to_le_bytes());
+        }
+        let [
+            h0, h1, h2, h3, h4, h5, h6, h7,
+            h8, h9, h10, h11, h12, h13, h14, h15,
+        ] = &mut h;
+        let mut h_refs = [
+            h0, h1, h2, h3, h4, h5, h6, h7,
+            h8, h9, h10, h11, h12, h13, h14, h15,
+        ];
+        let blocks_refs = [
+            &blocks[0], &blocks[1], &blocks[2], &blocks[3],
+            &blocks[4], &blocks[5], &blocks[6], &blocks[7],
+            &blocks[8], &blocks[9], &blocks[10], &blocks[11],
+            &blocks[12], &blocks[13], &blocks[14], &blocks[15],
+        ];
+        compress_16_blocks(&mut h_refs, &blocks_refs, &t, &last);
+
+        for j in 0..16 {
+            if h_refs[j][0] >= min_difficulty {
+                return Some(base_nonce.wrapping_add(j as u64));
+            }
+        }
+        base_nonce = base_nonce.wrapping_add(16);
+    }
+    None
+}
+
 /// On-device consistency check of the vector kernels against the scalar reference.
 /// Returns a bitmask: bit0 = single-block vector mismatch, bit1 = 4-way batch mismatch,
-/// bit2 = 8-byte batch mismatch. 0 means all kernels match the scalar `compress`.
+/// bit2 = 8-byte batch mismatch, bit3 = 16-way batch mismatch. 0 means all kernels match.
 #[cfg(all(target_arch = "riscv64", feature = "simd"))]
 pub fn self_test() -> u8 {
     let mut fail = 0u8;
@@ -1272,6 +1335,27 @@ pub fn self_test() -> u8 {
         let full = hasher.finalize();
         if batch8[j] != u64::from_le_bytes(full[..8].try_into().unwrap()) {
             fail |= 4;
+        }
+    }
+
+    let mut data16 = [[0u8; 40]; 16];
+    for j in 0..16 {
+        for i in 0..40 {
+            data16[j][i] = (i as u8).wrapping_mul(19).wrapping_add(j as u8 * 37 + 5);
+        }
+    }
+    let refs16: [&[u8]; 16] = core::array::from_fn(|j| &data16[j][..]);
+    let batch16 = hash_batch_16(refs16);
+    let batch8_16 = hash8_batch_16(refs16);
+    for j in 0..16 {
+        if batch16[j] != hash(refs16[j]) {
+            fail |= 8;
+        }
+        let mut hasher = Blake2bHasher::new(8);
+        hasher.update(refs16[j]);
+        let full = hasher.finalize();
+        if batch8_16[j] != u64::from_le_bytes(full[..8].try_into().unwrap()) {
+            fail |= 8;
         }
     }
     fail
@@ -1418,10 +1502,24 @@ mod tests {
         ];
         let got64 = hash64_batch_16(refs);
         let got32 = hash_batch_16(refs);
+        let got8 = hash8_batch_16(refs);
         for i in 0..16 {
             assert_eq!(got64[i], hash64(refs[i]));
             assert_eq!(got32[i], hash(refs[i]));
+            let mut h8 = Blake2bHasher::new(8);
+            h8.update(refs[i]);
+            let full8 = h8.finalize();
+            assert_eq!(got8[i], u64::from_le_bytes(full8[..8].try_into().unwrap()));
         }
+
+        let root = [0x42u8; 32];
+        let threshold = 0xff00_0000_0000_0000u64;
+        let found = pow_search_16(&root, 1, threshold, 512).expect("pow_search_16 should find nonce");
+        let mut check = Blake2bHasher::new(8);
+        check.update(&found.to_le_bytes());
+        check.update(&root);
+        let digest = u64::from_le_bytes(check.finalize()[..8].try_into().unwrap());
+        assert!(digest >= threshold);
     }
 
     #[test]

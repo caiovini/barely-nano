@@ -80,27 +80,22 @@ where
     Diff: Difficulty,
     Sleep: Sleeper,
 {
-    /// Tries to create PoW in a batch of iterations
+    /// Tries to create PoW in a batch of iterations (16-way SIMD lockstep per step)
     fn try_create_batch(&mut self, item: &Root, min_difficulty: u64) -> Option<WorkNonce> {
         let mut iteration = self.iteration_size;
 
         while iteration > 0 {
-            let nonces = [
-                WorkNonce::from(self.rng.next_work()),
-                WorkNonce::from(self.rng.next_work()),
-                WorkNonce::from(self.rng.next_work()),
-                WorkNonce::from(self.rng.next_work()),
-            ];
+            let nonces: [WorkNonce; 16] =
+                core::array::from_fn(|_| WorkNonce::from(self.rng.next_work()));
+            let difficulties = self.difficulty.get_difficulties_batch_16(item, nonces);
 
-            let difficulties = self.difficulty.get_difficulties_batch_4(item, nonces);
-
-            for i in 0..4 {
+            for i in 0..16 {
                 if difficulties[i] >= min_difficulty {
                     return Some(nonces[i]);
                 }
             }
 
-            iteration -= 4;
+            iteration = iteration.saturating_sub(16);
         }
         None
     }

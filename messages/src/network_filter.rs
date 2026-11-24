@@ -6,17 +6,23 @@ use alloc::vec;
 use rsnano_nullable_random::NullableRng;
 use rand::Rng;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Default)]
 struct Entry {
     digest: u128,
     epoch: u64,
 }
 
-/// A probabilistic duplicate filter based on directed map caches, using SipHash 2/4/128
-/// The probability of false negatives (unique packet marked as duplicate) is the probability of a 128-bit SipHash collision.
-/// The probability of false positives (duplicate packet marked as unique) shrinks with a larger filter.
+const FILTER_SHARDS: usize = 64;
+
+#[repr(align(64))]
+struct FilterShard(Mutex<Vec<Entry>>);
+
+/// A probabilistic duplicate filter based on directed map caches, using SipHash 2/4/128.
+/// Sharded across 64 cache-line-aligned (`64B`) partitions so 10GbE ingress (`Hart 1`),
+/// `MessageProcessor` (`Hart 2`), and `A100` workers (`Harts 8..14`) never contend on a single lock.
 pub struct NetworkFilter<T: NetworkFilterHasher = DefaultNetworkFilterHasher> {
-    items: Mutex<Vec<Entry>>,
+    shards: [FilterShard; FILTER_SHARDS],
+    total_len: usize,
     hasher: T,
     pub age_cutoff: u64,
     current_epoch: AtomicU64,
@@ -24,8 +30,18 @@ pub struct NetworkFilter<T: NetworkFilterHasher = DefaultNetworkFilterHasher> {
 
 impl<T: NetworkFilterHasher> NetworkFilter<T> {
     pub fn with_hasher(hasher: T, size: usize) -> Self {
+        let total_len = size.max(1);
+        let shards: [FilterShard; FILTER_SHARDS] = core::array::from_fn(|s| {
+            let shard_len = if total_len > s {
+                (total_len - 1 - s) / FILTER_SHARDS + 1
+            } else {
+                0
+            };
+            FilterShard(Mutex::new(vec![Entry::default(); shard_len]))
+        });
         Self {
-            items: Mutex::new(vec![Entry::default(); size]),
+            shards,
+            total_len,
             hasher,
             age_cutoff: 0,
             current_epoch: AtomicU64::new(0),
@@ -36,10 +52,16 @@ impl<T: NetworkFilterHasher> NetworkFilter<T> {
         self.current_epoch.fetch_add(epoch_inc, Ordering::SeqCst);
     }
 
+    #[inline]
     fn compare(&self, existing: &Entry, digest: u128) -> bool {
-        // Only consider digests to be the same if the epoch is within the age cutoff
         existing.digest == digest
-            && existing.epoch + self.age_cutoff >= self.current_epoch.load(Ordering::SeqCst)
+            && existing.epoch + self.age_cutoff >= self.current_epoch.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    fn route_digest(&self, digest: u128) -> (usize, usize) {
+        let index = (digest % self.total_len as u128) as usize;
+        (index & (FILTER_SHARDS - 1), index / FILTER_SHARDS)
     }
 
     /// Reads `count` bytes starting from `bytes` and inserts the siphash digest in the filter.
@@ -53,19 +75,19 @@ impl<T: NetworkFilterHasher> NetworkFilter<T> {
     }
 
     pub fn apply_digest(&self, digest: u128) -> bool {
-        let mut lock = self.items.lock();
-        let index = (digest % lock.len() as u128) as usize;
-        let element = &mut lock[index];
+        let (shard, slot) = self.route_digest(digest);
+        let mut lock = self.shards[shard].0.lock();
+        let element = &mut lock[slot];
         let existed = self.compare(element, digest);
         if !existed {
-            // Replace likely old element with a new one
             *element = Entry {
                 digest,
-                epoch: self.current_epoch.load(Ordering::SeqCst),
+                epoch: self.current_epoch.load(Ordering::Relaxed),
             };
         }
         existed
     }
+
     /// Checks if the message is in the filter.
     pub fn check_message(&self, message: &[u8]) -> bool {
         let digest = self.hash(message);
@@ -74,22 +96,23 @@ impl<T: NetworkFilterHasher> NetworkFilter<T> {
 
     /// Checks if the digest is in the filter.
     pub fn check(&self, digest: u128) -> bool {
-        let lock = self.items.lock();
-        let index = (digest % lock.len() as u128) as usize;
-        let element = &lock[index];
-        self.compare(element, digest)
+        let (shard, slot) = self.route_digest(digest);
+        let lock = self.shards[shard].0.lock();
+        self.compare(&lock[slot], digest)
     }
 
     /// Sets the corresponding element in the filter to zero, if it matches `digest` exactly.
     pub fn clear(&self, digest: u128) {
-        let mut lock = self.items.lock();
-        self.clear_locked(digest, &mut lock);
+        let (shard, slot) = self.route_digest(digest);
+        let mut lock = self.shards[shard].0.lock();
+        if self.compare(&lock[slot], digest) {
+            lock[slot] = Entry::default();
+        }
     }
 
     pub fn clear_many(&self, digests: impl IntoIterator<Item = u128>) {
-        let mut lock = self.items.lock();
-        for digest in digests.into_iter() {
-            self.clear_locked(digest, &mut lock);
+        for digest in digests {
+            self.clear(digest);
         }
     }
 
@@ -98,15 +121,8 @@ impl<T: NetworkFilterHasher> NetworkFilter<T> {
     }
 
     pub fn clear_all(&self) {
-        let mut lock = self.items.lock();
-        lock.fill(Default::default());
-    }
-
-    fn clear_locked(&self, digest: u128, items: &mut [Entry]) {
-        let index = (digest % items.len() as u128) as usize;
-        let element = &mut items[index];
-        if self.compare(element, digest) {
-            *element = Default::default();
+        for s in &self.shards {
+            s.0.lock().fill(Entry::default());
         }
     }
 

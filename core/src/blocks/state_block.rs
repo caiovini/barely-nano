@@ -187,6 +187,55 @@ impl StateBlock {
             known_hash,
         ))
     }
+
+    /// Deserializes one `StateBlock`'s wire fields without computing its Blake2b hash yet,
+    /// enabling 16-way `VLEN=1024` batched hashing (`finish_batch_16`) on `AscPullAck` streams.
+    pub fn deserialize_raw_parts(
+        stream: &mut dyn Stream,
+    ) -> Result<(Account, BlockHash, PublicKey, Amount, Link, Signature, WorkNonce)> {
+        let account = Account::deserialize(stream)?;
+        let previous = BlockHash::deserialize(stream)?;
+        let representative = PublicKey::deserialize(stream)?;
+        let balance = Amount::deserialize(stream)?;
+        let link = Link::deserialize(stream)?;
+        let signature = Signature::deserialize(stream)?;
+        let mut work_bytes = [0u8; 8];
+        stream.read_bytes(&mut work_bytes, 8)?;
+        let work = u64::from_be_bytes(work_bytes).into();
+        Ok((account, previous, representative, balance, link, signature, work))
+    }
+
+    /// Computes all 16 `StateBlock` hashes simultaneously using 16-way lockstep `blake2b::hash_batch_16`
+    /// and constructs `[StateBlock; 16]`.
+    pub fn finish_batch_16(
+        parts: [(Account, BlockHash, PublicKey, Amount, Link, Signature, WorkNonce); 16],
+    ) -> [Self; 16] {
+        let mut payloads = [[0u8; 176]; 16];
+        for i in 0..16 {
+            payloads[i][31] = BlockType::State as u8;
+            payloads[i][32..64].copy_from_slice(parts[i].0.as_bytes());
+            payloads[i][64..96].copy_from_slice(parts[i].1.as_bytes());
+            payloads[i][96..128].copy_from_slice(parts[i].2.as_bytes());
+            payloads[i][128..144].copy_from_slice(&parts[i].3.to_be_bytes());
+            payloads[i][144..176].copy_from_slice(parts[i].4.as_bytes());
+        }
+        let refs: [&[u8]; 16] = core::array::from_fn(|i| &payloads[i][..]);
+        let hashes = tools::blake2b::hash_batch_16(refs);
+        let mut iter = parts.into_iter().enumerate();
+        core::array::from_fn(|_| {
+            let (i, (acc, prev, rep, bal, link, sig, work)) = iter.next().unwrap();
+            Self::from_parts_with_hash(
+                acc,
+                prev,
+                rep,
+                bal,
+                link,
+                sig,
+                work,
+                Some(BlockHash::from_bytes(hashes[i])),
+            )
+        })
+    }
 }
 
 impl PartialEq for StateBlock {

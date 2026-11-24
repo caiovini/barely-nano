@@ -9,7 +9,7 @@ mod xorshift;
 
 pub(crate) use cpu_work_generator::CpuWorkGenerator;
 pub(crate) use work_pool::WorkGenerator;
-pub use work_pool::{WorkPool, WorkPoolBuilder};
+pub use work_pool::{has_active_work, try_help_work, WorkPool, WorkPoolBuilder};
 pub use work_thresholds::{dev_difficulty, WorkThresholds, WORK_THRESHOLDS_STUB};
 pub(crate) use xorshift::XorShift1024Star;
 

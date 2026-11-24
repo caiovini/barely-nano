@@ -4,15 +4,27 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use spin::Mutex;
 
 use rsnano_core::{BlockHash, Vote, VoteError, VoteSource, utils::BackpressureSender};
-use rsnano_network::Channel;
+use rsnano_network::{Channel, ChannelId};
 use rsnano_stats::{DetailType, StatType, Stats};
 
-use super::{AecEvent, FilteredVote, ReceivedVote, VoteApplier, VoteProcessorQueue};
+use super::{AecEvent, FilteredVote, ReceivedVote, RepTier, VoteApplier, VoteProcessorQueue};
+
+type QueuedVoteItem = (
+    (RepTier, ChannelId),
+    (
+        Arc<Vote>,
+        VoteSource,
+        Option<Arc<Channel>>,
+        Option<BlockHash>,
+    ),
+);
+
+const MAX_PREVERIFIED_VOTES: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoteProcessorConfig {
@@ -43,6 +55,8 @@ pub type VoteProcessedCallback2 =
 pub struct VoteProcessor {
     threads: Mutex<Vec<JoinHandle<()>>>,
     queue: Arc<VoteProcessorQueue>,
+    verified_queue: Mutex<VecDeque<QueuedVoteItem>>,
+    verified_count: AtomicUsize,
     vote_applier: VoteApplier,
     stats: Arc<Stats>,
     pub total_processed: AtomicU64,
@@ -57,6 +71,8 @@ impl VoteProcessor {
     ) -> Self {
         Self {
             queue,
+            verified_queue: Mutex::new(VecDeque::with_capacity(1024)),
+            verified_count: AtomicUsize::new(0),
             vote_applier,
             stats,
             threads: Mutex::new(Vec::new()),
@@ -80,15 +96,79 @@ impl VoteProcessor {
     pub fn stop(&self) {
         self.vote_applier.stop();
         self.queue.stop();
+        {
+            let mut vq = self.verified_queue.lock();
+            vq.clear();
+            self.verified_count.store(0, Ordering::Relaxed);
+        }
 
         let mut _handles = Vec::new();
         {
             let mut guard = self.threads.lock();
             core::mem::swap(&mut _handles, &mut guard);
         }
-        // for handle in handles {
-        //     handle.join().unwrap()
-        // }
+    }
+
+    /// Lock-free check used by SpacemiT K3 A100 crypto worker harts (`Harts 8..14`) to see
+    /// whether raw incoming votes are waiting for 16-way `VLEN=1024` signature verification.
+    #[inline]
+    pub fn has_unverified_work(&self) -> bool {
+        !self.queue.is_empty_relaxed()
+            && !self.cool_down.load(Ordering::Relaxed)
+            && self.verified_count.load(Ordering::Relaxed) < MAX_PREVERIFIED_VOTES
+    }
+
+    /// Pops up to 16 (on A100 `VLEN=1024`) or 4 prioritized votes from `VoteProcessorQueue`,
+    /// verifies their Blake2b digests and Ed25519 signatures in SIMD lockstep outside queue locks,
+    /// and forwards them to `verified_queue` for zero-crypto consensus application on Hart 0.
+    pub fn help_verify(&self) -> usize {
+        if !self.has_unverified_work() {
+            return 0;
+        }
+
+        let batch_cap = if rsnano_sha::blake2b::has_vlen_1024() {
+            16
+        } else {
+            4
+        };
+
+        let chunk = {
+            let Some(mut guard) = self.queue.data.try_lock() else {
+                return 0;
+            };
+            if guard.stopped || guard.queue.is_empty() {
+                self.queue
+                    .pending_count
+                    .store(guard.queue.len(), Ordering::Relaxed);
+                return 0;
+            }
+            let c = guard.queue.next_batch(batch_cap);
+            self.queue
+                .pending_count
+                .store(guard.queue.len(), Ordering::Relaxed);
+            c
+        };
+
+        let count = chunk.len();
+        if count == 0 {
+            return 0;
+        }
+
+        {
+            let vote_refs: Vec<&Vote> = chunk
+                .iter()
+                .map(|(_, (vote, _, _, _))| vote.as_ref())
+                .collect();
+            Vote::verify_batch(&vote_refs);
+        }
+
+        {
+            let mut vq = self.verified_queue.lock();
+            vq.extend(chunk);
+            self.verified_count.store(vq.len(), Ordering::Release);
+        }
+
+        count
     }
 
     pub fn run(&self) {
@@ -113,22 +193,40 @@ impl VoteProcessor {
     }
 
     pub fn run_once(&self) -> bool {
-        if self.queue.is_empty_relaxed() || self.cool_down.load(Ordering::Relaxed) {
+        if self.cool_down.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self.verified_count.load(Ordering::Relaxed) == 0 && self.queue.is_empty_relaxed() {
             return false;
         }
 
-        let batch = {
-            let Some(mut guard) = self.queue.data.try_lock() else {
-                return false;
-            };
-            if guard.stopped || guard.queue.is_empty() {
-                self.queue.pending_count.store(guard.queue.len(), Ordering::Relaxed);
-                return false;
+        let max_batch = self.queue.config.batch_size;
+        let mut batch = VecDeque::new();
+
+        if self.verified_count.load(Ordering::Acquire) > 0 {
+            if let Some(mut vq) = self.verified_queue.try_lock() {
+                let n = vq.len().min(max_batch);
+                batch.extend(vq.drain(..n));
+                self.verified_count.store(vq.len(), Ordering::Relaxed);
             }
-            let b = guard.queue.next_batch(self.queue.config.batch_size);
-            self.queue.pending_count.store(guard.queue.len(), Ordering::Relaxed);
-            b
-        };
+        }
+
+        if batch.len() < max_batch && !self.queue.is_empty_relaxed() {
+            if let Some(mut guard) = self.queue.data.try_lock() {
+                if !guard.stopped && !guard.queue.is_empty() {
+                    let rem = max_batch - batch.len();
+                    let extra = guard.queue.next_batch(rem);
+                    self.queue
+                        .pending_count
+                        .store(guard.queue.len(), Ordering::Relaxed);
+                    batch.extend(extra);
+                } else {
+                    self.queue
+                        .pending_count
+                        .store(guard.queue.len(), Ordering::Relaxed);
+                }
+            }
+        }
 
         if !batch.is_empty() {
             self.handle_batch(batch);
@@ -138,27 +236,33 @@ impl VoteProcessor {
         }
     }
 
-    fn handle_batch(
-        &self,
-        batch: VecDeque<(
-            (super::RepTier, rsnano_network::ChannelId),
-            (
-                Arc<Vote>,
-                VoteSource,
-                Option<Arc<Channel>>,
-                Option<BlockHash>,
-            ),
-        )>,
-    ) {
-        for (_, (vote, source, channel, filter)) in &batch {
-            let filter: BlockHash = filter.unwrap_or_default();
-            let received_vote = ReceivedVote::new(vote.clone(), *source, channel.clone());
-            let filtered_vote = FilteredVote::new(received_vote, filter);
-            let _ = self.vote_blocking(&filtered_vote);
+    fn handle_batch(&self, batch: VecDeque<QueuedVoteItem>) {
+        if batch
+            .iter()
+            .any(|(_, (vote, _, _, _))| !vote.is_signature_checked())
+        {
+            let refs: Vec<&Vote> = batch
+                .iter()
+                .map(|(_, (vote, _, _, _))| vote.as_ref())
+                .collect();
+            Vote::verify_batch(&refs);
         }
 
-        self.total_processed
-            .fetch_add(batch.len() as u64, Ordering::SeqCst);
+        let total = batch.len() as u64;
+        let mut valid_votes = Vec::with_capacity(batch.len());
+        for (_, (vote, source, channel, filter)) in batch {
+            if vote.validate().is_ok() {
+                let filter: BlockHash = filter.unwrap_or_default();
+                let received_vote = ReceivedVote::new(vote, source, channel);
+                valid_votes.push(FilteredVote::new(received_vote, filter));
+            }
+        }
+
+        if !valid_votes.is_empty() {
+            self.vote_applier.vote_batch(&valid_votes);
+        }
+
+        self.total_processed.fetch_add(total, Ordering::SeqCst);
     }
 
     pub fn vote_blocking(&self, vote: &FilteredVote) -> Result<(), VoteError> {

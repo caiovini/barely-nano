@@ -17,16 +17,31 @@ fi
 
 STAGE_ITB="${UBOOT_DIR}/usb_stage_custom.itb"
 TMP_GZ="$(mktemp /tmp/k3_barely_nano.XXXXXX.bin.gz)"
+TMP_STAGE_CMD="$(mktemp /tmp/k3_stage.XXXXXX.cmd)"
+TMP_STAGE_SCR="$(mktemp /tmp/k3_stage.XXXXXX.scr)"
 TMP_ITS="$(mktemp /tmp/k3_usb_stage.XXXXXX.its)"
-trap 'rm -f "${TMP_GZ}" "${TMP_ITS}"' EXIT
+trap 'rm -f "${TMP_GZ}" "${TMP_STAGE_CMD}" "${TMP_STAGE_SCR}" "${TMP_ITS}"' EXIT
 
-echo "[0/2] Packaging ${STAGE_ITB} from workspace binaries..."
+BOOT_SCR_HEX=$(printf "0x%x" "$(stat -c '%s' "${SCRIPT_DIR}/boot.scr")")
+CONFIG_HEX=$(printf "0x%x" "$(stat -c '%s' "${SCRIPT_DIR}/config.toml")")
+
+cat > "${TMP_STAGE_CMD}" <<EOF
+mw.b 0x103F00000 0 0x10000
+cp.b 0x11fd00000 0x103F00000 ${CONFIG_HEX}
+fatwrite nvme 0:1 0x11ff00000 boot.scr ${BOOT_SCR_HEX}
+fatwrite nvme 0:1 0x103F00000 config.toml ${CONFIG_HEX}
+setenv config_addr 0x103F00000
+setenv config_size ${CONFIG_HEX}
+EOF
+mkimage -C none -A riscv -T script -d "${TMP_STAGE_CMD}" "${TMP_STAGE_SCR}" >/dev/null
+
+echo "[0/2] Packaging ${STAGE_ITB} from workspace binaries (config.toml=${CONFIG_HEX} bytes)..."
 gzip -9 -n -f -c "${SCRIPT_DIR}/barely-nano.bin" > "${TMP_GZ}"
 
 cat > "${TMP_ITS}" <<EOF
 /dts-v1/;
 / {
-	description = "Custom U-Boot + gzipped barely-nano FIT image for k3 USB stage";
+	description = "Custom U-Boot + config.toml + gzipped barely-nano FIT image for k3 USB stage";
 	#address-cells = <2>;
 	fit,fdt-list = "of-list";
 	images {
@@ -39,6 +54,24 @@ cat > "${TMP_ITS}" <<EOF
 			load = <0x1 0x00000000>;
 			entry = <0x1 0x00000000>;
 			data = /incbin/("${FW_DIR}/fw_dynamic.bin");
+			hash-1 { algo = "crc32"; };
+		};
+		config_toml {
+			description = "config.toml";
+			type = "standalone";
+			arch = "riscv";
+			compression = "none";
+			load = <0x1 0x1fd00000>;
+			data = /incbin/("${SCRIPT_DIR}/config.toml");
+			hash-1 { algo = "crc32"; };
+		};
+		stage_scr {
+			description = "stage.scr";
+			type = "standalone";
+			arch = "riscv";
+			compression = "none";
+			load = <0x1 0x1fe00000>;
+			data = /incbin/("${TMP_STAGE_SCR}");
 			hash-1 { algo = "crc32"; };
 		};
 		boot_scr {
@@ -83,7 +116,7 @@ cat > "${TMP_ITS}" <<EOF
 		conf_11 {
 			description = "k3-pico-itx";
 			firmware = "opensbi";
-			loadables = "boot_scr", "barely_nano_gz", "uboot";
+			loadables = "config_toml", "stage_scr", "boot_scr", "barely_nano_gz", "uboot";
 			fdt = "fdt_11";
 		};
 	};

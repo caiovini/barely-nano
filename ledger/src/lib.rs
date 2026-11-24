@@ -26,6 +26,7 @@ pub(crate) use block_rollback::BlockRollbackPerformer;
 pub use block_rollback::RollbackError;
 pub use dependent_blocks_finder::*;
 pub use ledger::*;
+pub(crate) use ledger::{flush_conf_heights_parallel, prefetch_cement_blocks_parallel};
 pub use ledger_builder::*;
 pub use ledger_constants::{
     LedgerConstants, DEV_GENESIS_ACCOUNT, DEV_GENESIS_BLOCK, DEV_GENESIS_HASH, DEV_GENESIS_PUB_KEY,

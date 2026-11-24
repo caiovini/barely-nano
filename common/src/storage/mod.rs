@@ -882,7 +882,10 @@ fn init_shards(mut storage: StorageContext) {
                     unsafe {
                         let saved_low = core::ptr::read_volatile(low_alias as *const u64);
                         core::ptr::write_volatile((high_dram_end - 8) as *mut u64, saved_low ^ 0x55AA_55AA_55AA_55AA);
+                        #[cfg(target_arch = "riscv64")]
                         core::arch::asm!("fence rw, rw", options(nostack));
+                        #[cfg(not(target_arch = "riscv64"))]
+                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                         let after_low = core::ptr::read_volatile(low_alias as *const u64);
                         core::ptr::write_volatile(low_alias as *mut u64, saved_low);
                         after_low == saved_low

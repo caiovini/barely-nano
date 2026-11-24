@@ -184,12 +184,68 @@ impl BlocksAckPayload {
     }
 
     pub fn deserialize(&mut self, stream: &mut dyn Stream) -> anyhow::Result<()> {
-        while let Ok(current) = Block::deserialize(stream) {
-            if self.0.len() >= Self::MAX_BLOCKS as usize {
+        let mut pending_state: alloc::vec::Vec<(
+            Account,
+            BlockHash,
+            rsnano_core::PublicKey,
+            rsnano_core::Amount,
+            rsnano_core::Link,
+            rsnano_core::Signature,
+            rsnano_core::WorkNonce,
+        )> = alloc::vec::Vec::new();
+
+        let flush_pending =
+            |out: &mut VecDeque<Block>,
+             pending: &mut alloc::vec::Vec<(
+                Account,
+                BlockHash,
+                rsnano_core::PublicKey,
+                rsnano_core::Amount,
+                rsnano_core::Link,
+                rsnano_core::Signature,
+                rsnano_core::WorkNonce,
+            )>| {
+                for (acc, prev, rep, bal, link, sig, work) in pending.drain(..) {
+                    out.push_back(Block::State(rsnano_core::StateBlock::from_parts_with_hash(
+                        acc, prev, rep, bal, link, sig, work, None,
+                    )));
+                }
+            };
+
+        loop {
+            let Ok(type_byte) = stream.read_u8() else {
+                break;
+            };
+            let Ok(block_type) = BlockType::try_from(type_byte) else {
+                break;
+            };
+            if matches!(block_type, BlockType::Invalid | BlockType::NotABlock) {
+                break;
+            }
+            if self.0.len() + pending_state.len() >= Self::MAX_BLOCKS as usize {
                 return Err(anyhow!("too many blocks"));
             }
-            self.0.push_back(current);
+
+            if block_type == BlockType::State {
+                let Ok(raw) = rsnano_core::StateBlock::deserialize_raw_parts(stream) else {
+                    break;
+                };
+                pending_state.push(raw);
+                if pending_state.len() == 16 {
+                    let arr: [_; 16] = core::array::from_fn(|_| pending_state.remove(0));
+                    for sb in rsnano_core::StateBlock::finish_batch_16(arr) {
+                        self.0.push_back(Block::State(sb));
+                    }
+                }
+            } else {
+                flush_pending(&mut self.0, &mut pending_state);
+                let Ok(current) = Block::deserialize_block_type(block_type, stream) else {
+                    break;
+                };
+                self.0.push_back(current);
+            }
         }
+        flush_pending(&mut self.0, &mut pending_state);
         Ok(())
     }
 }

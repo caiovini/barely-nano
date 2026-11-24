@@ -70,23 +70,72 @@ impl<'a> BlockCementer<'a> {
     ) where
         O: CementingObserver,
     {
+        let targets: Vec<BlockHash> = batch.into_iter().copied().collect();
+        if targets.is_empty() {
+            return;
+        }
+        let cap = targets.len();
         let mut conf_heights: hashbrown::HashMap<Account, Option<ConfirmationHeightInfo>> =
-            hashbrown::HashMap::new();
-        let mut visited: hashbrown::HashSet<BlockHash> = hashbrown::HashSet::new();
+            hashbrown::HashMap::with_capacity(cap);
+        let mut visited: hashbrown::HashSet<BlockHash> = hashbrown::HashSet::with_capacity(cap);
         let mut dirty_heights: hashbrown::HashMap<Account, ConfirmationHeightInfo> =
-            hashbrown::HashMap::new();
-        let mut confirmed: Vec<(SavedBlock, BlockHash)> = Vec::new();
-        let mut stack: VecDeque<(SavedBlock, bool)> = VecDeque::new();
+            hashbrown::HashMap::with_capacity(cap);
+        let mut sorted_dirty: Vec<(Account, ConfirmationHeightInfo)> = Vec::with_capacity(cap);
+        let mut confirmed: Vec<(SavedBlock, BlockHash)> = Vec::with_capacity(cap.min(max_blocks));
+        let mut stack: VecDeque<(SavedBlock, bool)> = VecDeque::with_capacity(16);
         let stack_cap = max_blocks.max(MAX_CEMENT_STACK);
 
-        for &target_hash in batch.into_iter() {
+        // Pre-fetch target blocks in sorted 3-stripe parallel across Cluster 1 (Harts 5, 6, 7)
+        let (sorted_targets, prefetched_targets) = if cap >= 8 {
+            let mut st = targets.clone();
+            st.sort_unstable();
+            st.dedup();
+            let pf = crate::prefetch_cement_blocks_parallel(self.store, &st);
+            (st, pf)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let flush_chunk = |store: &BtreeStore,
+                           dirty: &mut hashbrown::HashMap<Account, ConfirmationHeightInfo>,
+                           sorted_buf: &mut Vec<(Account, ConfirmationHeightInfo)>,
+                           chunk_count: &mut u64| {
+            if *chunk_count > 0 {
+                let inc = *chunk_count;
+                *chunk_count = 0;
+                let max_conf = store.cache.block_count.load(Ordering::Relaxed);
+                let _ = store.cache.confirmed_count.fetch_update(
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    |c| Some(c.saturating_add(inc).min(max_conf)),
+                );
+            }
+            if !dirty.is_empty() {
+                sorted_buf.clear();
+                sorted_buf.extend(dirty.drain());
+                sorted_buf.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                crate::flush_conf_heights_parallel(store, sorted_buf);
+            }
+        };
+
+        let mut chunk_confirmed_count = 0u64;
+
+        for target_hash in targets {
             if stopped.load(Ordering::Relaxed) {
                 break;
             }
             if visited.contains(&target_hash) {
                 continue;
             }
-            let Some(target_block) = self.store.block.get(&target_hash) else {
+            let target_opt = if !sorted_targets.is_empty() {
+                sorted_targets
+                    .binary_search(&target_hash)
+                    .ok()
+                    .and_then(|idx| prefetched_targets[idx].clone())
+            } else {
+                self.store.block.get(&target_hash)
+            };
+            let Some(target_block) = target_opt else {
                 continue;
             };
             if Self::is_block_confirmed_cached(self.store, &mut conf_heights, &target_block) {
@@ -119,7 +168,16 @@ impl<'a> BlockCementer<'a> {
                     let mut pushed = false;
                     for dependent in dependents.iter() {
                         if !dependent.is_zero() && !visited.contains(dependent) {
-                            if let Some(dep_block) = self.store.block.get(dependent) {
+                            let dep_opt = if !sorted_targets.is_empty() {
+                                sorted_targets
+                                    .binary_search(dependent)
+                                    .ok()
+                                    .and_then(|idx| prefetched_targets[idx].clone())
+                                    .or_else(|| self.store.block.get(dependent))
+                            } else {
+                                self.store.block.get(dependent)
+                            };
+                            if let Some(dep_block) = dep_opt {
                                 if !Self::is_block_confirmed_cached(
                                     self.store,
                                     &mut conf_heights,
@@ -157,12 +215,7 @@ impl<'a> BlockCementer<'a> {
 
                     conf_heights.insert(account, Some(conf_height.clone()));
                     dirty_heights.insert(account, conf_height);
-                    let max_conf = self.store.cache.block_count.load(Ordering::Relaxed);
-                    let _ = self.store.cache.confirmed_count.fetch_update(
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                        |c| Some((c + 1).min(max_conf)),
-                    );
+                    chunk_confirmed_count += 1;
 
                     self.stats.add_dir(
                         StatType::ConfirmationHeight,
@@ -175,11 +228,12 @@ impl<'a> BlockCementer<'a> {
                 }
 
                 if confirmed.len() >= max_blocks {
-                    for (account, conf_height) in dirty_heights.drain() {
-                        self.store
-                            .confirmation_height
-                            .put(&account, &conf_height);
-                    }
+                    flush_chunk(
+                        self.store,
+                        &mut dirty_heights,
+                        &mut sorted_dirty,
+                        &mut chunk_confirmed_count,
+                    );
                     cementing_observer.batch_confirmed(core::mem::take(&mut confirmed));
                     if stop_after_one_chunk {
                         return;
@@ -188,11 +242,12 @@ impl<'a> BlockCementer<'a> {
             }
         }
 
-        for (account, conf_height) in dirty_heights.drain() {
-            self.store
-                .confirmation_height
-                .put(&account, &conf_height);
-        }
+        flush_chunk(
+            self.store,
+            &mut dirty_heights,
+            &mut sorted_dirty,
+            &mut chunk_confirmed_count,
+        );
         if !confirmed.is_empty() {
             cementing_observer.batch_confirmed(confirmed);
         }

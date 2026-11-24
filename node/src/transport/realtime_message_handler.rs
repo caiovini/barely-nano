@@ -92,6 +92,13 @@ impl RealtimeMessageHandler {
 
         let mut valid_flags = alloc::vec![false; n];
         let mut i = 0;
+        while i + 16 <= n {
+            let blocks: [&rsnano_core::Block; 16] =
+                core::array::from_fn(|k| &publishes[i + k].0.block);
+            let res = self.work_thresholds.validate_entry_blocks_16(blocks);
+            valid_flags[i..i + 16].copy_from_slice(&res);
+            i += 16;
+        }
         while i + 4 <= n {
             let blocks = [
                 &publishes[i].0.block,

@@ -257,7 +257,20 @@ impl Node {
         let mut flags = args.flags;
         config.enable_voting = flags.enable_voting;
 
-        let work_factory = Arc::new(WorkFactory::disabled());
+        let work_factory = if is_nulled {
+            Arc::new(WorkFactory::disabled())
+        } else {
+            let rate_limit = if config.pow_sleep_interval_ns > 0 {
+                Duration::from_nanos(config.pow_sleep_interval_ns as u64)
+            } else {
+                Duration::ZERO
+            };
+            Arc::new(
+                WorkFactory::builder()
+                    .local_work_pool(|b| b.threads(7).cpu_rate_limit(rate_limit))
+                    .finish(),
+            )
+        };
 
         let steady_clock = if is_nulled {
             Arc::new(SteadyClock::new_null())

@@ -1,5 +1,5 @@
 use crate::blake2b;
-use crate::curve25519::FieldElement;
+use crate::curve25519::{Fe51x16, FieldElement};
 use core::convert::TryInto;
 use core::iter::Iterator;
 use core::option::Option::{self, None, Some};
@@ -217,6 +217,7 @@ const EMPTY_PUBKEY_CACHE: PubkeyPointCache = PubkeyPointCache {
 
 const PUBKEY_CACHE_SETS: usize = 16;
 const PUBKEY_CACHE_WAYS: usize = 4;
+const COMB_CACHE_SETS: usize = 64;
 
 const COMB_STATE_EMPTY: u8 = 0;
 const COMB_STATE_BUILDING: u8 = 1;
@@ -242,8 +243,8 @@ impl CombCacheSlot {
     };
 }
 
-static COMB_CACHE: [[CombCacheSlot; PUBKEY_CACHE_WAYS]; PUBKEY_CACHE_SETS] =
-    [const { [CombCacheSlot::EMPTY; PUBKEY_CACHE_WAYS] }; PUBKEY_CACHE_SETS];
+static COMB_CACHE: [[CombCacheSlot; PUBKEY_CACHE_WAYS]; COMB_CACHE_SETS] =
+    [const { [CombCacheSlot::EMPTY; PUBKEY_CACHE_WAYS] }; COMB_CACHE_SETS];
 
 #[derive(Clone, Copy)]
 struct HartPubkeyCache {
@@ -297,6 +298,16 @@ fn pubkey_cache_shard(bytes: &[u8; 32]) -> usize {
 #[inline(always)]
 fn pubkey_cache_set(bytes: &[u8; 32]) -> usize {
     ((bytes[0] as usize) ^ (bytes[15] as usize) ^ (bytes[30] as usize)) & (PUBKEY_CACHE_SETS - 1)
+}
+
+#[inline(always)]
+fn comb_cache_set(bytes: &[u8; 32]) -> usize {
+    ((bytes[0] as usize)
+        ^ (bytes[7] as usize).rotate_left(2)
+        ^ (bytes[15] as usize)
+        ^ (bytes[23] as usize).rotate_left(1)
+        ^ (bytes[30] as usize))
+        & (COMB_CACHE_SETS - 1)
 }
 
 impl PartialEq for Point {
@@ -711,10 +722,10 @@ impl Point {
     }
 
     /// Lock-free lookup or one-time construction of a 16-comb (`[[PrecomputedPoint; 8]; 16]`)
-    /// for `-A` in the 64-slot shared `COMB_CACHE`. Returns a zero-copy `'static` reference.
+    /// for `-A` in the 256-slot shared `COMB_CACHE`. Returns a zero-copy `'static` reference.
     #[inline]
     pub fn get_or_create_comb(bytes: &[u8; 32]) -> Option<&'static [[PrecomputedPoint; 8]; 16]> {
-        let set_idx = pubkey_cache_set(bytes);
+        let set_idx = comb_cache_set(bytes);
         let set = &COMB_CACHE[set_idx];
 
         for slot in set.iter() {
@@ -1791,9 +1802,482 @@ pub fn verify_batch_4(
     results
 }
 
+#[derive(Clone, Copy)]
+struct Precomp51Lane {
+    ypx: [u64; 5],
+    ymx: [u64; 5],
+    xy2d: [u64; 5],
+}
+
+impl Precomp51Lane {
+    const IDENTITY: Self = Self {
+        ypx: [1, 0, 0, 0, 0],
+        ymx: [1, 0, 0, 0, 0],
+        xy2d: [0, 0, 0, 0, 0],
+    };
+
+    #[inline(always)]
+    fn from_precomputed(p: &PrecomputedPoint, negate: bool) -> Self {
+        const M51: u64 = (1u64 << 51) - 1;
+        const TP0: u64 = (1u64 << 52) - 38;
+        const TP14: u64 = (1u64 << 52) - 2;
+
+        #[inline(always)]
+        fn pack51(fe: &FieldElement) -> [u64; 5] {
+            let r = fe.reduce();
+            let (w0, w1, w2, w3) = (r.0[0], r.0[1], r.0[2], r.0[3]);
+            [
+                w0 & M51,
+                ((w0 >> 51) | (w1 << 13)) & M51,
+                ((w1 >> 38) | (w2 << 26)) & M51,
+                ((w2 >> 25) | (w3 << 39)) & M51,
+                (w3 >> 12) & M51,
+            ]
+        }
+
+        let ypx = pack51(&p.yplusx);
+        let ymx = pack51(&p.yminusx);
+        let xy = pack51(&p.xy2d);
+        if !negate {
+            Self { ypx, ymx, xy2d: xy }
+        } else {
+            let d0 = TP0 - xy[0];
+            let d1 = TP14 - xy[1];
+            let d2 = TP14 - xy[2];
+            let d3 = TP14 - xy[3];
+            let d4 = TP14 - xy[4];
+            let neg_xy = [
+                (d0 & M51) + (d4 >> 51) * 19,
+                (d1 & M51) + (d0 >> 51),
+                (d2 & M51) + (d1 >> 51),
+                (d3 & M51) + (d2 >> 51),
+                (d4 & M51) + (d3 >> 51),
+            ];
+            Self {
+                ypx: ymx,
+                ymx: ypx,
+                xy2d: neg_xy,
+            }
+        }
+    }
+}
+
+struct Precomp51x16 {
+    ypx: Fe51x16,
+    ymx: Fe51x16,
+    xy2d: Fe51x16,
+}
+
+impl Precomp51x16 {
+    #[inline(always)]
+    fn from_lanes(lanes: &[Precomp51Lane; 16]) -> Self {
+        let mut ypx = Fe51x16::ZERO;
+        let mut ymx = Fe51x16::ZERO;
+        let mut xy2d = Fe51x16::ZERO;
+        for l in 0..16 {
+            for k in 0..5 {
+                ypx.0[k][l] = lanes[l].ypx[k];
+                ymx.0[k][l] = lanes[l].ymx[k];
+                xy2d.0[k][l] = lanes[l].xy2d[k];
+            }
+        }
+        Self { ypx, ymx, xy2d }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Point51x16 {
+    x: Fe51x16,
+    y: Fe51x16,
+    z: Fe51x16,
+    t: Fe51x16,
+}
+
+#[derive(Clone, Copy)]
+struct Proj51x16 {
+    x: Fe51x16,
+    y: Fe51x16,
+    z: Fe51x16,
+}
+
+impl Proj51x16 {
+    const IDENTITY: Self = Self {
+        x: Fe51x16::ZERO,
+        y: Fe51x16::ONE,
+        z: Fe51x16::ONE,
+    };
+
+    /// 16-lane `ProjectivePoint::double -> ProjectivePoint` (`4S + 3M`).
+    #[inline]
+    fn double_to_p2(&self) -> Self {
+        let tr_x = self.x.square();
+        let tr_z = self.y.square();
+        let z2 = self.z.square();
+        let tr_t = z2.add(&z2);
+        let t0 = self.x.add(&self.y).square();
+        let r_y = tr_z.add(&tr_x);
+        let r_z = tr_z.sub(&tr_x);
+        let r_x = t0.sub(&r_y);
+        let r_t = tr_t.sub(&r_z);
+        Self {
+            x: r_x.mul(&r_t),
+            y: r_y.mul(&r_z),
+            z: r_z.mul(&r_t),
+        }
+    }
+
+    /// 16-lane `ProjectivePoint::double -> Extended Point51x16` (`4S + 4M`).
+    #[inline]
+    fn double_to_p3(&self) -> Point51x16 {
+        let tr_x = self.x.square();
+        let tr_z = self.y.square();
+        let z2 = self.z.square();
+        let tr_t = z2.add(&z2);
+        let t0 = self.x.add(&self.y).square();
+        let r_y = tr_z.add(&tr_x);
+        let r_z = tr_z.sub(&tr_x);
+        let r_x = t0.sub(&r_y);
+        let r_t = tr_t.sub(&r_z);
+        Point51x16 {
+            x: r_x.mul(&r_t),
+            y: r_y.mul(&r_z),
+            z: r_z.mul(&r_t),
+            t: r_x.mul(&r_y),
+        }
+    }
+}
+
+impl Point51x16 {
+    const IDENTITY: Self = Self {
+        x: Fe51x16::ZERO,
+        y: Fe51x16::ONE,
+        z: Fe51x16::ONE,
+        t: Fe51x16::ZERO,
+    };
+
+    /// Complete, strongly unified 16-lane `P3 + Precomp -> P3` (`7M`, zero branches).
+    /// Adding `Precomp51Lane::IDENTITY (1, 1, 0)` scales `(X : Y : Z : T)` by `4Z != 0`,
+    /// preserving projective equivalence cleanly for `digit == 0` lanes.
+    #[inline]
+    fn madd_to_p3(&self, q: &Precomp51x16) -> Self {
+        let y_plus_x = self.y.add(&self.x);
+        let y_minus_x = self.y.sub(&self.x);
+        let a = y_plus_x.mul(&q.ypx);
+        let b = y_minus_x.mul(&q.ymx);
+        let c = q.xy2d.mul(&self.t);
+        let d = self.z.add(&self.z);
+        let rx = a.sub(&b);
+        let ry = a.add(&b);
+        let rz = d.add(&c);
+        let rt = d.sub(&c);
+        Self {
+            x: rx.mul(&rt),
+            y: ry.mul(&rz),
+            z: rz.mul(&rt),
+            t: rx.mul(&ry),
+        }
+    }
+
+    /// Complete 16-lane `P3 + Precomp -> P2` (`6M`, skipping `t` on final step of a tooth).
+    #[inline]
+    fn madd_to_p2(&self, q: &Precomp51x16) -> Proj51x16 {
+        let y_plus_x = self.y.add(&self.x);
+        let y_minus_x = self.y.sub(&self.x);
+        let a = y_plus_x.mul(&q.ypx);
+        let b = y_minus_x.mul(&q.ymx);
+        let c = q.xy2d.mul(&self.t);
+        let d = self.z.add(&self.z);
+        let rx = a.sub(&b);
+        let ry = a.add(&b);
+        let rz = d.add(&c);
+        let rt = d.sub(&c);
+        Proj51x16 {
+            x: rx.mul(&rt),
+            y: ry.mul(&rz),
+            z: rz.mul(&rt),
+        }
+    }
+
+    /// Complete 16-lane `P3 + P3 -> P2` (`8M`).
+    #[inline]
+    fn add_p3_to_p2(&self, rhs: &Self, d2_16: &Fe51x16) -> Proj51x16 {
+        let y1_minus_x1 = self.y.sub(&self.x);
+        let y1_plus_x1 = self.y.add(&self.x);
+        let y2_minus_x2 = rhs.y.sub(&rhs.x);
+        let y2_plus_x2 = rhs.y.add(&rhs.x);
+
+        let a = y1_minus_x1.mul(&y2_minus_x2);
+        let b = y1_plus_x1.mul(&y2_plus_x2);
+        let c = self.t.mul(&rhs.t).mul(d2_16);
+        let z1z2 = self.z.mul(&rhs.z);
+        let d = z1z2.add(&z1z2);
+
+        let e = b.sub(&a);
+        let f = d.sub(&c);
+        let g = d.add(&c);
+        let h = b.add(&a);
+
+        Proj51x16 {
+            x: e.mul(&f),
+            y: g.mul(&h),
+            z: f.mul(&g),
+        }
+    }
+}
+
+#[inline]
+fn signed_radix16_digits(scalar: &[u8; 32]) -> [i8; 64] {
+    let mut d = [0i8; 64];
+    for i in 0..32 {
+        d[2 * i] = (scalar[i] & 0x0f) as i8;
+        d[2 * i + 1] = (scalar[i] >> 4) as i8;
+    }
+    let mut carry = 0i8;
+    for i in 0..63 {
+        let v = d[i] + carry;
+        carry = (v + 8) >> 4;
+        d[i] = v - (carry << 4);
+    }
+    d[63] += carry;
+    d
+}
+
+/// 16-lane lockstep `sc_reduce` (`Blake2b-512 mod L`) for `verify_batch_16`.
+#[inline]
+fn sc_reduce_batch_16(hashes: &[[u8; 64]; 16]) -> [[u8; 32]; 16] {
+    core::array::from_fn(|i| sc_reduce(&hashes[i]))
+}
+
+/// Evaluates `[s_i]B + [k_i](-A_i)` for 16 signatures simultaneously in `Fe51x16` (`VLEN=1024`)
+/// using 16-tooth signed radix-16 combs (`12` curve doublings total across all 16 lanes).
+fn double_scalar_mul_comb_batch_16(
+    s_scalars: &[[u8; 32]; 16],
+    combs: [&[[PrecomputedPoint; 8]; 16]; 16],
+    k_scalars: &[[u8; 32]; 16],
+) -> [ProjectivePoint; 16] {
+    if !RADIX16_PRECOMP_INIT.load(Ordering::Acquire) {
+        init_radix16_precomp();
+    }
+
+    let mut da: [[i8; 64]; 16] = core::array::from_fn(|i| signed_radix16_digits(&k_scalars[i]));
+    let mut db: [[i8; 64]; 16] = core::array::from_fn(|i| signed_radix16_digits(&s_scalars[i]));
+
+    let mut r = Proj51x16::IDENTITY;
+
+    for step in (0..4).rev() {
+        let mut p = if step == 3 {
+            Point51x16::IDENTITY
+        } else {
+            r.double_to_p2()
+                .double_to_p2()
+                .double_to_p2()
+                .double_to_p3()
+        };
+
+        for m in 0..16 {
+            let idx = 4 * m + step;
+
+            if idx == 63 {
+                let mut any_overflow_a = false;
+                let mut any_overflow_b = false;
+                for l in 0..16 {
+                    if da[l][63] > 8 {
+                        any_overflow_a = true;
+                    }
+                    if db[l][63] > 8 {
+                        any_overflow_b = true;
+                    }
+                }
+                if any_overflow_a {
+                    let lanes_a: [Precomp51Lane; 16] = core::array::from_fn(|l| {
+                        if da[l][63] > 8 {
+                            da[l][63] -= 8;
+                            Precomp51Lane::from_precomputed(&combs[l][15][7], false)
+                        } else {
+                            Precomp51Lane::IDENTITY
+                        }
+                    });
+                    p = p.madd_to_p3(&Precomp51x16::from_lanes(&lanes_a));
+                }
+                if any_overflow_b {
+                    let lanes_b: [Precomp51Lane; 16] = core::array::from_fn(|l| {
+                        if db[l][63] > 8 {
+                            db[l][63] -= 8;
+                            // SAFETY: `RADIX16_PRECOMP` is initialized above.
+                            Precomp51Lane::from_precomputed(unsafe { &RADIX16_PRECOMP[60][7] }, false)
+                        } else {
+                            Precomp51Lane::IDENTITY
+                        }
+                    });
+                    p = p.madd_to_p3(&Precomp51x16::from_lanes(&lanes_b));
+                }
+            }
+
+            let lanes_a: [Precomp51Lane; 16] = core::array::from_fn(|l| {
+                let d = da[l][idx];
+                if d > 0 {
+                    Precomp51Lane::from_precomputed(&combs[l][m][(d as usize) - 1], false)
+                } else if d < 0 {
+                    Precomp51Lane::from_precomputed(&combs[l][m][((-d) as usize) - 1], true)
+                } else {
+                    Precomp51Lane::IDENTITY
+                }
+            });
+            p = p.madd_to_p3(&Precomp51x16::from_lanes(&lanes_a));
+
+            let lanes_b: [Precomp51Lane; 16] = core::array::from_fn(|l| {
+                let sb = db[l][idx];
+                if sb > 0 {
+                    // SAFETY: `RADIX16_PRECOMP` is initialized above; `4*m <= 60`, `sb-1 < 8`.
+                    Precomp51Lane::from_precomputed(
+                        unsafe { &RADIX16_PRECOMP[4 * m][(sb as usize) - 1] },
+                        false,
+                    )
+                } else if sb < 0 {
+                    // SAFETY: `RADIX16_PRECOMP` is initialized above; `4*m <= 60`, `-sb-1 < 8`.
+                    Precomp51Lane::from_precomputed(
+                        unsafe { &RADIX16_PRECOMP[4 * m][((-sb) as usize) - 1] },
+                        true,
+                    )
+                } else {
+                    Precomp51Lane::IDENTITY
+                }
+            });
+
+            if m == 15 {
+                r = p.madd_to_p2(&Precomp51x16::from_lanes(&lanes_b));
+            } else {
+                p = p.madd_to_p3(&Precomp51x16::from_lanes(&lanes_b));
+            }
+        }
+    }
+
+    let xs = r.x.to_fe_array();
+    let ys = r.y.to_fe_array();
+    let zs = r.z.to_fe_array();
+    core::array::from_fn(|i| ProjectivePoint {
+        x: xs[i],
+        y: ys[i],
+        z: zs[i],
+    })
+}
+
+/// Builds `[1..=8] * (-A)` in affine `PrecomputedPoint` coordinates using a single 8-way batch inversion.
+fn build_radix16_neg_table(pt: &Point) -> [PrecomputedPoint; 8] {
+    let p1 = pt.neg();
+    let p2 = p1.double();
+    let p3 = p2.add(&p1);
+    let p4 = p2.double();
+    let p5 = p4.add(&p1);
+    let p6 = p3.double();
+    let p7 = p6.add(&p1);
+    let p8 = p4.double();
+    let proj = [p1, p2, p3, p4, p5, p6, p7, p8];
+    let z_invs = FieldElement::batch_invert_8([
+        &proj[0].z, &proj[1].z, &proj[2].z, &proj[3].z,
+        &proj[4].z, &proj[5].z, &proj[6].z, &proj[7].z,
+    ]);
+    core::array::from_fn(|i| {
+        let ax = proj[i].x.mul(&z_invs[i]);
+        let ay = proj[i].y.mul(&z_invs[i]);
+        PrecomputedPoint {
+            yplusx: ay.add(&ax),
+            yminusx: ay.sub(&ax),
+            xy2d: ax.mul(&ay).mul(&D_TIMES_TWO),
+        }
+    })
+}
+
+/// 16-lane `VLEN=1024` fallback verifier when one or more public keys miss the 256-slot `COMB_CACHE`:
+/// evaluates `[s_i]B` with zero doublings via `RADIX16_PRECOMP` and `[k_i](-A_i)` via signed radix-16
+/// across all 16 lanes simultaneously in `Fe51x16`.
+fn double_scalar_mul_window4_batch_16(
+    s_scalars: &[[u8; 32]; 16],
+    tables_a: &[[PrecomputedPoint; 8]; 16],
+    k_scalars: &[[u8; 32]; 16],
+) -> [ProjectivePoint; 16] {
+    if !RADIX16_PRECOMP_INIT.load(Ordering::Acquire) {
+        init_radix16_precomp();
+    }
+
+    // 1. Evaluate [s_i] * B across all 16 lanes using unsigned 4-bit nibbles of s_i (0 doublings!).
+    let mut sb_pt = Point51x16::IDENTITY;
+    for j in 0..64 {
+        let lanes_b: [Precomp51Lane; 16] = core::array::from_fn(|l| {
+            let nibble = ((s_scalars[l][j / 2] >> ((j % 2) * 4)) & 0x0f) as usize;
+            if nibble > 0 {
+                // SAFETY: `RADIX16_PRECOMP` is initialized; `j < 64`, `nibble - 1 < 15`.
+                Precomp51Lane::from_precomputed(unsafe { &RADIX16_PRECOMP[j][nibble - 1] }, false)
+            } else {
+                Precomp51Lane::IDENTITY
+            }
+        });
+        sb_pt = sb_pt.madd_to_p3(&Precomp51x16::from_lanes(&lanes_b));
+    }
+
+    // 2. Evaluate [k_i] * (-A_i) across all 16 lanes using signed radix-16 digits.
+    let mut da: [[i8; 64]; 16] = core::array::from_fn(|l| signed_radix16_digits(&k_scalars[l]));
+    let mut ka_p2 = Proj51x16::IDENTITY;
+    let mut ka_p3 = Point51x16::IDENTITY;
+
+    for j in (0..64).rev() {
+        let mut p = if j == 63 {
+            Point51x16::IDENTITY
+        } else {
+            ka_p2
+                .double_to_p2()
+                .double_to_p2()
+                .double_to_p2()
+                .double_to_p3()
+        };
+
+        if j == 63 && da.iter().any(|d| d[63] > 8) {
+            let over_lanes: [Precomp51Lane; 16] = core::array::from_fn(|l| {
+                if da[l][63] > 8 {
+                    da[l][63] -= 8;
+                    Precomp51Lane::from_precomputed(&tables_a[l][7], false)
+                } else {
+                    Precomp51Lane::IDENTITY
+                }
+            });
+            p = p.madd_to_p3(&Precomp51x16::from_lanes(&over_lanes));
+        }
+
+        let lanes_a: [Precomp51Lane; 16] = core::array::from_fn(|l| {
+            let d = da[l][j];
+            if d > 0 {
+                Precomp51Lane::from_precomputed(&tables_a[l][(d as usize) - 1], false)
+            } else if d < 0 {
+                Precomp51Lane::from_precomputed(&tables_a[l][((-d) as usize) - 1], true)
+            } else {
+                Precomp51Lane::IDENTITY
+            }
+        });
+
+        if j == 0 {
+            ka_p3 = p.madd_to_p3(&Precomp51x16::from_lanes(&lanes_a));
+        } else {
+            ka_p2 = p.madd_to_p2(&Precomp51x16::from_lanes(&lanes_a));
+        }
+    }
+
+    let d2_arr = [D_TIMES_TWO; 16];
+    let d2_16 = Fe51x16::from_fe_array(&d2_arr);
+    let sum = sb_pt.add_p3_to_p2(&ka_p3, &d2_16);
+
+    let xs = sum.x.to_fe_array();
+    let ys = sum.y.to_fe_array();
+    let zs = sum.z.to_fe_array();
+    core::array::from_fn(|i| ProjectivePoint {
+        x: xs[i],
+        y: ys[i],
+        z: zs[i],
+    })
+}
+
 /// 16-way batched Ed25519 signature verification designed for SpacemiT K3 Cluster 2 & 3
-/// A100 cores (`VLEN=1024`), computing all 16 `k = Blake2b-512(R || A || M)` challenges in a
-/// single `VLEN=1024` `blake2b::hash64_batch_16` vector pass.
+/// A100 cores (`VLEN=1024`), executing 16-lane `VLEN=1024` `Blake2b-512` challenge hashing,
+/// 16-lane `Fe51x16` (`GF(2^255-19)`) curve scalar multiplication, and 16-way Montgomery inversion.
 pub fn verify_batch_16(
     public_keys: [&[u8; 32]; 16],
     messages: [&[u8]; 16],
@@ -1805,14 +2289,15 @@ pub fn verify_batch_16(
 
     if all_match && len0 <= 128 {
         let mut combs: [Option<&'static [[PrecomputedPoint; 8]; 16]>; 16] = [None; 16];
-        let mut fallback_tables: [Option<[PrecomputedPoint; 8]>; 16] = [None; 16];
+        let mut points: [Option<Point>; 16] = [None; 16];
+        let mut all_have_comb = true;
 
         for i in 0..16 {
             let mut reused = false;
             for j in 0..i {
                 if public_keys[i] == public_keys[j] {
                     combs[i] = combs[j];
-                    fallback_tables[i] = fallback_tables[j];
+                    points[i] = points[j];
                     reused = true;
                     break;
                 }
@@ -1822,8 +2307,9 @@ pub fn verify_batch_16(
             }
             if let Some(c) = Point::get_or_create_comb(public_keys[i]) {
                 combs[i] = Some(c);
-            } else if let Some(t) = Point::get_or_create_neg_table(public_keys[i]) {
-                fallback_tables[i] = Some(t);
+            } else if let Some(pt) = Point::from_bytes(public_keys[i]) {
+                all_have_comb = false;
+                points[i] = Some(pt);
             } else {
                 for k in 0..16 {
                     results[k] = verify(public_keys[k], messages[k], signatures[k]);
@@ -1839,71 +2325,52 @@ pub fn verify_batch_16(
             payloads[i][64..64 + len0].copy_from_slice(messages[i]);
         }
 
-        let payload_refs: [&[u8]; 16] = [
-            &payloads[0][..64 + len0],
-            &payloads[1][..64 + len0],
-            &payloads[2][..64 + len0],
-            &payloads[3][..64 + len0],
-            &payloads[4][..64 + len0],
-            &payloads[5][..64 + len0],
-            &payloads[6][..64 + len0],
-            &payloads[7][..64 + len0],
-            &payloads[8][..64 + len0],
-            &payloads[9][..64 + len0],
-            &payloads[10][..64 + len0],
-            &payloads[11][..64 + len0],
-            &payloads[12][..64 + len0],
-            &payloads[13][..64 + len0],
-            &payloads[14][..64 + len0],
-            &payloads[15][..64 + len0],
-        ];
-
+        let payload_refs: [&[u8]; 16] = core::array::from_fn(|i| &payloads[i][..64 + len0]);
         let k_hashes = blake2b::hash64_batch_16(payload_refs);
+        let k_scalars = sc_reduce_batch_16(&k_hashes);
 
-        let mut sb_minus_ka = [ProjectivePoint::IDENTITY; 16];
-        for i in 0..16 {
-            let k_bytes = sc_reduce(&k_hashes[i]);
+        let s_scalars: [[u8; 32]; 16] = core::array::from_fn(|i| {
             let mut s_le = [0u8; 32];
             s_le.copy_from_slice(&signatures[i][32..]);
             if (s_le[31] & 0xE0) != 0 {
                 s_le = Scalar::from_bytes_wide_32(&s_le).to_bytes();
             }
+            s_le
+        });
 
-            sb_minus_ka[i] = if let Some(c) = combs[i] {
-                Point::double_scalar_mul_comb(&s_le, c, &k_bytes)
-            } else {
-                Point::double_scalar_mul_base_and_point_with_table(
-                    &s_le,
-                    fallback_tables[i].as_ref().unwrap(),
-                    &k_bytes,
-                )
-            };
-        }
+        let sb_minus_ka = if all_have_comb {
+            let comb_refs: [&[[PrecomputedPoint; 8]; 16]; 16] =
+                core::array::from_fn(|i| combs[i].unwrap());
+            double_scalar_mul_comb_batch_16(&s_scalars, comb_refs, &k_scalars)
+        } else {
+            let mut tables: [Option<[PrecomputedPoint; 8]>; 16] = [None; 16];
+            for i in 0..16 {
+                if let Some(c) = combs[i] {
+                    tables[i] = Some(c[0]);
+                    continue;
+                }
+                let mut reused = false;
+                for j in 0..i {
+                    if public_keys[i] == public_keys[j] {
+                        tables[i] = tables[j];
+                        reused = true;
+                        break;
+                    }
+                }
+                if !reused {
+                    tables[i] = Some(build_radix16_neg_table(&points[i].unwrap()));
+                }
+            }
+            let tables_unwrapped: [[PrecomputedPoint; 8]; 16] =
+                core::array::from_fn(|i| tables[i].unwrap());
+            double_scalar_mul_window4_batch_16(&s_scalars, &tables_unwrapped, &k_scalars)
+        };
 
-        let z_invs_0 = FieldElement::batch_invert_8([
-            &sb_minus_ka[0].z,
-            &sb_minus_ka[1].z,
-            &sb_minus_ka[2].z,
-            &sb_minus_ka[3].z,
-            &sb_minus_ka[4].z,
-            &sb_minus_ka[5].z,
-            &sb_minus_ka[6].z,
-            &sb_minus_ka[7].z,
-        ]);
-        let z_invs_1 = FieldElement::batch_invert_8([
-            &sb_minus_ka[8].z,
-            &sb_minus_ka[9].z,
-            &sb_minus_ka[10].z,
-            &sb_minus_ka[11].z,
-            &sb_minus_ka[12].z,
-            &sb_minus_ka[13].z,
-            &sb_minus_ka[14].z,
-            &sb_minus_ka[15].z,
-        ]);
+        let z_refs: [&FieldElement; 16] = core::array::from_fn(|i| &sb_minus_ka[i].z);
+        let z_invs = FieldElement::batch_invert_16(z_refs);
 
-        for i in 0..8 {
-            results[i] = sb_minus_ka[i].to_bytes_with_z_inv(&z_invs_0[i]) == signatures[i][..32];
-            results[i + 8] = sb_minus_ka[i + 8].to_bytes_with_z_inv(&z_invs_1[i]) == signatures[i + 8][..32];
+        for i in 0..16 {
+            results[i] = sb_minus_ka[i].to_bytes_with_z_inv(&z_invs[i]) == signatures[i][..32];
         }
     } else {
         for i in 0..16 {
@@ -1912,6 +2379,39 @@ pub fn verify_batch_16(
     }
 
     results
+}
+
+/// On-device consistency check of the 16-lane `Fe51x16` (`VLEN=1024`) Ed25519 verifier
+/// against scalar `verify()`. Returns `0` on exact match across valid and invalid lanes.
+#[cfg(all(target_arch = "riscv64", feature = "simd"))]
+pub fn self_test() -> u8 {
+    let mut privs = [[0u8; 32]; 16];
+    let mut pubs = [[0u8; 32]; 16];
+    let mut msgs = [[0u8; 32]; 16];
+    let mut sigs = [[0u8; 64]; 16];
+
+    for i in 0..16 {
+        for b in 0..32 {
+            privs[i][b] = ((i * 53 + b * 29 + 11) & 0xff) as u8;
+            msgs[i][b] = ((i * 97 + b * 17 + 3) & 0xff) as u8;
+        }
+        pubs[i] = derive_public_key(&privs[i]);
+        sigs[i] = sign(&privs[i], &msgs[i]);
+    }
+    sigs[5][12] ^= 0x01; // Corrupt lane 5 signature
+
+    let pk_refs: [&[u8; 32]; 16] = core::array::from_fn(|i| &pubs[i]);
+    let msg_refs: [&[u8]; 16] = core::array::from_fn(|i| &msgs[i][..]);
+    let sig_refs: [&[u8; 64]; 16] = core::array::from_fn(|i| &sigs[i]);
+
+    let res = verify_batch_16(pk_refs, msg_refs, sig_refs);
+    for i in 0..16 {
+        let expected = i != 5;
+        if res[i] != expected {
+            return 1;
+        }
+    }
+    0
 }
 
 
@@ -2151,6 +2651,63 @@ mod tests {
         assert!(results[1]);
         assert!(results[2]);
         assert!(results[3]);
+    }
+
+    #[test]
+    fn test_verify_batch_16_comb_and_window4() {
+        let mut privs = [[0u8; 32]; 16];
+        let mut pubs = [[0u8; 32]; 16];
+        let mut msgs = [[0u8; 32]; 16];
+        let mut sigs = [[0u8; 64]; 16];
+
+        for i in 0..16 {
+            for b in 0..32 {
+                privs[i][b] = ((i * 53 + b * 29 + 11) & 0xff) as u8;
+                msgs[i][b] = ((i * 97 + b * 17 + 3) & 0xff) as u8;
+            }
+            pubs[i] = derive_public_key(&privs[i]);
+            sigs[i] = sign(&privs[i], &msgs[i]);
+        }
+
+        let pk_refs: [&[u8; 32]; 16] = core::array::from_fn(|i| &pubs[i]);
+        let msg_refs: [&[u8]; 16] = core::array::from_fn(|i| &msgs[i][..]);
+        let sig_refs: [&[u8; 64]; 16] = core::array::from_fn(|i| &sigs[i]);
+
+        // 1. Comb fast path
+        let res_comb = verify_batch_16(pk_refs, msg_refs, sig_refs);
+        assert_eq!(res_comb, [true; 16]);
+
+        // 2. Direct test of window4 16-lane fallback path
+        let tables: [[PrecomputedPoint; 8]; 16] = core::array::from_fn(|i| {
+            let pt = Point::from_bytes(&pubs[i]).unwrap();
+            build_radix16_neg_table(&pt)
+        });
+        let mut payloads = [[0u8; 96]; 16];
+        for i in 0..16 {
+            payloads[i][0..32].copy_from_slice(&sigs[i][..32]);
+            payloads[i][32..64].copy_from_slice(&pubs[i]);
+            payloads[i][64..96].copy_from_slice(&msgs[i]);
+        }
+        let k_hashes = blake2b::hash64_batch_16(core::array::from_fn(|i| &payloads[i][..]));
+        let k_scalars = sc_reduce_batch_16(&k_hashes);
+        let s_scalars: [[u8; 32]; 16] = core::array::from_fn(|i| {
+            let mut s = [0u8; 32];
+            s.copy_from_slice(&sigs[i][32..]);
+            s
+        });
+        let pts_w4 = double_scalar_mul_window4_batch_16(&s_scalars, &tables, &k_scalars);
+        for i in 0..16 {
+            assert_eq!(&pts_w4[i].to_bytes()[..], &sigs[i][..32]);
+        }
+
+        // 3. Corrupted signature detection in single lane
+        let mut bad_sigs = sigs;
+        bad_sigs[9][4] ^= 0x80;
+        let bad_refs: [&[u8; 64]; 16] = core::array::from_fn(|i| &bad_sigs[i]);
+        let res_bad = verify_batch_16(pk_refs, msg_refs, bad_refs);
+        for i in 0..16 {
+            assert_eq!(res_bad[i], i != 9);
+        }
     }
 
     #[test]
