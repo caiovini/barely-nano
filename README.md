@@ -67,14 +67,14 @@ The kernel runs in **Supervisor Mode (S-mode)** launched from U-Boot on top of O
 
 ### 4. Hardware Watchdogs, Timers & Peer-Calibrated Wall Clock
 - **CLINT Timer:** Reads the 24 MHz hardware `time` CSR (`rdtime`) for cooperative async scheduling, sub-microsecond profiling, and monotonic `SteadyClock` durations.
-- **Peer-Telemetry-Calibrated Unix Wall Clock ([`core/src/utils/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/core/src/utils/mod.rs), [`node/src/telemetry/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/node/src/telemetry/mod.rs)):** Combines monotonic `SteadyClock` elapsed time with an atomic boot-epoch offset (`WALL_CLOCK_OFFSET_MS`) calibrated automatically from the median of up to 32 Ed25519-verified peer `TelemetryAck` timestamps—providing accurate Unix epoch timestamps (`UnixTimestamp::now()`, `UnixMillisTimestamp::now()`) for block sidebands, account modification times, outgoing `TelemetryAck` packets, WebSocket envelopes, and vote generation without an external RTC or NTP daemon.
+- **Peer-Telemetry-Calibrated Unix Wall Clock ([`core/src/utils/mod.rs`](core/src/utils/mod.rs), [`node/src/telemetry/mod.rs`](node/src/telemetry/mod.rs)):** Combines monotonic `SteadyClock` elapsed time with an atomic boot-epoch offset (`WALL_CLOCK_OFFSET_MS`) calibrated automatically from the median of up to 32 Ed25519-verified peer `TelemetryAck` timestamps—providing accurate Unix epoch timestamps (`UnixTimestamp::now()`, `UnixMillisTimestamp::now()`) for block sidebands, account modification times, outgoing `TelemetryAck` packets, WebSocket envelopes, and vote generation without an external RTC or NTP daemon.
 - **Watchdog Management:** Disables and periodically kicks both the SpacemiT K1 SoC watchdog (`0xD408_0000`) and the SPM8821 PMIC watchdog over PWR I2C bus 8 (`0xD401_D800`).
 
 ### 5. Hardware Accelerated Cryptography & Optimizations
 To achieve high transaction throughput and maximize CPU efficiency, the node leverages the SpacemiT X60 RISC-V extension set (`+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zihintpause`):
-- **Vector Extension (`V`, `Zvl256b`):** 256-bit SIMD processing (`nullables/sha`) for vectorized Blake2b compression, 4-way batch PoW difficulty evaluation, Ed25519 verification, and 8-wide Structure-of-Arrays (SoA) 32-bit big-endian B-Tree key-head binary searches (`vmsltu.vx`/`vmsleu.vx` + `vcpop.m`) in [`common/src/storage/btree.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs).
+- **Vector Extension (`V`, `Zvl256b`):** 256-bit SIMD processing (`nullables/sha`) for vectorized Blake2b compression, 4-way batch PoW difficulty evaluation, Ed25519 verification, and 8-wide Structure-of-Arrays (SoA) 32-bit big-endian B-Tree key-head binary searches (`vmsltu.vx`/`vmsleu.vx` + `vcpop.m`) in [`common/src/storage/btree.rs`](common/src/storage/btree.rs).
 - **Bit-Manipulation (`Zbb`, `Zba`, `Zbs`, `Zbc`):** Scalar bit-manipulation, single-cycle shifted address generation (`sh1add`, `sh2add`, `sh3add`) for B-Tree slot indexing, single-bit operations, and carry-less multiplication (compiling 64-bit Blake2b rotations to single `rori` instructions).
-- **Cache-Block Prefetch (`Zicbop`):** Inline `prefetch.r` and `prefetch.w` hints ([`common/src/storage/mod.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs), [`common/src/storage/bpm.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/bpm.rs)) during B-Tree binary search, child page descent, and sorted batch insertions.
+- **Cache-Block Prefetch (`Zicbop`):** Inline `prefetch.r` and `prefetch.w` hints ([`common/src/storage/mod.rs`](common/src/storage/mod.rs), [`common/src/storage/bpm.rs`](common/src/storage/bpm.rs)) during B-Tree binary search, child page descent, and sorted batch insertions.
 - **Cache-Block Zero (`Zicboz`):** Fast 64-byte cache-line zeroing (`cbo.zero`).
 - **Pause Hint (`Zihintpause`):** Adaptive `pause` backoff in spinloops to reduce interconnect contention.
 - **Cache-Block Management (`Zicbom`):** Explicit cache maintenance (`cbo.clean`, `cbo.flush`) for cross-cluster coherency between Cluster 0 (Harts 0–3) and Cluster 1 (Harts 4–7).
@@ -86,13 +86,13 @@ To achieve high transaction throughput and maximize CPU efficiency, the node lev
   - **Port `7075` (Peering):** Live Nano P2P protocol peering and bootstrap (`~98` concurrent peers).
   - **Port `7076` (HTTP JSON-RPC — Nault / Natrium Compatible):** 8-socket concurrent HTTP JSON-RPC pool (`RPC_SOCKET_COUNT = 8`) backed by `rsnano_rpc_messages`, `rsnano_rpc_handler`, and `rsnano_rpc_server`, including legacy wallet action/field aliases (`accounts_pending`, `pending`, `pending_exists`, `search_pending`, `wallet_pending`), both stringified and object `process` blocks, standard `json_block` string-vs-object `contents` serialization, and browser CORS preflight support (`OPTIONS`). To connect **Nault**, configure Custom Server API `http://192.168.1.200:7076`, WebSocket `ws://192.168.1.200:7078`, and set PoW Source to **Client WebGL / Client CPU** (or an external PoW server).
   - **Port `7078` (WebSocket Server):** Full `no_std` WebSocket server and client (`rsnano_websocket_messages`, `rsnano_websocket_client`, `rsnano_websocket_server`) streaming live node events (`confirmation`, `vote`, `started_election`, `stopped_election`, `telemetry`, `bootstrap`, `new_unconfirmed_block`, and `ping`/`pong` keepalives).
-  - **Port `7080` (Live Web Dashboard, Browser WASM Stress Test & Diagnostic Endpoints):** Built-in 6-socket HTTP server ([`main/src/dashboard.html`](file:///mnt/data/rust-workspace/barely-nano/main/src/dashboard.html), [`main/src/bin.rs`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs)) serving:
+  - **Port `7080` (Live Web Dashboard, Browser WASM Stress Test & Diagnostic Endpoints):** Built-in 6-socket HTTP server ([`main/src/dashboard.html`](main/src/dashboard.html), [`main/src/bin.rs`](main/src/bin.rs)) serving:
     - Real-time web dashboard UI, embedded wallet, and browser-side WebAssembly stress test (`nano_stress.wasm` + `POST /api/stress_batch`).
     - `GET /api/metrics`: Real-time JSON telemetry including per-hart Buffer Pool misses (`miss_n_hart`, `miss_ms_hart`), shard lock hold times (`shard_hold_ms_hart`), NVMe device I/O counters (`io_read_*`, `io_write_*`), and ledger recount progress (`recount`).
-    - `GET /api/recount_start` & `GET /api/recount_repair`: Incremental chunked merge-join verification and self-healing of `TABLE_ACCOUNTS` and `TABLE_CONFIRMATION_HEIGHT` ([`ledger/src/ledger_recount.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger/src/ledger_recount.rs)).
+    - `GET /api/recount_start` & `GET /api/recount_repair`: Incremental chunked merge-join verification and self-healing of `TABLE_ACCOUNTS` and `TABLE_CONFIRMATION_HEIGHT` ([`ledger/src/ledger_recount.rs`](ledger/src/ledger_recount.rs)).
 
 ### 7. Multi-Hart SMP Architecture
-All 8 X60 harts on the SpacemiT K1 are pinned by physical CPU cluster (`512 KB` L2 cache per 4-hart cluster) in [`main/src/bin.rs`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs) to maximize L2 cache locality and parallelize B-Tree + WAL storage across Cluster 1:
+All 8 X60 harts on the SpacemiT K1 are pinned by physical CPU cluster (`512 KB` L2 cache per 4-hart cluster) in [`main/src/bin.rs`](main/src/bin.rs) to maximize L2 cache locality and parallelize B-Tree + WAL storage across Cluster 1:
 
 - **Cluster 0 (Shared 512 KB L2 — Ingress, Signature Verification & Vote Ingestion):**
   - **Hart 0 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and `vote_rebroadcaster`, and assists with Ed25519 signature verification when idle.
@@ -101,7 +101,7 @@ All 8 X60 harts on the SpacemiT K1 are pinned by physical CPU cluster (`512 KB` 
   - **Hart 3 (`Crypto-2`):** Dedicated lock-free SIMD Ed25519 signature verification worker (`signature_checker.help_verify()`) and inbound `MessageProcessor::run_batch()` drainer.
 - **Cluster 1 (Shared 512 KB L2 — Consensus & Parallel Sharded Ledger Storage):**
   - **Hart 4 (`Consensus`):** Drives `aec_voter` and `aec_ticker` (300 ms ticks), event-driven `PriorityScheduler::run_if_notified()`, `election_schedulers`, throttled `backlog_scan`, `request_aggregator`, `vote_generators`, incremental `LEDGER_RECOUNT`, and cooperative async executor tasks (`WORKER_HARTS`).
-  - **Hart 5 (`Ledger-B`):** Parallel Shards `8–15` B-Tree mutations ([`Ledger::try_run_ledger_b_job`](file:///mnt/data/rust-workspace/barely-nano/ledger/src/ledger.rs#L94-L119)), parallel WAL dirty-page snapshotting (`wal::try_run_wal_b_job`), `unchecked` dependency queue drain, synchronous Cluster 1 signature verification assistance (`signature_checker.help_verify_sync()`), and `bootstrap_server.run_once()` when idle.
+  - **Hart 5 (`Ledger-B`):** Parallel Shards `8–15` B-Tree mutations ([`Ledger::try_run_ledger_b_job`](ledger/src/ledger.rs#L314-L336)), parallel WAL dirty-page snapshotting (`wal::try_run_wal_b_job`), `unchecked` dependency queue drain, synchronous Cluster 1 signature verification assistance (`signature_checker.help_verify_sync()`), and `bootstrap_server.run_once()` when idle.
   - **Hart 6 (`Ledger-A`):** Primary `block_processor` batch coordinator, topological batch validator (`HOT_ACCOUNTS` / `HOT_BLOCKS` direct-mapped caches), Shards `0–7` B-Tree mutations, parallel WAL dirty-page snapshotting (`wal::checkpoint_nonblocking()`), and batch-coalesced `confirming_set` cementation.
   - **Hart 7 (`Storage+Mon`):** Asynchronous background NVMe WAL checkpoint flusher (`wal::run_background_wal_flush()`), online weight calculation, NVMe Free-List GC/reclamation (`ledger_pruning`), 2-second I2C OLED status updates, 15-second telemetry/profiling reports, and cooperative async executor tasks (`WORKER_HARTS`).
 
@@ -140,14 +140,14 @@ Uses a high-contrast 8×16 bold font (4 lines × 15 characters):
 Without an OS filesystem or traditional database (LMDB/RocksDB), `barely-nano` implements a crash-resilient **16-Shard B-Tree + 5.12 GB DRAM Bank 1 Buffer Pool + Atomic Write-Ahead Log (WAL)** directly on the 1 TB NVMe SSD:
 
 1. **Physical Layer (`StorageBackend::UBoot`):** Transfers raw 4 KB pages (`8 × 512 B` sectors, batched up to 64 pages / 256 KB per write command via zero-copy 64-bit NVMe PRP DMA, and up to 16 contiguous pages / 64 KB per B-Tree range-scan read via `StorageContext::read_contiguous_into_frames`) over U-Boot's block syscall interface. (`STORAGE_BASE_LBA = 1,048,576` leaves a 512 MB safety margin at the start of the drive, with a 64 MB persistent Bloom filter at `BLOOM_HEADER_LBA = 524,288`.)
-2. **5.12 GB High-DRAM Buffer Pool Manager ([`common/src/storage/bpm.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/bpm.rs)):** Manages `81,920` × 4 KB frames per shard (`320 MB/shard` = `5,120 MB` total) in Ky X1 DRAM Bank 1 (`0x1_0000_0000`), paired with compact `FrameMeta` entries and a two-level chunked page directory (`page_to_frame`) in Bank 0, a `8,192`-page/shard dirty capacity (`32 MB/shard`), and a **Table-ID-Aware Clock (second-chance)** eviction policy:
+2. **5.12 GB High-DRAM Buffer Pool Manager ([`common/src/storage/bpm.rs`](common/src/storage/bpm.rs)):** Manages `81,920` × 4 KB frames per shard (`320 MB/shard` = `5,120 MB` total) in Ky X1 DRAM Bank 1 (`0x1_0000_0000`), paired with compact `FrameMeta` entries and a two-level chunked page directory (`page_to_frame`) in Bank 0, a `8,192`-page/shard dirty capacity (`32 MB/shard`), and a **Table-ID-Aware Clock (second-chance)** eviction policy:
    - Priority **`4`**: Shard metadata (`page_id == 0`) and internal B-Tree routing nodes (`is_leaf == 0`).
    - Priority **`2`**: Hot point-lookup leaf pages (`Account (1)`, `ConfirmationHeight (3)`, `Pending (7)`, `Version (11)`, `RepWeight (12)`).
    - Priority **`1`**: Cold `Block/Successor (2)` leaf pages.
    - Priority **`0` (`fetch_page_scan` / `prefetch_contiguous_scan`)**: Sequentially scanned leaf pages during full-table range scans (`FrontierChecker`, `BacklogScan`, `LEDGER_RECOUNT`), ensuring background scans are reclaimed immediately on the Clock hand's first pass without evicting hot point-lookup pages used by Hart 6 (`Ledger-A`).
    - Dirty frames are **never written during eviction**, preventing partial cross-shard updates from reaching disk.
-3. **Asynchronous Hart 7 Dual-Area Write-Ahead Log ([`common/src/storage/wal.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wal.rs)):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. When a checkpoint is triggered (`wal::checkpoint_nonblocking()`), Hart 6 (Shards `0..7`) and Hart 5 (Shards `8..15`) sort and copy dirty pages in parallel into staging buffers in RAM and immediately resume processing blocks while **Hart 7 (`Storage+Mon`)** asynchronously writes `[descriptor pages][data pages][commit page]` with a 64-bit checksum and boot epoch, followed by zero-copy contiguous LBA home-page runs (`apply_sorted_home_runs`). On boot, `wal::recover()` idempotently replays the latest committed batch.
-4. **16-Shard Slotted-Page B-Tree Engine ([`common/src/storage/btree.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs)):** Prefix-partitioned across 16 shards by the high nibble of `key[1]` (`0x00..0x7F` on Hart 6 `Ledger-A`, `0x80..0xFF` on Hart 5 `Ledger-B`), featuring RVV 1.0 (`+v,+zvl256b`) 8-wide Structure-of-Arrays (SoA) 32-bit key-head vector searches, direct-mapped `HOT_ACCOUNTS` / `HOT_BLOCKS` L1/L2 caches ([`ledger_store/src/account_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/account_store.rs), [`ledger_store/src/block_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/block_store.rs)), `Zicbop`-prefetched (`prefetch.r`/`prefetch.w`) binary searches, 16-page contiguous sibling read-ahead (`BTree::prefetch_child_run`), proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and zero-allocation range iterators (`next_kv_with`).
+3. **Asynchronous Hart 7 Dual-Area Write-Ahead Log ([`common/src/storage/wal.rs`](common/src/storage/wal.rs)):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. When a checkpoint is triggered (`wal::checkpoint_nonblocking()`), Hart 6 (Shards `0..7`) and Hart 5 (Shards `8..15`) sort and copy dirty pages in parallel into staging buffers in RAM and immediately resume processing blocks while **Hart 7 (`Storage+Mon`)** asynchronously writes `[descriptor pages][data pages][commit page]` with a 64-bit checksum and boot epoch, followed by zero-copy contiguous LBA home-page runs (`apply_sorted_home_runs`). On boot, `wal::recover()` idempotently replays the latest committed batch.
+4. **16-Shard Slotted-Page B-Tree Engine ([`common/src/storage/btree.rs`](common/src/storage/btree.rs)):** Prefix-partitioned across 16 shards by the high nibble of `key[1]` (`0x00..0x7F` on Hart 6 `Ledger-A`, `0x80..0xFF` on Hart 5 `Ledger-B`), featuring RVV 1.0 (`+v,+zvl256b`) 8-wide Structure-of-Arrays (SoA) 32-bit key-head vector searches, direct-mapped `HOT_ACCOUNTS` / `HOT_BLOCKS` L1/L2 caches ([`ledger_store/src/account_store.rs`](ledger_store/src/account_store.rs), [`ledger_store/src/block_store.rs`](ledger_store/src/block_store.rs)), `Zicbop`-prefetched (`prefetch.r`/`prefetch.w`) binary searches, 16-page contiguous sibling read-ahead (`BTree::prefetch_child_run`), proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and zero-allocation range iterators (`next_kv_with`).
 5. **Isolated Wallet B-Tree & Atomic Redo Journal (`WALLET_SHARD` at `WALLET_STORAGE_LBA = 786,432`):** Wallet and representative keys live in a dedicated B-Tree partition at the `384 MB` NVMe mark (`LBA 786,432 .. 819,712`, `16 MB` B-Tree + `256 KB` checksummed redo journal), strictly below `STORAGE_BASE_LBA` (`512 MB`) and enforced by compile-time assertions and runtime LBA bounds guards so wallet mutations can never overwrite or contend with a synced ledger.
 
 ### Why the Bare-Metal NVMe Ledger is ~68–86 GB vs. ~123 GB in LMDB (& Architectural Advantages)
@@ -169,27 +169,27 @@ On the exact same unpruned Nano mainnet ledger (**220.89M blocks**, **37.44M acc
 
 #### Why the Storage Size Difference Occurs
 1. **Self-Contained Bit-Packed Compact Block Encoding & Top-256 Representative Table (~22 GiB saved):**
-   - In [`SavedBlock::serialize_compact`](file:///mnt/data/rust-workspace/barely-nano/core/src/blocks/mod.rs#L862) and [`SavedBlock::deserialize_compact`](file:///mnt/data/rust-workspace/barely-nano/core/src/blocks/mod.rs#L1026) (`COMPACT_BLOCK_TAG = 0x80`), `barely-nano` eliminates redundant fields inside a `3`-byte bit-packed header:
-     - **Hot Frontier Elision (`successor == 0`):** Active account head blocks (`~17.9%` of the ledger) omit the trailing 32 zero bytes of `successor` (`COMPACT_HAS_SUCCESSOR = 0x40` clear); when a newer block is later published for that account, [`BTree::update_compact_successor_32`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs#L815-L839) appends the 32-byte `successor` in place.
-     - **1-Byte Top-256 Representative Index (`rl_code = 6..7`):** Across the Nano ledger, **89.61%** of all `StateBlock`s either have `representative == account` (`0 B` stored) or delegate to one of the Top 256 Principal/Historical Representatives configured in `compact_representatives` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml), replacing the 32-byte public key with a **1-byte table index (`0..=255`)** decoded in $O(1)$ (`~1 ns`) via [`get_compact_rep_bytes`](file:///mnt/data/rust-workspace/barely-nano/core/src/blocks/mod.rs#L783-L793).
-     - **Open Block, Link, Balance & Sideband Compression:** Open blocks (`previous == 0`, `~10.7%`) omit the 32-byte `previous` field; zero and epoch v1/v2 `link` values occupy `0 B`; `10^24`-scaled NANO balances and variable-length `height`/`timestamp` fields strip leading zero bytes; and [`Block::deserialize_with_hash`](file:///mnt/data/rust-workspace/barely-nano/core/src/blocks/mod.rs#L525) reuses the 32-byte `BlockHash` from the B-Tree key to skip redundant Blake2b hashing on every disk read.
+   - In [`SavedBlock::serialize_compact`](core/src/blocks/mod.rs#L862) and [`SavedBlock::deserialize_compact`](core/src/blocks/mod.rs#L1029) (`COMPACT_BLOCK_TAG = 0x80`), `barely-nano` eliminates redundant fields inside a `3`-byte bit-packed header:
+     - **Hot Frontier Elision (`successor == 0`):** Active account head blocks (`~17.9%` of the ledger) omit the trailing 32 zero bytes of `successor` (`COMPACT_HAS_SUCCESSOR = 0x40` clear); when a newer block is later published for that account, [`BTree::update_compact_successor_32`](common/src/storage/btree.rs#L976-L1060) appends the 32-byte `successor` in place.
+     - **1-Byte Top-256 Representative Index (`rl_code = 6..7`):** Across the Nano ledger, **89.61%** of all `StateBlock`s either have `representative == account` (`0 B` stored) or delegate to one of the Top 256 Principal/Historical Representatives configured in `compact_representatives` in [`config.toml`](config.toml), replacing the 32-byte public key with a **1-byte table index (`0..=255`)** decoded in $O(1)$ (`~1 ns`) via [`get_compact_rep_bytes`](core/src/blocks/mod.rs#L790-L800).
+     - **Open Block, Link, Balance & Sideband Compression:** Open blocks (`previous == 0`, `~10.7%`) omit the 32-byte `previous` field; zero and epoch v1/v2 `link` values occupy `0 B`; `10^24`-scaled NANO balances and variable-length `height`/`timestamp` fields strip leading zero bytes; and [`Block::deserialize_with_hash`](core/src/blocks/mod.rs#L335-L342) reuses the 32-byte `BlockHash` from the B-Tree key to skip redundant Blake2b hashing on every disk read.
 2. **No Copy-on-Write (COW) or Freelist DB Bloat (~8.7 GiB saved):** LMDB never modifies pages in place; every transaction allocates new 4 KB pages for the modified leaf and every parent branch page up to the root, recording old page numbers in `FREE_DBI`. In a 220.9M-block `data.ldb` (`32,029,037` pages), only `29,760,946` pages contain active leaf data, leaving **over 2.26 million pages (~8.65 GiB)** consumed by historical COW snapshots, freelist tracking, and deeper branch trees. `barely-nano` updates slotted pages in place in its 5 GB DRAM buffer pool and commits atomically via a fixed `256 MB` dual-area WAL.
-3. **Higher Slotted-Page Packing Density (Up to 16 Blocks/Page vs. 13 in LMDB):** Because Nano block hashes and account public keys are uniformly distributed 256-bit values, random insertions into LMDB split 4 KB leaf pages in half (`50%` occupancy after split, averaging `~68%` across the file—wasting ~1.3 KB per page). `barely-nano`'s slotted-page B-Tree packs compact block entries (`209.3 B` average value + `42 B` key/slot/SoA head = `251.3 B/block`) up to **16 blocks per 4 KB leaf page**, reclaiming dead slot bytes in place via [`leaf_compact_and_insert`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs#L337-L370) before splitting.
+3. **Higher Slotted-Page Packing Density (Up to 16 Blocks/Page vs. 13 in LMDB):** Because Nano block hashes and account public keys are uniformly distributed 256-bit values, random insertions into LMDB split 4 KB leaf pages in half (`50%` occupancy after split, averaging `~68%` across the file—wasting ~1.3 KB per page). `barely-nano`'s slotted-page B-Tree packs compact block entries (`209.3 B` average value + `42 B` key/slot/SoA head = `251.3 B/block`) up to **16 blocks per 4 KB leaf page**, reclaiming dead slot bytes in place via [`page_compact_skip`](common/src/storage/btree.rs#L381-L401) before splitting.
 4. **In-Place Page Reclamation Without Offline Compaction:** When blocks or pending entries are deleted (or pruned), LMDB's `data.ldb` file never shrinks on disk unless taken offline and rewritten with `mdb_copy -c`. In `barely-nano`, each of the 16 B-Tree shards maintains an embedded $O(1)$ free-page list (`free_list_head`) that immediately recycles emptied 4 KB pages on the fly.
 
 ## Representative & Wallet Key Security Architecture (`wallet_crypto`)
 
-To protect representative private keys against physical NVMe SSD theft, power loss, and unauthorized extraction without sacrificing bare-metal voting throughput, `barely-nano` combines **Ky X1 SoC hardware eFuse binding** with **iterated `Blake2b-256` key derivation (`KDF`)** in [`common/src/storage/wallet_crypto.rs`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wallet_crypto.rs) and [`ledger_store/src/wallet_store.rs`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/wallet_store.rs):
+To protect representative private keys against physical NVMe SSD theft, power loss, and unauthorized extraction without sacrificing bare-metal voting throughput, `barely-nano` combines **Ky X1 SoC hardware eFuse binding** with **iterated `Blake2b-256` key derivation (`KDF`)** in [`common/src/storage/wallet_crypto.rs`](common/src/storage/wallet_crypto.rs) and [`ledger_store/src/wallet_store.rs`](ledger_store/src/wallet_store.rs):
 
 ### 1. Physical & Cryptographic Isolation
-- **Strict NVMe Partition Separation:** Wallet storage uses [`WALLET_SHARD`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs#L164) at `WALLET_STORAGE_LBA = 786,432` (`384 MB` offset) with its own 64-page redo journal. It never touches the 16 ledger [`SHARDS`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/mod.rs#L161) or the ledger WAL (`>= 512 MB`), and survives full ledger wipes (`wipe_blocks = true`).
+- **Strict NVMe Partition Separation:** Wallet storage uses [`WALLET_SHARD`](common/src/storage/mod.rs#L185) at `WALLET_STORAGE_LBA = 786,432` (`384 MB` offset) with its own 64-page redo journal. It never touches the 16 ledger [`SHARDS`](common/src/storage/mod.rs#L182) or the ledger WAL (`>= 512 MB`), and survives full ledger wipes (`wipe_blocks = true`).
 - **No Plaintext Keys or Passwords on Disk:** Neither the wallet `seed`, any account `priv_key`, nor the wallet `password` is ever written in plaintext to the NVMe SSD.
 - **Hardware-Bound Key Derivation (`Ky X1 eFuse + Salt + Password`):**
-  1. At boot, [`hardware_wallet_key()`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/wallet_crypto.rs#L99) derives a 256-bit SoC hardware root key from the **SpacemiT K1 / Ky X1 4K-bit on-chip eFuse banks** (`0xD401_F000`), Chip ID Unit (`0xD428_2C00`), EMAC0 factory MAC registers (`0xCAC8_0040`), and U-Boot's eFuse-derived `serial#` / `ethaddr` / optional `wallet_hw_key` environment variables using trap-safe S-mode MMIO probes ([`trap::probe_read_u32`](file:///mnt/data/rust-workspace/barely-nano/common/src/trap.rs#L207)).
+  1. At boot, [`hardware_wallet_key()`](common/src/storage/wallet_crypto.rs#L99) derives a 256-bit SoC hardware root key from the **SpacemiT K1 / Ky X1 4K-bit on-chip eFuse banks** (`0xD401_F000`), Chip ID Unit (`0xD428_2C00`), EMAC0 factory MAC registers (`0xCAC8_0040`), and U-Boot's eFuse-derived `serial#` / `ethaddr` / optional `wallet_hw_key` environment variables using trap-safe S-mode MMIO probes ([`trap::probe_read_u32`](common/src/trap.rs#L207)).
   2. Each wallet generates a unique 256-bit random `salt` and derives its 256-bit wrapping key via **4,096 rounds of iterated `Blake2b-256`**:
      $$\text{WrappingKey} = \text{Blake2b-256}^{4096}\bigl(\text{KyX1eFuseKey} \parallel \text{WalletSalt} \parallel \text{Password}\bigr)$$
   3. The wallet `seed` and each account `priv_key` are encrypted with domain-separated `Blake2b-256` keystream pads (`crypt_seed`, `crypt_priv_key`) and authenticated by a 256-bit `check_tag` (`compute_check_tag`). On unlock, every decrypted private key is also verified against its stored `PublicKey` (`priv_key.public_key() == pub_key`).
-- **Zero Runtime Voting Overhead:** Decryption runs only once when the wallet is unlocked (at boot or on `wallet_enter`, taking `< 1.5 ms`). Once unlocked, Hart 4 ([`VoteGenerator`](file:///mnt/data/rust-workspace/barely-nano/node/src/consensus/vote_generation/vote_generator.rs)) signs votes directly from RAM with 0% cryptographic overhead.
+- **Zero Runtime Voting Overhead:** Decryption runs only once when the wallet is unlocked (at boot or on `wallet_enter`, taking `< 1.5 ms`). Once unlocked, Hart 4 ([`VoteGenerator`](node/src/consensus/vote_generation/vote_generator.rs)) signs votes directly from RAM with 0% cryptographic overhead.
 
 ### 2. Two Operator Modes: Unattended Auto-Voting vs. Passphrase Lock on Reboot
 
@@ -229,14 +229,14 @@ curl -s -d '{"action": "wallet_rekey", "wallet": "<WALLET_ID>", "password": ""}'
 
 ### 4. Dynamic Invoice QR & Watch-Only Stealth Derivation
 
-For Point-of-Sale (POS) terminals and merchant appliances, `barely-nano` implements **Watch-Only Stealth Address Derivation + $O(1)$ Stateless Ephemeral Invoice Generation** ([`nullables/sha/src/ed25519.rs`](file:///mnt/data/rust-workspace/barely-nano/nullables/sha/src/ed25519.rs), [`core/src/private_key.rs`](file:///mnt/data/rust-workspace/barely-nano/core/src/private_key.rs), [`node/src/wallets/wallet.rs`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallet.rs)):
+For Point-of-Sale (POS) terminals and merchant appliances, `barely-nano` implements **Watch-Only Stealth Address Derivation + $O(1)$ Stateless Ephemeral Invoice Generation** ([`nullables/sha/src/ed25519.rs`](nullables/sha/src/ed25519.rs), [`core/src/private_key.rs`](core/src/private_key.rs), [`node/src/wallets/wallet.rs`](node/src/wallets/wallet.rs)):
 
 - **Zero Theft Surface on the POS Node:** The countertop node holds **only** a 256-bit Scan Key $v$ (`wallet.seed`) and the merchant's Cold Spend Public Key $S$ (`spend_public_key`). The Cold Master Spend Private Key $s$ is **never** loaded onto the node.
 - **Additive Ed25519 Blinding:** For each invoice index $i$ (with domain tag $\text{DomainTag} =$ `"BARELY_NANO_STEALTH_V1"`), the node computes a deterministic blinding scalar:
   $$c_i = \text{Blake2b-512}\bigl(\text{DomainTag} \parallel v \parallel i_{\text{be}}\bigr) \bmod L$$
   and derives a one-time receiving account $P_i = S + c_i \cdot B$ using precomputed Radix-16 basepoint tables (`RADIX16_PRECOMP`). To the customer's wallet and the Nano network, $P_i$ is a standard `nano_1...` address.
-- **$O(1)$ Memory & NVMe Storage (`"stateless": "true"`):** Passing `"stateless": "true"` to `account_create` updates **only** the 4-byte `deterministic_index` counter in [`PersistedWalletMeta`](file:///mnt/data/rust-workspace/barely-nano/ledger_store/src/wallet_store.rs#L42-L58) (`WALLET_SHARD`) without inserting per-invoice entries into `Wallet::keys` (`HashMap`) or allocating new NVMe pages—allowing millions of dynamic invoice QR codes in strictly $O(1)$ RAM and disk space.
-- **Cold Vault Scalar Reconstruction:** An air-gapped Cold Vault holding both the Master Spend Private Key $s$ and Scan Key $v$ reconstructs the canonical one-time Ed25519 scalar key $p_i = (s_{\text{clamped}} + c_i) \pmod L$ via [`PrivateKey::from_stealth`](file:///mnt/data/rust-workspace/barely-nano/core/src/private_key.rs#L61-L72) / [`Wallets::insert_stealth_key_at`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallets.rs#L497-L539) and signs standard Nano `StateBlock`s via [`sign_scalar`](file:///mnt/data/rust-workspace/barely-nano/nullables/sha/src/ed25519.rs#L1639-L1659).
+- **$O(1)$ Memory & NVMe Storage (`"stateless": "true"`):** Passing `"stateless": "true"` to `account_create` updates **only** the 4-byte `deterministic_index` counter in [`PersistedWalletMeta`](ledger_store/src/wallet_store.rs#L33-L47) (`WALLET_SHARD`) without inserting per-invoice entries into `Wallet::keys` (`HashMap`) or allocating new NVMe pages—allowing millions of dynamic invoice QR codes in strictly $O(1)$ RAM and disk space.
+- **Cold Vault Scalar Reconstruction:** An air-gapped Cold Vault holding both the Master Spend Private Key $s$ and Scan Key $v$ reconstructs the canonical one-time Ed25519 scalar key $p_i = (s_{\text{clamped}} + c_i) \pmod L$ via [`PrivateKey::from_stealth`](core/src/private_key.rs#L95-L102) / [`Wallets::insert_stealth_key_at`](node/src/wallets/wallets.rs#L635-L665) and signs standard Nano `StateBlock`s via [`sign_scalar`](nullables/sha/src/ed25519.rs#L1629-L1659).
 
 #### Step 1: Provision the Watch-Only POS Sentinel Wallet
 Configure a wallet on the OrangePi RV2 with the Scan Key $v$ (`seed`) and the Cold Vault's Spend Public Key $S$ (`spend_public_key`):
@@ -395,7 +395,7 @@ The modified U-Boot tree for the Orange Pi RV2 is maintained in a dedicated repo
 - **OpenSBI CCI Cache Coherency (`fw_dynamic.bin`)** — Enables hardware L2 snoop coherency across Cluster 0 (Harts 0–3) and Cluster 1 (Harts 4–7).
 - **Prebuilt Binaries (`prebuilt/`)** — Includes ready-to-flash `bootinfo_sd.bin`, `FSBL.bin`, and `u-boot-opensbi.itb` if you want to skip compiling U-Boot from source.
 
-You can initialize the submodule, build U-Boot from source, and flash all three raw sectors automatically using [`build_u-boot.sh`](file:///mnt/data/rust-workspace/barely-nano/build_u-boot.sh):
+You can initialize the submodule, build U-Boot from source, and flash all three raw sectors automatically using [`build_u-boot.sh`](build_u-boot.sh):
 
 ```bash
 # Build u-boot-orangepi-k1 and flash bootinfo_sd.bin, FSBL.bin, and u-boot-opensbi.itb to ${SD_DEV}
@@ -458,7 +458,7 @@ The Orange Pi RV2 ships with a factory U-Boot in onboard SPI NOR flash that **la
    *(Note: If your board revision's BootROM prioritizes SPI NOR over SD card, erasing the SPI NOR bootloader header from the U-Boot prompt with `sf probe; sf erase 0 0x100000; reset` forces the BootROM to always load `bootinfo_sd.bin` → `FSBL.bin` → `u-boot-opensbi.itb` directly from the MicroSD card.)*
 
 #### B. Force U-Boot to Probe Ethernet Port 1 & NVMe 1 Drivers via `boot.scr`
-U-Boot uses lazy Driver Model (`DM`) probing—hardware controllers remain unclocked and uninitialized unless a U-Boot command actively touches them before jumping to the standalone binary. Furthermore, U-Boot on the Orange Pi RV2 only loads drivers for **Ethernet Port 1** and **NVMe 1 (the M.2 2280 slot underneath the board)**. [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) (compiled into `boot.scr` on the SD card) automatically forces U-Boot to initialize both drivers before starting `barely-nano.bin`:
+U-Boot uses lazy Driver Model (`DM`) probing—hardware controllers remain unclocked and uninitialized unless a U-Boot command actively touches them before jumping to the standalone binary. Furthermore, U-Boot on the Orange Pi RV2 only loads drivers for **Ethernet Port 1** and **NVMe 1 (the M.2 2280 slot underneath the board)**. [`boot.cmd`](boot.cmd) (compiled into `boot.scr` on the SD card) automatically forces U-Boot to initialize both drivers before starting `barely-nano.bin`:
 
 ```text
 # 1. Force Ethernet Port 1 (x1_emac) to initialize its MAC, PHY, and DMA rings
@@ -491,12 +491,12 @@ fi
    sudo mkdir -p /media/$USER/NANO_NODE
    sudo mount "${SD_DEV}1" /media/$USER/NANO_NODE
    ```
-2. Edit [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) to match your local LAN subnet (`ipv4_address`, `gateway`, `dns_server`, `mac_address`).
+2. Edit [`config.toml`](config.toml) to match your local LAN subnet (`ipv4_address`, `gateway`, `dns_server`, `mac_address`).
 3. Build the firmware and `boot.scr` using `make build`:
    ```bash
    make build
    ```
-   - `make build` compiles [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) → `boot.scr` using `mkimage`, compiles `barely-nano` in release mode for `riscv64gc-unknown-none-elf`, extracts `barely-nano.bin` via `llvm-objcopy`, and automatically copies `barely-nano.bin`, `boot.scr`, and `config.toml` if `/media/cvini/NANO_NODE` or `/run/media/cvini/NANO_NODE` is mounted.
+   - `make build` compiles [`boot.cmd`](boot.cmd) → `boot.scr` using `mkimage`, compiles `barely-nano` in release mode for `riscv64gc-unknown-none-elf`, extracts `barely-nano.bin` via `llvm-objcopy`, and automatically copies `barely-nano.bin`, `boot.scr`, and `config.toml` if `/media/cvini/NANO_NODE` or `/run/media/cvini/NANO_NODE` is mounted.
 4. If your SD card is mounted at a different path, copy the three files manually and unmount cleanly:
    ```bash
    sudo cp barely-nano.bin boot.scr config.toml /media/$USER/NANO_NODE/
@@ -509,9 +509,9 @@ fi
 
 ## Build & Deployment System
 
-- [`Makefile`](file:///mnt/data/rust-workspace/barely-nano/Makefile) is the authoritative build interface.
+- [`Makefile`](Makefile) is the authoritative build interface.
 - Cross-compiles for `riscv64gc-unknown-none-elf` with `-C target-feature=+v,+zvl256b,+zba,+zbb,+zbc,+zbs,+zicbom,+zicboz,+zihintpause`.
-- Compiles [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) into `boot.scr` via `mkimage`, converts the ELF into `barely-nano.bin`, and automatically deploys `barely-nano.bin`, `config.toml`, and `boot.scr` to the SD card (`/media/cvini/NANO_NODE` or `/run/media/cvini/NANO_NODE`) when mounted.
+- Compiles [`boot.cmd`](boot.cmd) into `boot.scr` via `mkimage`, converts the ELF into `barely-nano.bin`, and automatically deploys `barely-nano.bin`, `config.toml`, and `boot.scr` to the SD card (`/media/cvini/NANO_NODE` or `/run/media/cvini/NANO_NODE`) when mounted.
 
 ### Build & Test Targets
 
@@ -530,8 +530,8 @@ fi
 | `make run-websocket-messages-tests` | — | Runs `rsnano_websocket_messages` unit tests |
 | `make run-websocket-client-tests` | — | Runs `rsnano_websocket_client` unit tests |
 | `make run-websocket-server-tests` | — | Runs `rsnano_websocket_server` unit tests |
-| `make build-lmdb-to-nvme` | — | Builds the host-side [`tools/lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) binary (`x86_64`) for migrating a Nano `data.ldb` snapshot directly to NVMe sectors |
-| `make build-nvme-snapshot` | — | Builds the host-side [`tools/nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) binary (`x86_64`) for dumping a compact raw ledger snapshot from a synced NVMe SSD (`dump`), inspecting it (`info`), and restoring it to an NVMe SSD (`restore`) |
+| `make build-lmdb-to-nvme` | — | Builds the host-side [`tools/lmdb-to-nvme`](tools/lmdb-to-nvme) binary (`x86_64`) for migrating a Nano `data.ldb` snapshot directly to NVMe sectors |
+| `make build-nvme-snapshot` | — | Builds the host-side [`tools/nvme-snapshot`](tools/nvme-snapshot) binary (`x86_64`) for dumping a compact raw ledger snapshot from a synced NVMe SSD (`dump`), inspecting it (`info`), and restoring it to an NVMe SSD (`restore`) |
 | `make build-stress` | — | Builds the host-side `tools/nano-stress` binary (`x86_64`) |
 | `make run-stress` / `make stress` | — | **Network stress test** — streams blocks to the node on port `7075` |
 | `make run-picocom` | — | Captures serial console output from `/dev/ttyUSB0` to `orpi.log` |
@@ -539,11 +539,11 @@ fi
 
 ## Deployment & Configuration (`config.toml`)
 
-Node, RPC, WebSocket, and bare-metal network parameters are configured declaratively in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml), following the Nano / RSNano TOML schema.
+Node, RPC, WebSocket, and bare-metal network parameters are configured declaratively in [`config.toml`](config.toml), following the Nano / RSNano TOML schema.
 
 ### Live SD Card Configuration (No Recompilation Needed)
-1. **U-Boot `fatload` (`0x10F00000`):** On boot, [`boot.cmd`](file:///mnt/data/rust-workspace/barely-nano/boot.cmd) (`boot.scr`) zeroes a 64 KB buffer at physical RAM address `0x10F00000` (1 MB below the kernel load address `0x11000000`), runs `fatload mmc 0:1 0x10F00000 config.toml`, and records `config_addr` and `config_size` in the U-Boot environment.
-2. **Kernel Boot Parsing:** [`load_config_toml_str()`](file:///mnt/data/rust-workspace/barely-nano/main/src/bin.rs#L120-L166) reads `config.toml` directly from `0x10F00000` and merges it into `DaemonConfig` (`NodeConfig`, `NodeRpcConfig`, `WebsocketConfig`, and `BareMetalNetConfig`).
+1. **U-Boot `fatload` (`0x10F00000`):** On boot, [`boot.cmd`](boot.cmd) (`boot.scr`) zeroes a 64 KB buffer at physical RAM address `0x10F00000` (1 MB below the kernel load address `0x11000000`), runs `fatload mmc 0:1 0x10F00000 config.toml`, and records `config_addr` and `config_size` in the U-Boot environment.
+2. **Kernel Boot Parsing:** [`load_config_toml_str()`](main/src/bin.rs#L257-L304) reads `config.toml` directly from `0x10F00000` and merges it into `DaemonConfig` (`NodeConfig`, `NodeRpcConfig`, `WebsocketConfig`, and `BareMetalNetConfig`).
 3. **Compile-Time Fallback:** If `config.toml` is missing from the SD card or fails to parse, the kernel automatically falls back to the copy embedded at compile time (`include_str!("../../config.toml")`).
 
 ### Default `config.toml`
@@ -624,7 +624,7 @@ enable_control = true
 
 ### WebSocket Subscriptions (`tools/ws_subscribe.py`)
 
-When `[node.websocket]` is enabled (default port `7078`), you can subscribe to live node topics using [`tools/ws_subscribe.py`](file:///mnt/data/rust-workspace/barely-nano/tools/ws_subscribe.py):
+When `[node.websocket]` is enabled (default port `7078`), you can subscribe to live node topics using [`tools/ws_subscribe.py`](tools/ws_subscribe.py):
 
 ```bash
 # Stream block confirmations continuously
@@ -644,7 +644,7 @@ When `[node.websocket]` is enabled (default port `7078`), you can subscribe to l
 
 Pruning allows the node to delete old, confirmed blocks to save disk space. In this bare-metal environment, the node uses its **B-Tree with Free-List reclamation** so deleted pages are physically reused on the NVMe SSD.
 
-Set `enable_pruning = true` under `[node.experimental]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml):
+Set `enable_pruning = true` under `[node.experimental]` in [`config.toml`](config.toml):
 
 ```toml
 [node.experimental]
@@ -658,29 +658,29 @@ pruning_exempt_accounts = [
 ```
 
 #### Retaining Full Account History for Merchant & Stealth Invoice Accounts on a Pruned Node
-When pruning runs ([`LedgerPruning::ledger_pruning`](file:///mnt/data/rust-workspace/barely-nano/node/src/pruning.rs#L65-L110)), [`LedgerPruning::build_exempt_accounts`](file:///mnt/data/rust-workspace/barely-nano/node/src/pruning.rs#L54-L63) and [`Wallets::collect_pruning_exempt_accounts`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallets.rs#L673-L716) automatically protect the merchant's own transaction history from ever being pruned while still pruning the rest of the global network:
-1. **Explicitly Configured Accounts (`pruning_exempt_accounts`):** Any `nano_...` address listed in `pruning_exempt_accounts` under `[node.experimental]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) is permanently exempt from pruning—ideal for offline Cold Vault, treasury, or accounting addresses whose keys are never loaded onto the node.
+When pruning runs ([`LedgerPruning::ledger_pruning`](node/src/pruning.rs#L62-L108)), [`LedgerPruning::build_exempt_accounts`](node/src/pruning.rs#L51-L60) and [`Wallets::collect_pruning_exempt_accounts`](node/src/wallets/wallets.rs#L672-L717) automatically protect the merchant's own transaction history from ever being pruned while still pruning the rest of the global network:
+1. **Explicitly Configured Accounts (`pruning_exempt_accounts`):** Any `nano_...` address listed in `pruning_exempt_accounts` under `[node.experimental]` in [`config.toml`](config.toml) is permanently exempt from pruning—ideal for offline Cold Vault, treasury, or accounting addresses whose keys are never loaded onto the node.
 2. **Local Wallet & Watch-Only Accounts:** Every deterministic, ad-hoc, stealth-scalar, and watch-only account stored in any local wallet (plus any configured Cold Spend Public Key `spend_public_key`) is automatically exempt from pruning, even if the wallet is currently locked in RAM.
-3. **Stateless Stealth Invoice Accounts (`0..deterministic_index`):** During each pruning pass, the node re-derives the wallet's stateless ephemeral/stealth invoice addresses (`0..deterministic_index`) on the fly, checks [`store.confirmation_height`](file:///mnt/data/rust-workspace/barely-nano/node/src/wallets/wallets.rs#L708), and exempts every paid invoice account so its complete `account_history` (`open`, partial payments, and sweep `send` blocks) is preserved indefinitely on NVMe without keeping unpaid invoice addresses in RAM.
+3. **Stateless Stealth Invoice Accounts (`0..deterministic_index`):** During each pruning pass, the node re-derives the wallet's stateless ephemeral/stealth invoice addresses (`0..deterministic_index`) on the fly, checks [`store.confirmation_height`](node/src/wallets/wallets.rs#L707), and exempts every paid invoice account so its complete `account_history` (`open`, partial payments, and sweep `send` blocks) is preserved indefinitely on NVMe without keeping unpaid invoice addresses in RAM.
 
 ### Representative Discovery on Bare-Metal
 
-In a bare-metal environment with an incomplete ledger during initial sync, public representatives may appear to have 0 weight locally until their account chains are synced. Setting `representative_vote_weight_minimum = "0"` under `[node]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) allows observing all voting representatives during initial sync.
+In a bare-metal environment with an incomplete ledger during initial sync, public representatives may appear to have 0 weight locally until their account chains are synced. Setting `representative_vote_weight_minimum = "0"` under `[node]` in [`config.toml`](config.toml) allows observing all voting representatives during initial sync.
 
 ## Fast Ledger Bootstrap: Direct LMDB to NVMe Migration (`tools/lmdb-to-nvme`)
 
-Syncing 220M+ blocks from scratch over P2P bootstrap can take many hours. If you have a standard C++ `nano_node` or `rsnano` LMDB ledger snapshot (`data.ldb`), you can attach the 1 TB NVMe SSD to a Linux workstation (e.g. via a USB-C NVMe enclosure at `/dev/sda`) and use [`tools/lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) ([`tools/lmdb_to_nvme.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb_to_nvme.sh)) to convert and write the entire ledger directly onto the raw NVMe sectors in minutes.
+Syncing 220M+ blocks from scratch over P2P bootstrap can take many hours. If you have a standard C++ `nano_node` or `rsnano` LMDB ledger snapshot (`data.ldb`), you can attach the 1 TB NVMe SSD to a Linux workstation (e.g. via a USB-C NVMe enclosure at `/dev/sda`) and use [`tools/lmdb-to-nvme`](tools/lmdb-to-nvme) ([`tools/lmdb_to_nvme.sh`](tools/lmdb_to_nvme.sh)) to convert and write the entire ledger directly onto the raw NVMe sectors in minutes.
 
 ### 1. How the Two-Pass Streaming Converter Works
 
 Standard Nano nodes store their ledger in an LMDB file (`data.ldb`) with separate named sub-databases (`accounts`, `blocks`, `confirmation_height`, `pending`, `rep_weights`, `online_weight`, `peers`, `version`), whereas `barely-nano` uses a bare-metal 16-shard Slotted-Page B-Tree (`53 GB` per shard, `4 KB` pages, 1-byte `table_id` key prefix) plus a `64 MB` on-disk `BlockBloom` filter.
 
-Instead of performing random 4 KB B-Tree insertions across 220M+ records (which would cause severe SSD write amplification), [`tools/lmdb-to-nvme/src/main.rs`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs) executes a **2-pass parallel streaming pipeline**:
+Instead of performing random 4 KB B-Tree insertions across 220M+ records (which would cause severe SSD write amplification), [`tools/lmdb-to-nvme/src/main.rs`](tools/lmdb-to-nvme/src/main.rs) executes a **2-pass parallel streaming pipeline**:
 
-1. **Startup Self-Test (`verify_btree_builder_self_test`):** Before touching any disk sectors, the tool constructs an in-memory multi-level B-Tree of 5,000 entries and verifies that every page passes `barely-nano`'s exact [`!page_is_full`](file:///mnt/data/rust-workspace/barely-nano/common/src/storage/btree.rs) invariant and binary-search lookup semantics.
+1. **Startup Self-Test (`verify_btree_builder_self_test`):** Before touching any disk sectors, the tool constructs an in-memory multi-level B-Tree of 5,000 entries and verifies that every page passes `barely-nano`'s exact [`!page_is_full`](common/src/storage/btree.rs) invariant and binary-search lookup semantics.
 2. **Pass 1 — Parallel Sequential `data.ldb` Leaf Scan:** Memory-maps `data.ldb` (`PROT_READ`, `MAP_PRIVATE`, `MADV_SEQUENTIAL`) and scans all 4 KB LMDB pages across all CPU cores (~6 GiB/s). Valid leaf pages (`mp_flags == 0x02`, `mp_pgno == pgno`) are parsed and each record is classified by its exact `(key_len, val_len)` and inner sub-tree root page numbers into:
    - `accounts` (`TABLE_ID = 1`, 32B key $\rightarrow$ 129B value)
-   - `blocks` (`TABLE_ID = 2`, 32B key $\rightarrow$ self-contained bit-packed compact `SavedBlock` value (`107..=267 B`, `COMPACT_BLOCK_TAG = 0x80`) with 1-byte `compact_representatives` table index, omitted zero `previous`/`successor`/`link`, and variable-length balance/height/timestamp matching [`SavedBlock::serialize_compact`](file:///mnt/data/rust-workspace/barely-nano/core/src/blocks/mod.rs#L862))
+   - `blocks` (`TABLE_ID = 2`, 32B key $\rightarrow$ self-contained bit-packed compact `SavedBlock` value (`107..=267 B`, `COMPACT_BLOCK_TAG = 0x80`) with 1-byte `compact_representatives` table index, omitted zero `previous`/`successor`/`link`, and variable-length balance/height/timestamp matching [`SavedBlock::serialize_compact`](core/src/blocks/mod.rs#L862))
    - `confirmation_height` (`TABLE_ID = 3`, 32B key $\rightarrow$ 40B value)
    - `pruned` (`TABLE_ID = 5`, 32B key $\rightarrow$ 0B value, populated when `--prune` is enabled or if the source `data.ldb` contains pre-existing pruned hashes)
    - `peers` (`TABLE_ID = 6`, 18B key $\rightarrow$ 8B value)
@@ -688,14 +688,14 @@ Instead of performing random 4 KB B-Tree insertions across 220M+ records (which 
    - `online_weight` (`TABLE_ID = 9`, 8B key $\rightarrow$ 16B value)
    - `rep_weights` (`TABLE_ID = 12`, 32B key $\rightarrow$ 16B value)
 3. **Optional Full-History Pruning (`--prune` / `--prune-depth` / `--prune-age`):**
-   - When `--prune` is passed, right after Pass 1 the tool builds a 4,096-bucket in-memory [`ConfHeightIndex`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs#L1185-L1306) in parallel across all 16 shards (~1.5s).
-   - During Pass 2, each block's `(account, height, timestamp, successor)` is inspected directly from its raw LMDB bytes in $O(1)$ time via [`should_prune_block`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs#L1310-L1366).
+   - When `--prune` is passed, right after Pass 1 the tool builds a 4,096-bucket in-memory [`ConfHeightIndex`](tools/lmdb-to-nvme/src/main.rs#L1248-L1386) in parallel across all 16 shards (~1.5s).
+   - During Pass 2, each block's `(account, height, timestamp, successor)` is inspected directly from its raw LMDB bytes in $O(1)$ time via [`should_prune_block`](tools/lmdb-to-nvme/src/main.rs#L1391-L1449).
    - The Genesis block, any account head block (`successor == 0`), any unconfirmed block (`height > confirmed_height`), and the top `--prune-depth` confirmed blocks (`height > confirmed_height - max_depth`, default `1` = confirmed frontier) are retained in `TABLE_BLOCKS (2)`.
    - All older confirmed blocks (`1 ..= confirmed_height - max_depth`) are omitted from `TABLE_BLOCKS (2)` and streamed in sorted order into `TABLE_PRUNED (5)` (`0`-byte value), reducing total NVMe B-Tree storage by **~65%** while recording exact `(account_count, block_count, confirmed_count, pruned_count)` in `CACHCNTS`.
 4. **Pass 2 — Per-Shard 256-Bucket Parallel Radix Sort & Bottom-Up B-Tree Construction:**
    - Processes all 16 shards (`shard_idx = (key[1] >> 4)`), writing the active `compact_representatives` lookup table (`REPTBLC` / `REPTBLHD`, `REPTBL_MAGIC = 0x4E414E4F52455031`) into Shard `5`'s `TABLE_VERSION = 11` and running Shard `4` last (`b'C' >> 4 == 4`) so that `TABLE_VERSION = 11` receives the exact deduplicated global `CACHCNTS` (`COUNTS_MAGIC = 0x4E414E4F434E5431`: `account_count`, `block_count`, `confirmed_count`, `pruned_count`).
    - Within each `(shard, table)`, records are partitioned by their next key byte into 256 strictly ordered sub-buckets, sorted in parallel across all CPU threads, and deduplicated so only the newest LMDB Copy-On-Write record for each key survives.
-   - [`StreamingBTreeBuilder`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme/src/main.rs#L228-L353) packs sorted records into 4 KB leaf and internal pages at an **~88% fill factor** (`PAGE_TARGET_USED = 3584` bytes, `dead_bytes = 0`, leaving headroom so runtime mutations never trigger an unsplit `page_is_full`) and flushes them in **16 MB sequential chunks** to `/dev/sda`.
+   - [`StreamingBTreeBuilder`](tools/lmdb-to-nvme/src/main.rs#L392-L500) packs sorted records into 4 KB leaf and internal pages at an **~88% fill factor** (`PAGE_TARGET_USED = 3584` bytes, `dead_bytes = 0`, leaving headroom so runtime mutations never trigger an unsplit `page_is_full`) and flushes them in **16 MB sequential chunks** to `/dev/sda`.
 5. **64 MB `BlockBloom` Filter & Global Storage Header:**
    - Every unique 32-byte block hash (both full and pruned) sets its bit positions in the 64 MB `BlockBloom` filter written to `BLOOM_DATA_LBA = 524,296` and `BLOOM_HEADER_LBA = 524,288` (`MAGIC = 0x424C4F4D56320006`), enabling $O(1)$ negative block lookups immediately on boot.
    - Zeroes both WAL area headers (`wal_base` and `wal_base + wal_pages / 2`) for every shard and writes the master `STORAGE_MAGIC = 0x5348415244534834` (`"SHARDSH4"`) header to `STORAGE_BASE_LBA = 1,048,576` (`512 MB` offset) last.
@@ -722,17 +722,17 @@ Instead of performing random 4 KB B-Tree insertions across 220M+ records (which 
    ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --prune --prune-depth 5
    ./tools/lmdb_to_nvme.sh database/data.ldb /dev/sda --prune --prune-age 172800
    ```
-5. Ensure `wipe_blocks = false` under `[bare_metal]` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml), re-insert the NVMe SSD into the Orange Pi RV2, and boot the board. The node will detect `STORAGE_MAGIC` (`"SHARDSH4"`) and `BLOOM_MAGIC` (`"BLOMV2"`), load the exact block/cemented/account/pruned counts from `CACHCNTS` (automatically enabling `enable_pruning` if `pruned_count > 0`), and immediately join live consensus at the snapshot frontier.
+5. Ensure `wipe_blocks = false` under `[bare_metal]` in [`config.toml`](config.toml), re-insert the NVMe SSD into the Orange Pi RV2, and boot the board. The node will detect `STORAGE_MAGIC` (`"SHARDSH4"`) and `BLOOM_MAGIC` (`"BLOMV2"`), load the exact block/cemented/account/pruned counts from `CACHCNTS` (automatically enabling `enable_pruning` if `pruned_count > 0`), and immediately join live consensus at the snapshot frontier.
 
 ## Direct NVMe Ledger Snapshot & Restore (`tools/nvme-snapshot`)
 
-Once your Orange Pi RV2 has finished syncing the live Nano ledger on its NVMe SSD, you can attach the NVMe SSD to a Linux host over USB-C (e.g. `/dev/sda`) and use [`tools/nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) ([`tools/nvme_snapshot.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme_snapshot.sh)) to export a **compact, checksummed raw ledger snapshot file (`BNSNAPV1`)** or restore a snapshot file directly onto any target NVMe SSD in minutes.
+Once your Orange Pi RV2 has finished syncing the live Nano ledger on its NVMe SSD, you can attach the NVMe SSD to a Linux host over USB-C (e.g. `/dev/sda`) and use [`tools/nvme-snapshot`](tools/nvme-snapshot) ([`tools/nvme_snapshot.sh`](tools/nvme_snapshot.sh)) to export a **compact, checksummed raw ledger snapshot file (`BNSNAPV1`)** or restore a snapshot file directly onto any target NVMe SSD in minutes.
 
 ### 1. How Sparse-Shard Snapshot Streaming & WAL Replay Works
 
 On a 1 TB NVMe drive, the 16 B-Tree shards are spaced ~60 GB apart across the 1 TB LBA address space (`shard_size = 15,615,908` pages per shard), even though the allocated B-Tree pages (`0 .. next_free_page`) occupy only **~90.4 GiB total** (`~5.65 GiB` per shard) for an unpruned ledger or **~30 GiB total** for a pruned ledger.
 
-Instead of `dd`-ing 1,000 GB of mostly unallocated sectors, [`tools/nvme-snapshot/src/main.rs`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot/src/main.rs) operates directly on `barely-nano`'s native storage structures:
+Instead of `dd`-ing 1,000 GB of mostly unallocated sectors, [`tools/nvme-snapshot/src/main.rs`](tools/nvme-snapshot/src/main.rs) operates directly on `barely-nano`'s native storage structures:
 
 1. **Non-Destructive In-Memory WAL Replay on Dump (`collect_wal_overlay`):**
    - Opens `/dev/sda` strictly **read-only (`O_RDONLY`)** during `dump` and `info`.
@@ -755,7 +755,7 @@ Every `.snap` file generated by `nvme-snapshot dump` uses a deterministic, page-
 
 | File Offset | Size | Region | Description |
 | :--- | :--- | :--- | :--- |
-| `0x0000_0000` | `4 KB` (`1` page) | **`BNSNAPV1` Header** | Magic (`"BNSNAPV1"`), flags (`FLAG_HAS_BLOOM`, `FLAG_HAS_WALLETS`, `FLAG_PRUNED`), timestamp, source `shard_size` & `wal_epoch`, cached ledger counts (`accounts`, `blocks`, `confirmed`, `pruned`), 64-bit region checksums, and 16 × 32-byte [`ShardDescriptor`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot/src/main.rs#L67-L74) entries (`root_page_id`, `next_free_page`, `first_free_page`, `file_offset_bytes`, `checksum`) |
+| `0x0000_0000` | `4 KB` (`1` page) | **`BNSNAPV1` Header** | Magic (`"BNSNAPV1"`), flags (`FLAG_HAS_BLOOM`, `FLAG_HAS_WALLETS`, `FLAG_PRUNED`), timestamp, source `shard_size` & `wal_epoch`, cached ledger counts (`accounts`, `blocks`, `confirmed`, `pruned`), 64-bit region checksums, and 16 × 32-byte [`ShardSnapEntry`](tools/nvme-snapshot/src/main.rs#L96-L103) entries (`root_page_id`, `next_free_page`, `first_free_page`, `file_offset_bytes`, `checksum`) |
 | `0x0000_1000` | `64 MB + 4 KB` (`16,385` pages) | **`BlockBloom` Filter** | Raw copy of `BLOOM_HEADER_LBA` (`524,288`) + `BLOOM_DATA_LBA` (`524,296`, `64 MB` bitset) for instant $O(1)$ negative block lookups on boot |
 | *(Optional)* | `16.25 MB` (`4,161` pages) | **Wallet Partition** | Present only when `--include-wallets` is passed; holds `WALLET_STORAGE_LBA` (`786,432`, `4,096` B-Tree pages + `1` header + `64` journal pages) |
 | Contiguous | `next_free_page × 4 KB` per shard | **Shards `0..15` B-Tree Pages** | Only the allocated pages (`0 .. next_free_page`) of each of the 16 B-Tree shards (~90.4 GiB total unpruned / ~30 GiB pruned), with any committed WAL pages already overlaid in place |
@@ -793,18 +793,18 @@ Every `.snap` file generated by `nvme-snapshot dump` uses a deterministic, page-
    # Optional: Also restore the wallet partition (only if restoring to the same OrangePi RV2 board)
    ./tools/nvme_snapshot.sh restore database/nano_ledger.snap /dev/sda --include-wallets
    ```
-6. Re-insert the NVMe SSD into the Orange Pi RV2 (with `wipe_blocks = false` in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml)) and boot. The node will immediately mount all 16 shards and the 64 MB `BlockBloom` filter with zero WAL recovery needed.
+6. Re-insert the NVMe SSD into the Orange Pi RV2 (with `wipe_blocks = false` in [`config.toml`](config.toml)) and boot. The node will immediately mount all 16 shards and the 64 MB `BlockBloom` filter with zero WAL recovery needed.
 
 ## Network Stress Testing (`tools/nano-stress`)
 
 The repository provides a high-throughput stress testing tool (`tools/nano-stress`) to test node stability, B-Tree storage performance, and queue behavior under heavy load by generating cryptographically valid blocks and streaming them directly over TCP to port **7075**.
 
 > [!TIP]
-> **Hardware Benchmark Results:** On the OrangePi RV2 (SpacemiT K1 8-core RISC-V SoC), the node achieves **`22,083.4 blocks/second` sustained end-to-end across 300,000 blocks** (`13.58s` total; **`22,534.3 bps`** in Run 3 `200k→300k`), **`26,136.5 blocks/second` sustained TCP ingress** (`29,419 bps` peak batch = `6.44 MB/s`), and **`23,490.7 blocks/second` active pipeline throughput** (`20.29 µs/block` parallel B-Tree ledger commit time across Harts 5 & 6) with full Ed25519 signature verification and RVV Blake2b PoW validation. On the full **80 GB (`226.37M`-block, `38.0M`-account) live Nano network ledger**, steady-state block validation + B-Tree insertion on Hart 6 averages **`27.5 µs/block`** (`2.72 µs` validate + `24.74 µs` insert) with **`33.4` sectors/read** batched NVMe read-ahead and only **`~40 MB/hour`** of NVMe write traffic. See the full [Stress Test & Throughput Report (`STRESS_TEST_REPORT.md`)](file:///mnt/data/rust-workspace/barely-nano/STRESS_TEST_REPORT.md) for detailed stage-by-stage hardware profiling and multi-hart metrics.
+> **Hardware Benchmark Results:** On the OrangePi RV2 (SpacemiT K1 8-core RISC-V SoC), the node achieves **`22,083.4 blocks/second` sustained end-to-end across 300,000 blocks** (`13.58s` total; **`22,534.3 bps`** in Run 3 `200k→300k`), **`26,136.5 blocks/second` sustained TCP ingress** (`29,419 bps` peak batch = `6.44 MB/s`), and **`23,490.7 blocks/second` active pipeline throughput** (`20.29 µs/block` parallel B-Tree ledger commit time across Harts 5 & 6) with full Ed25519 signature verification and RVV Blake2b PoW validation. On the full **80 GB (`226.37M`-block, `38.0M`-account) live Nano network ledger**, steady-state block validation + B-Tree insertion on Hart 6 averages **`27.5 µs/block`** (`2.72 µs` validate + `24.74 µs` insert) with **`33.4` sectors/read** batched NVMe read-ahead and only **`~40 MB/hour`** of NVMe write traffic. See the full [Stress Test & Throughput Report (`STRESS_TEST_REPORT.md`)](STRESS_TEST_REPORT.md) for detailed stage-by-stage hardware profiling and multi-hart metrics.
 
 ### 1. Node Dev Network Setup
 
-To prepare the node for stress testing, set the following in [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) on the SD card:
+To prepare the node for stress testing, set the following in [`config.toml`](config.toml) on the SD card:
 
 ```toml
 [bare_metal]
@@ -850,22 +850,22 @@ make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
 > Do **not** pass `--zero-pow` when streaming to the node. The node validates block entry thresholds against dev network rules (`0xf000000000000000`). Dev PoW calculation takes only ~100 µs on x86_64, ensuring all blocks pass ledger entry criteria.
 
 ## Workspace Structure
-- [`STRESS_TEST_REPORT.md`](file:///mnt/data/rust-workspace/barely-nano/STRESS_TEST_REPORT.md) — Hardware stress test campaign results, peak/sustained BPS benchmarks, and per-hart microarchitectural profiling on the OrangePi RV2.
-- [`config.toml`](file:///mnt/data/rust-workspace/barely-nano/config.toml) — Declarative TOML configuration for bare-metal network, node, bootstrap, queues, RPC, and WebSocket server.
-- [`main/`](file:///mnt/data/rust-workspace/barely-nano/main) — Main bare-metal binary entry point (`entry.S`, `bin.rs`) and per-hart loops.
-- [`common/`](file:///mnt/data/rust-workspace/barely-nano/common) — Core kernel library: S-mode trap handler, UART/SBI/U-Boot wrappers, OLED driver, 16-shard B-Tree + DRAM Bank 1 BPM + atomic WAL storage engine, cooperative async executor, and `smoltcp` networking stack.
-- [`core/`](file:///mnt/data/rust-workspace/barely-nano/core) — Core Nano primitives (blocks, accounts, keys, amounts, votes, difficulty).
-- [`messages/`](file:///mnt/data/rust-workspace/barely-nano/messages) — Nano P2P wire protocol messages and serialization.
-- [`ledger/`](file:///mnt/data/rust-workspace/barely-nano/ledger) & [`ledger_store/`](file:///mnt/data/rust-workspace/barely-nano/ledger_store) — Ledger state management, block insertion/validation, and B-Tree store tables.
-- [`network/`](file:///mnt/data/rust-workspace/barely-nano/network) & [`network_protocol/`](file:///mnt/data/rust-workspace/barely-nano/network_protocol) — P2P channel management, handshakes, and message framing.
-- [`node/`](file:///mnt/data/rust-workspace/barely-nano/node) — High-level Nano node (consensus, active elections, vote processor, bootstrapper, cementation, telemetry, TOML config).
-- [`rpc_messages/`](file:///mnt/data/rust-workspace/barely-nano/rpc_messages), [`rpc_handler/`](file:///mnt/data/rust-workspace/barely-nano/rpc_handler), [`rpc_server/`](file:///mnt/data/rust-workspace/barely-nano/rpc_server) — Bare-metal `no_std` JSON-RPC message types, command handlers, and HTTP server.
-- [`websocket_messages/`](file:///mnt/data/rust-workspace/barely-nano/websocket_messages), [`websocket_client/`](file:///mnt/data/rust-workspace/barely-nano/websocket_client), [`websocket_server/`](file:///mnt/data/rust-workspace/barely-nano/websocket_server) — Bare-metal `no_std` WebSocket envelopes, client, and real-time event broadcast server.
-- [`nullables/`](file:///mnt/data/rust-workspace/barely-nano/nullables) — Hardware/OS abstraction crates (`sha` RVV/Zbb crypto, `clock`, `random`, `tcp`, `http_client`, `output_tracker`) with nullable test doubles.
-- [`stats/`](file:///mnt/data/rust-workspace/barely-nano/stats) & [`work/`](file:///mnt/data/rust-workspace/barely-nano/work) — Node statistics collector and PoW work generation/validation.
-- [`tools/`](file:///mnt/data/rust-workspace/barely-nano/tools) — Host-side utilities: [`lmdb-to-nvme`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb-to-nvme) & [`lmdb_to_nvme.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/lmdb_to_nvme.sh) (direct `data.ldb` to raw NVMe B-Tree + Bloom migration tool), [`nvme-snapshot`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme-snapshot) & [`nvme_snapshot.sh`](file:///mnt/data/rust-workspace/barely-nano/tools/nvme_snapshot.sh) (direct NVMe to compact raw ledger snapshot dump & restore tool), [`nano-stress`](file:///mnt/data/rust-workspace/barely-nano/tools/nano-stress) (P2P block streamer), and [`ws_subscribe.py`](file:///mnt/data/rust-workspace/barely-nano/tools/ws_subscribe.py) (WebSocket topic subscriber).
-- [`u-boot-orangepi-k1/`](file:///mnt/data/rust-workspace/barely-nano/u-boot-orangepi-k1) — Git submodule pointing to [`caiovini/u-boot-orangepi-k1`](https://github.com/caiovini/u-boot-orangepi-k1.git) (`CONFIG_API=y` U-Boot tree and `prebuilt/` bootloader images for Orange Pi RV2).
-- [`linker-smode.ld`](file:///mnt/data/rust-workspace/barely-nano/linker-smode.ld) — S-mode linker script mapping physical memory layout for the Orange Pi RV2.
+- [`STRESS_TEST_REPORT.md`](STRESS_TEST_REPORT.md) — Hardware stress test campaign results, peak/sustained BPS benchmarks, and per-hart microarchitectural profiling on the OrangePi RV2.
+- [`config.toml`](config.toml) — Declarative TOML configuration for bare-metal network, node, bootstrap, queues, RPC, and WebSocket server.
+- [`main/`](main) — Main bare-metal binary entry point (`entry.S`, `bin.rs`) and per-hart loops.
+- [`common/`](common) — Core kernel library: S-mode trap handler, UART/SBI/U-Boot wrappers, OLED driver, 16-shard B-Tree + DRAM Bank 1 BPM + atomic WAL storage engine, cooperative async executor, and `smoltcp` networking stack.
+- [`core/`](core) — Core Nano primitives (blocks, accounts, keys, amounts, votes, difficulty).
+- [`messages/`](messages) — Nano P2P wire protocol messages and serialization.
+- [`ledger/`](ledger) & [`ledger_store/`](ledger_store) — Ledger state management, block insertion/validation, and B-Tree store tables.
+- [`network/`](network) & [`network_protocol/`](network_protocol) — P2P channel management, handshakes, and message framing.
+- [`node/`](node) — High-level Nano node (consensus, active elections, vote processor, bootstrapper, cementation, telemetry, TOML config).
+- [`rpc_messages/`](rpc_messages), [`rpc_handler/`](rpc_handler), [`rpc_server/`](rpc_server) — Bare-metal `no_std` JSON-RPC message types, command handlers, and HTTP server.
+- [`websocket_messages/`](websocket_messages), [`websocket_client/`](websocket_client), [`websocket_server/`](websocket_server) — Bare-metal `no_std` WebSocket envelopes, client, and real-time event broadcast server.
+- [`nullables/`](nullables) — Hardware/OS abstraction crates (`sha` RVV/Zbb crypto, `clock`, `random`, `tcp`, `http_client`, `output_tracker`) with nullable test doubles.
+- [`stats/`](stats) & [`work/`](work) — Node statistics collector and PoW work generation/validation.
+- [`tools/`](tools) — Host-side utilities: [`lmdb-to-nvme`](tools/lmdb-to-nvme) & [`lmdb_to_nvme.sh`](tools/lmdb_to_nvme.sh) (direct `data.ldb` to raw NVMe B-Tree + Bloom migration tool), [`nvme-snapshot`](tools/nvme-snapshot) & [`nvme_snapshot.sh`](tools/nvme_snapshot.sh) (direct NVMe to compact raw ledger snapshot dump & restore tool), [`nano-stress`](tools/nano-stress) (P2P block streamer), and [`ws_subscribe.py`](tools/ws_subscribe.py) (WebSocket topic subscriber).
+- [`u-boot-orangepi-k1/`](u-boot-orangepi-k1) — Git submodule pointing to [`caiovini/u-boot-orangepi-k1`](https://github.com/caiovini/u-boot-orangepi-k1.git) (`CONFIG_API=y` U-Boot tree and `prebuilt/` bootloader images for Orange Pi RV2).
+- [`linker-smode.ld`](linker-smode.ld) — S-mode linker script mapping physical memory layout for the Orange Pi RV2.
 
 ## Authors & Credits
 
