@@ -4,6 +4,11 @@ This project is a bare-metal `no_std` RISC-V fork of [RsNano (`rsnano-node/rsnan
 
 It establishes a self-contained operating environment on top of OpenSBI and U-Boot (`CONFIG_API=y`), complete with a heap allocator, multi-core exception handling, hardware-accelerated cryptography, a 16-shard B-Tree + 5 GB DRAM Bank 1 Buffer Pool + atomic Write-Ahead Log (WAL) storage engine on NVMe, a full TCP/IP networking stack, an HTTP JSON-RPC server, and a real-time WebSocket server.
 
+| Orange Pi RV2 Running Bare-Metal (`I2C4` OLED Telemetry) | Built-In RISC-V Live Web Dashboard (Port `7080`) |
+| :---: | :---: |
+| [![Orange Pi RV2 running barely-nano](docs/orangepi_rv2.png)](docs/orangepi_rv2.png) | [![Barely-Nano RISC-V Dashboard](docs/dashboard.png)](docs/dashboard.png) |
+| *Orange Pi RV2 (8 GB RAM + NVMe SSD) synced on live network (`226.47M` blocks, `78 GB` NVMe B-Tree, `94` peers)* | *Real-time node metrics, NVMe B-Tree stats, 8-hart CLINT pipeline profiler, wallet & PoS UI (`90h+` uptime)* |
+
 ## Table of Contents
 
 - [Features Implemented](#features-implemented)
@@ -86,7 +91,7 @@ To achieve high transaction throughput and maximize CPU efficiency, the node lev
   - **Port `7075` (Peering):** Live Nano P2P protocol peering and bootstrap (`~98` concurrent peers).
   - **Port `7076` (HTTP JSON-RPC — Nault / Natrium Compatible):** 8-socket concurrent HTTP JSON-RPC pool (`RPC_SOCKET_COUNT = 8`) backed by `rsnano_rpc_messages`, `rsnano_rpc_handler`, and `rsnano_rpc_server`, including legacy wallet action/field aliases (`accounts_pending`, `pending`, `pending_exists`, `search_pending`, `wallet_pending`), both stringified and object `process` blocks, standard `json_block` string-vs-object `contents` serialization, and browser CORS preflight support (`OPTIONS`). To connect **Nault**, configure Custom Server API `http://192.168.1.200:7076`, WebSocket `ws://192.168.1.200:7078`, and set PoW Source to **Client WebGL / Client CPU** (or an external PoW server).
   - **Port `7078` (WebSocket Server):** Full `no_std` WebSocket server and client (`rsnano_websocket_messages`, `rsnano_websocket_client`, `rsnano_websocket_server`) streaming live node events (`confirmation`, `vote`, `started_election`, `stopped_election`, `telemetry`, `bootstrap`, `new_unconfirmed_block`, and `ping`/`pong` keepalives).
-  - **Port `7080` (Live Web Dashboard, Browser WASM Stress Test & Diagnostic Endpoints):** Built-in 6-socket HTTP server ([`main/src/dashboard.html`](main/src/dashboard.html), [`main/src/bin.rs`](main/src/bin.rs)) serving:
+  - **Port `7080` (Live Web Dashboard, Browser WASM Stress Test & Diagnostic Endpoints):** Built-in 6-socket HTTP server ([`main/src/dashboard.html`](main/src/dashboard.html), [`main/src/bin.rs`](main/src/bin.rs); see [dashboard screenshot](docs/dashboard.png)) serving:
     - Real-time web dashboard UI, embedded wallet, and browser-side WebAssembly stress test (`nano_stress.wasm` + `POST /api/stress_batch`).
     - `GET /api/metrics`: Real-time JSON telemetry including per-hart Buffer Pool misses (`miss_n_hart`, `miss_ms_hart`), shard lock hold times (`shard_hold_ms_hart`), NVMe device I/O counters (`io_read_*`, `io_write_*`), and ledger recount progress (`recount`).
     - `GET /api/recount_start` & `GET /api/recount_repair`: Incremental chunked merge-join verification and self-healing of `TABLE_ACCOUNTS` and `TABLE_CONFIRMATION_HEIGHT` ([`ledger/src/ledger_recount.rs`](ledger/src/ledger_recount.rs)).
@@ -106,7 +111,7 @@ All 8 X60 harts on the SpacemiT K1 are pinned by physical CPU cluster (`512 KB` 
   - **Hart 7 (`Storage+Mon`):** Asynchronous background NVMe WAL checkpoint flusher (`wal::run_background_wal_flush()`), online weight calculation, NVMe Free-List GC/reclamation (`ledger_pruning`), 2-second I2C OLED status updates, 15-second telemetry/profiling reports, and cooperative async executor tasks (`WORKER_HARTS`).
 
 ### 8. I2C OLED Status Display (`common/src/oled.rs`)
-- **Zero-Allocation `no_std` Driver:** Supports 4-pin I2C **SSD1306** and **SH1106** 128×64 OLED displays (at `0x3C` or `0x3D`) over hardware `I2C4` (`0xD401_2800`), with automatic GPIO I2C fallback if `SCK`/`SDA` are swapped or wired to `I2C3` (Pins 8 & 10).
+- **Zero-Allocation `no_std` Driver:** Supports 4-pin I2C **SSD1306** and **SH1106** 128×64 OLED displays (at `0x3C` or `0x3D`) over hardware `I2C4` (`0xD401_2800`), with automatic GPIO I2C fallback if `SCK`/`SDA` are swapped or wired to `I2C3` (Pins 8 & 10) (see [running hardware photo](docs/orangepi_rv2.png)).
 - **Differential Refresh on Hart 7:** Refreshes every 2 seconds on Hart 7, transmitting only text rows that have changed.
 
 #### Orange Pi RV2 26-Pin Header Wiring (`I2C4`)
