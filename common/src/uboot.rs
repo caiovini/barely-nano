@@ -65,7 +65,7 @@ impl Drop for UBootContext {
 }
 
 /// The SpacemiT K3 U-Boot Jump Table structure (`59` function pointers).
-/// Matches `struct jt_funcs` defined in `/mnt/data/rust-workspace/u-boot/include/_exports.h`.
+/// Matches `struct jt_funcs` defined in `u-boot-pico-itx-k3/include/_exports.h`.
 #[repr(C)]
 pub struct JumpTable {
     // 0..17: Console, Heap, Timer, Environment
