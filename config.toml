@@ -15,7 +15,7 @@ wipe_blocks = false
 # Ethernet MAC address used by the U-Boot / smoltcp interface
 mac_address = "c0:74:2b:f9:15:ec"
 # Static IPv4 address and subnet prefix length
-ipv4_address = "192.168.1.200"
+ipv4_address = "192.168.1.201"
 ipv4_prefix_len = 24
 # Default IPv4 gateway
 gateway = "192.168.1.1"
