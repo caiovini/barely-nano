@@ -2,7 +2,7 @@
 # Bare-Metal RISC-V Nano Node Configuration (config.toml)
 # =============================================================================
 # Compatible with original Nano / RSNano TOML schema (`[node]`, `[rpc]`, etc.),
-# plus `[bare_metal]` for Orange Pi RV2 hardware interface parameters.
+# plus `[bare_metal]` for pico itx spacemit k3 hardware interface parameters.
 # =============================================================================
 
 [bare_metal]
@@ -34,9 +34,11 @@ dashboard_pos_enable = true
 peering_port = 7075
 enable_voting = false
 # Keep disabled during bootstrap: with ~100k unconfirmed blocks it rolls back (cascading) the
-# blocks bootstrap just downloaded on the single ledger-writer hart, starving cementing.
+# blocks bootstrap just downloaded across the 3-stripe ledger harts, starving cementing and adding WAL churn.
 enable_bounded_backlog = false
 allow_local_peers = true
+# Increase from default 131072 -> 262144 (~120 MB max in 3.00 GB heap) to avoid evicting dependency chains during fast bootstrap
+max_unchecked_blocks = 262144
 
 # 60,000,000 NANO in raw (60_000_000 * 10^30) = RSNano mainnet default.
 # Quorum is 67 percent of max(online weight, this minimum). At 130M the quorum (87.1M) was above
@@ -344,13 +346,15 @@ compact_representatives = [
 # Interval between peer reachout attempts (in milliseconds)
 peer_reachout = 250
 cached_peer_reachout = 1000
-duplicate_filter_size = 16384
+# Sized for 400+ peers at GbE/10GbE (<2 MB, fits inside Cluster 0's 4 MB L2 cache)
+duplicate_filter_size = 65536
 duplicate_filter_cutoff = 60
 
 [node.tcp]
-max_inbound_connections = 128
-max_outbound_connections = 192
-max_attempts = 32
+# 448 max peering sockets * 192 KB (128 KB RX + 64 KB TX) = ~86 MB in 3.00 GB heap
+max_inbound_connections = 192
+max_outbound_connections = 256
+max_attempts = 64
 max_attempts_per_ip = 1
 connect_timeout = 15
 
@@ -359,27 +363,43 @@ enable = true
 enable_priorities = true
 enable_dependency_walker = true
 enable_frontier_scan = true
-rate_limit = 5000
-database_rate_limit = 1024
-frontier_rate_limit = 32
+rate_limit = 8000
+database_rate_limit = 2048
+frontier_rate_limit = 64
+# Keep <= 16 to match remote RSNano peers' default bootstrap_server.max_queue
 channel_limit = 16
-max_requests = 2048
+max_requests = 4096
 request_timeout = 10000
-block_processor_threshold = 16384
+block_processor_threshold = 32768
 # Percentage of priority pulls that start at the local account head (Optimistic).
 # The rest start at the confirmed frontier (Safe): resistant to bootstrap poisoning
 # but re-downloads unconfirmed blocks (slower). 100 = Optimistic only (trusted peers only).
-# RSNano default is 75. Peers are mostly public/untrusted, so keep Safe pulls enabled.
-optimistic_request_percentage = 100
+# RSNano default is 75; 85 balances fast optimistic pulls with Safe-pull poisoning recovery.
+optimistic_request_percentage = 85
 
 [node.bootstrap.frontier_scan]
 max_pending = 128
 cooldown = 250
 
+[node.bootstrap_server]
+max_queue = 32
+batch_size = 128
+limiter = 250
+
+[node.active_elections]
+size = 10000
+confirmation_cache = 131072
+confirmation_history_size = 2048
+
+[node.vote_cache]
+max_size = 32768
+max_voters = 128
+age_cutoff = 900
+
 [node.priority_bucket]
-max_blocks = 8192
+max_blocks = 16384
 reserved_elections = 250
-max_elections = 1500
+max_elections = 3000
 
 [node.optimistic_scheduler]
 enable = true
@@ -390,12 +410,13 @@ optimistic_limit_percentage = 50
 [node.block_processor]
 max_peer_queue = 131072
 max_system_queue = 131072
-batch_size = 256
+# Sized for 7x A100 16-way SIMD crypto harts + 3-stripe 64-shard B-Tree ledger harts
+batch_size = 512
 
 # Per-representative vote rebroadcast history. Each entry costs ~112 B and hashbrown grows the
-# table to 4x the entry count under insert/evict churn: the RSNano default (32768) reached
-# ~14.7 MB per rep (x100 reps) and exhausted the 1.45 GB heap after ~1.5 h. The history only has
-# to cover `rebroadcast_threshold` (90 s), so 1024 is plenty.
+# table to 4x the entry count under insert/evict churn: 32768 reaches ~14.7 MB per rep (x100 reps
+# = ~1.47 GB, half of K3's 3.00 GB heap, and OOMed RV2's 1.45 GB heap). The history only has to
+# cover `rebroadcast_threshold` (90 s), so 1024 (matching RSNano's non-test default) is plenty.
 [node.vote_rebroadcaster]
 max_history = 1024
 

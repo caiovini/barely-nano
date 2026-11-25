@@ -26,9 +26,9 @@ pub static PROF: [AtomicU64; 8] = [
     AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
 ];
 
-const FAST_HASH_SLOTS: usize = 1024;
+const FAST_HASH_SLOTS: usize = 2048;
 const FAST_HASH_MASK: usize = FAST_HASH_SLOTS - 1;
-const FAST_HASH_MAX_INDEXED: usize = 768;
+const FAST_HASH_MAX_INDEXED: usize = 1536;
 
 struct FastBlockHashMap<V> {
     slots: [u16; FAST_HASH_SLOTS],
