@@ -368,7 +368,7 @@ canvas {
     <div class="brand-logo">N</div>
     <div>
       <h1>Barely-Nano RISC-V Dashboard</h1>
-      <span>Pico itx (SpacemiT K3 8-Hart X100 8-Hart A100 Bare-Metal • NVMe B-Tree Engine)</span>
+      <span>SpacemiT K3 Pico-ITX (8× X100 + 8× A100 • 16 GB LPDDR5 • 64-Shard NVMe B-Tree)</span>
     </div>
   </div>
   <div class="status-bar">
@@ -411,14 +411,14 @@ canvas {
         <div class="card-sub">Active Elec: <span id="m-active">0</span> | Stake: <span id="m-stake">0</span>M</div>
       </div>
       <div class="card">
-        <div class="card-title">RAM & Slab Allocator</div>
-        <div class="card-value"><span id="m-heap">0</span> <small style="font-size:13px;color:var(--muted)">MB</small></div>
-        <div class="card-sub">Slab Cache: <span id="m-slab">0</span> MB | Free: <span id="m-heap-free">0</span> MB</div>
+        <div class="card-title">3 GB Heap &amp; Slab Allocator</div>
+        <div class="card-value"><span id="m-heap">0</span> <small style="font-size:13px;color:var(--muted)">/ 3,072 MB</small></div>
+        <div class="card-sub">Slab: <span id="m-slab">0</span> MB | Free: <span id="m-heap-free">0</span> MB</div>
       </div>
       <div class="card">
-        <div class="card-title">NVMe B-Tree Storage</div>
+        <div class="card-title">64-Shard NVMe B-Tree</div>
         <div class="card-value" id="m-db-size">0 KB</div>
-        <div class="card-sub">BPM Cache: <span id="m-db-cache">0</span> MB | WAL Ckpts: <span id="m-wal-ckpts">0</span></div>
+        <div class="card-sub">64S BPM: <span id="m-db-cache">0</span>/12,288 MB | WAL: <span id="m-wal-ckpts">0</span></div>
       </div>
     </div>
 
@@ -432,21 +432,22 @@ canvas {
       </div>
       <div class="card">
         <h2>
-          <span>8-Hart RISC-V Pipeline Profiler</span>
-          <span class="pill">CLINT @ 24 MHz</span>
+          <span>16-Hart Hybrid RISC-V Pipeline Profiler</span>
+          <span class="pill">8× X100 + 8× A100 • 24 MHz</span>
         </h2>
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Stage / Hart</th><th>Metric</th><th>Cumulative</th></tr>
+              <tr><th>Stage / K3 Harts</th><th>Metric</th><th>Cumulative</th></tr>
             </thead>
             <tbody>
-              <tr><td>Harts 2, 3 (SIMD Crypto)</td><td>Verified Sigs</td><td class="mono" id="p-verified">0</td></tr>
-              <tr><td>Hart 1 (Smoltcp + RPC)</td><td>Net / MsgProc</td><td class="mono" id="p-hart1">0 ms / 0 ms</td></tr>
-              <tr><td>Hart 6 (Sig Wait)</td><td>Batch Sig Wait</td><td class="mono" id="p-sig-ms">0 ms</td></tr>
-              <tr><td>Harts 5, 6 (B-Tree Shards)</td><td>Ledger Commit</td><td class="mono" id="p-ledger-ms">0 ms</td></tr>
-              <tr><td>Harts 5, 6 (Post/Unchecked)</td><td>Trigger & Events</td><td class="mono" id="p-post-ms">0 ms</td></tr>
-              <tr><td>Harts 5, 6 (WAL Checkpoint)</td><td>Pages / Time</td><td class="mono" id="p-wal">0 pgs / 0 ms</td></tr>
+              <tr><td>Harts 8–14 (A100 VLEN=1024)</td><td>Verified Block Sigs</td><td class="mono" id="p-verified">0</td></tr>
+              <tr><td>Harts 1, 2 (X100 Net / Msg)</td><td>Smoltcp / MsgProc</td><td class="mono" id="p-hart1">0 ms / 0 ms</td></tr>
+              <tr><td>Hart 6 (Batch Coordinator)</td><td>Batch Sig Wait</td><td class="mono" id="p-sig-ms">0 ms</td></tr>
+              <tr><td>Harts 5–7 (3-Stripe 64-Shard)</td><td>Ledger Commit</td><td class="mono" id="p-ledger-ms">0 ms</td></tr>
+              <tr><td>Harts 6, 3 (Events / Unchecked)</td><td>Trigger &amp; Events</td><td class="mono" id="p-post-ms">0 ms</td></tr>
+              <tr><td>Harts 5–7 (WAL + NVMe DMA)</td><td>Pages / Time</td><td class="mono" id="p-wal">0 pgs / 0 ms</td></tr>
+              <tr><td>64-Shard BPM &amp; NVMe I/O</td><td>Misses / Dev I/O</td><td class="mono" id="p-nvme">0 / 0 ms</td></tr>
             </tbody>
           </table>
         </div>
@@ -957,7 +958,9 @@ async function pollMetrics() {
     document.getElementById('m-heap').textContent = fmtNum(m.heap_used_mb);
     document.getElementById('m-slab').textContent = fmtNum(m.slab_cached_mb);
     document.getElementById('m-heap-free').textContent = fmtNum(m.heap_free_mb);
-    document.getElementById('m-db-size').textContent = m.db_kb >= 1024 ? `${(m.db_kb / 1024).toFixed(1)} MB` : `${m.db_kb} KB`;
+    document.getElementById('m-db-size').textContent = m.db_kb >= 1048576
+      ? `${(m.db_kb / 1048576).toFixed(2)} GB`
+      : (m.db_kb >= 1024 ? `${(m.db_kb / 1024).toFixed(1)} MB` : `${fmtNum(m.db_kb)} KB`);
     document.getElementById('m-db-cache').textContent = fmtNum(m.db_cache_mb);
     document.getElementById('m-wal-ckpts').textContent = fmtNum(m.wal_checkpoints);
 
@@ -967,6 +970,8 @@ async function pollMetrics() {
     document.getElementById('p-ledger-ms').textContent = `${fmtNum(m.prof_ledger_ms)} ms (${fmtNum(m.prof_blocks)} blks)`;
     document.getElementById('p-post-ms').textContent = `${fmtNum(m.prof_post_ms)} ms`;
     document.getElementById('p-wal').textContent = `${fmtNum(m.wal_applied_pages)} pgs / ${fmtNum(m.wal_ckpt_ms)} ms`;
+    const nvmeDevMs = Number(m.io_read_dev_ms || 0) + Number(m.io_write_dev_ms || 0);
+    document.getElementById('p-nvme').textContent = `${fmtNum(m.bpm_miss_n)} / ${fmtNum(nvmeDevMs)} ms`;
     document.getElementById('st-bpq').textContent = fmtNum(m.bpq_len);
 
     bpsHistory.push(m.bps || 0);
@@ -2962,7 +2967,7 @@ async function runWasmStressTest() {
   }
 
   document.getElementById('st-stage-pill').textContent = '4/4 COMMITTING & CEMENTING';
-  stressLog(`[4/4] Waiting for Cluster 1 (Harts 5 & 6) sharded B-Tree pipeline to drain...`);
+  stressLog(`[4/4] Waiting for Cluster 1 (Harts 5, 6 & 7) 64-shard B-Tree pipeline to drain...`);
 
   const waitStart = performance.now();
   while (!stressAbort && (performance.now() - waitStart) < 25000) {

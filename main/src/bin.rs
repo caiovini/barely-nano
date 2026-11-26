@@ -1915,7 +1915,7 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
 
     let net_cfg = kernel_common::net::get_net_config();
     let body = alloc::format!(
-        "{{\"network\":\"{}\",\"dashboard_wallet_enabled\":{},\"dashboard_pos_enable\":{},\"uptime_sec\":{},\"unix_time_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{},\"recount\":{}}}",
+        "{{\"network\":\"{}\",\"dashboard_wallet_enabled\":{},\"dashboard_pos_enable\":{},\"uptime_sec\":{},\"unix_time_sec\":{},\"blocks_stored\":{},\"blocks_confirmed\":{},\"unchecked\":{},\"bpq_len\":{},\"confirming_set_len\":{},\"active_elections\":{},\"bps\":{},\"cps\":{},\"peers_total\":{},\"peers_outbound\":{},\"online_stake_nano\":{},\"heap_used_mb\":{},\"heap_free_mb\":{},\"slab_cached_mb\":{},\"db_kb\":{},\"db_cache_mb\":{},\"db_free_pages\":{},\"wal_checkpoints\":{},\"wal_pages\":{},\"wal_applied_pages\":{},\"wal_ckpt_ms\":{},\"prof_sig_ms\":{},\"prof_ledger_ms\":{},\"prof_post_ms\":{},\"prof_batches\":{},\"prof_blocks\":{},\"prof_verified\":{},\"hart1_net_ms\":{},\"hart1_msgproc_ms\":{},\"hart1_sig_ms\":{},\"hart1_exec_ms\":{},\"io_read_n\":{},\"io_read_sectors\":{},\"io_read_wait_ms\":{},\"io_read_dev_ms\":{},\"io_write_n\":{},\"io_write_sectors\":{},\"io_write_wait_ms\":{},\"io_write_dev_ms\":{},\"bpm_miss_n\":{},\"bpm_miss_ms\":{},\"shard_wait_ms_h5\":{},\"shard_hold_ms_h5\":{},\"shard_wait_ms_h6\":{},\"shard_hold_ms_h6\":{},\"shard_wait_ms_h7\":{},\"shard_hold_ms_h7\":{},\"stripe1_batches\":{},\"stripe2_batches\":{},\"lprof_validate_ms\":{},\"lprof_insert_ms\":{},\"miss_n_hart\":{},\"miss_ms_hart\":{},\"shard_hold_ms_hart\":{},\"recount\":{}}}",
         node.network_params.network.current_network.as_str(),
         net_cfg.dashboard_wallet_enabled,
         net_cfg.dashboard_pos_enable,
@@ -1966,6 +1966,10 @@ fn format_dashboard_metrics_json(node: &Arc<Node>) -> String {
         tick_ms(&kernel_common::storage::LOCK_HOLD[5]),
         tick_ms(&kernel_common::storage::LOCK_WAIT[6]),
         tick_ms(&kernel_common::storage::LOCK_HOLD[6]),
+        tick_ms(&kernel_common::storage::LOCK_WAIT[7]),
+        tick_ms(&kernel_common::storage::LOCK_HOLD[7]),
+        rsnano_ledger::LEDGER_B_JOBS_COMPLETED.load(Ordering::Relaxed),
+        rsnano_ledger::LEDGER_C_JOBS_COMPLETED.load(Ordering::Relaxed),
         tick_ms(&rsnano_ledger::LEDGER_PROF[1]),
         tick_ms(&rsnano_ledger::LEDGER_PROF[2]),
         miss_n_hart,
@@ -2757,7 +2761,7 @@ fn run_ledger_a_loop(
     _exec: kernel_common::async_rt::Executor,
     _hart_id: usize,
 ) -> ! {
-    tracing::debug!("[boot] Hart 6: Ledger-A (Shards 0-7, WAL 0-7 & ConfirmingSet) loop enter");
+    tracing::debug!("[boot] Hart 6: Ledger-A (Stripe 0 Shards 0..21, WAL 0..32 & ConfirmingSet) loop enter");
     let mut last_heartbeat = kernel_common::clint::mtime();
     let mut last_watchdog = kernel_common::clint::mtime();
     let mut last_node_tick = kernel_common::clint::mtime();
@@ -2785,9 +2789,9 @@ fn run_ledger_a_loop(
 
         let mut worked = false;
 
-        // 1. Block validation + Shards 0-7 B-Tree mutations (while Hart 5 executes Shards 8-15
-        // and drains UncheckedMap in parallel). Throttle new block commits when ConfirmingSet has
-        // a deep queue (>= 16,384) so cementing can drain without starving.
+        // 1. Block validation + Stripe 0 (Shards 0..21) B-Tree mutations (while Hart 5 executes
+        // Stripe 1 Shards 21..42 and Hart 7 executes Stripe 2 Shards 42..64 in parallel). Throttle
+        // new block commits when ConfirmingSet has a deep queue (>= 16,384) so cementing can drain.
         if node_arc.confirming_set.len() < 16_384 {
             for _ in 0..8 {
                 let mut batch_worked = false;
@@ -2811,8 +2815,8 @@ fn run_ledger_a_loop(
             worked = true;
         }
 
-        // 2. Atomic WAL checkpoint at a transaction boundary (snapshotting Shards 0-7 on Hart 6
-        // in parallel with Shards 8-15 on Hart 5, then offloading synchronous NVMe DMA writes to
+        // 2. Atomic WAL checkpoint at a transaction boundary (snapshotting Shards 0..32 on Hart 6
+        // in parallel with Shards 32..64 on Hart 5, then offloading synchronous NVMe DMA writes to
         // Hart 7). Defer periodic timer checkpoints up to 30s while the block processor queue is
         // actively draining a burst to avoid redundant NVMe writes.
         let bpq_busy = node_arc.block_processor.total_queue_len() > 0
