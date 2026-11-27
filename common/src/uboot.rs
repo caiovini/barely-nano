@@ -217,6 +217,31 @@ pub fn env_get(name: &str) -> Option<*const u8> {
     }
 }
 
+pub fn env_set(name: &str, value: &str) -> i32 {
+    let jt = UBOOT_JT.load(Ordering::Relaxed);
+    if !jt.is_null() {
+        let _lock = UBOOT_LOCK.lock();
+        let _ctx = UBootContext::enter();
+        let mut name_buf = [0u8; 64];
+        let nlen = name.len().min(63);
+        name_buf[0..nlen].copy_from_slice(&name.as_bytes()[0..nlen]);
+        name_buf[nlen] = 0;
+
+        let mut val_buf = [0u8; 128];
+        let vlen = value.len().min(127);
+        val_buf[0..vlen].copy_from_slice(&value.as_bytes()[0..vlen]);
+        val_buf[vlen] = 0;
+
+        unsafe {
+            return ((*jt).env_set)(
+                name_buf.as_ptr() as *const c_char,
+                val_buf.as_ptr() as *const c_char,
+            );
+        }
+    }
+    -1
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceInfo {

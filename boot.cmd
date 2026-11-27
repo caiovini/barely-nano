@@ -1,5 +1,6 @@
 # Enumerate PCIe buses (Realtek RTL8127 10GbE SFP+ NIC & M.2 NVMe SSD)
 pci enum
+setenv ethact eth1
 nvme scan
 
 # Load config.toml into K3 DRAM at 0x103F00000 (64 KB zeroed buffer, 1 MB below kernel _start)

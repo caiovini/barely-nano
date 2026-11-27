@@ -354,14 +354,6 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
 
     if let Some(mut info) = net_info {
         tracing::info!("[net] Found U-Boot Network Device!");
-        let _ = uboot::dev_close(&mut info);
-        let res = uboot::dev_open(&mut info);
-        if res != 0 {
-            return None;
-        }
-        uboot::eth_disable_tx_auto_poll();
-
-        let mut device = NetDevice::Uboot(UbootNetDevice::new(info));
         let net_cfg = get_net_config();
         let mut mac_bytes = net_cfg.mac;
         if mac_bytes == [0, 0, 0, 0, 0, 0] {
@@ -373,6 +365,34 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
                 mac_bytes[i] = (seed % 256) as u8;
             }
         }
+
+        // Sync configured MAC into U-Boot ethaddr/eth1addr before eth_init so the NIC's
+        // hardware unicast MAC filter (e.g. RTL8127 MAC0..MAC5) matches smoltcp's MAC.
+        {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut mac_str = [0u8; 17];
+            for i in 0..6 {
+                mac_str[i * 3] = HEX[(mac_bytes[i] >> 4) as usize];
+                mac_str[i * 3 + 1] = HEX[(mac_bytes[i] & 0x0f) as usize];
+                if i < 5 {
+                    mac_str[i * 3 + 2] = b':';
+                }
+            }
+            if let Ok(s) = core::str::from_utf8(&mac_str) {
+                let _ = uboot::env_set("ethaddr", s);
+                let _ = uboot::env_set("eth1addr", s);
+            }
+        }
+
+        let _ = uboot::dev_close(&mut info);
+        let res = uboot::dev_open(&mut info);
+        if res != 0 {
+            return None;
+        }
+        tracing::info!("[net] Active U-Boot NIC: {}", uboot::eth_get_name());
+        uboot::eth_disable_tx_auto_poll();
+
+        let mut device = NetDevice::Uboot(UbootNetDevice::new(info));
 
         let mtime = crate::clint::mtime();
         tracing::info!(
