@@ -44,7 +44,7 @@ impl UbootNetDevice {
     /// bursts) while bounding per-poll `smoltcp` work to `budget`.
     pub fn begin_poll(&mut self, budget: usize) {
         self.rx_budget = budget;
-        let free_slots = (RX_RING_SIZE - self.rx_count).min(256);
+        let free_slots = (RX_RING_SIZE - self.rx_count).min(512);
         if free_slots > 0 {
             let received = uboot::eth_receive_batch(
                 &self.info,

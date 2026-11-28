@@ -22,8 +22,8 @@ pub struct Publish {
 }
 
 impl Publish {
-    const BLOCK_TYPE_MASK: u16 = 0x0f00;
-    const ORIGINATOR_FLAG: u16 = 1 << 2;
+    pub const BLOCK_TYPE_MASK: u16 = 0x0f00;
+    pub const ORIGINATOR_FLAG: u16 = 1 << 2;
 
     pub fn new_from_originator(block: Block) -> Self {
         Self {
@@ -67,7 +67,7 @@ impl Publish {
         serialized_block_size(Self::block_type(extensions))
     }
 
-    fn block_type(extensions: BitArray<u16>) -> BlockType {
+    pub fn block_type(extensions: BitArray<u16>) -> BlockType {
         let mut value = extensions & BitArray::new(Self::BLOCK_TYPE_MASK);
         value.shift_left(8);
         FromPrimitive::from_u16(value.data).unwrap_or(BlockType::Invalid)

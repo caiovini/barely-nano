@@ -199,6 +199,7 @@ impl ElectionSchedulers {
 
     pub fn activate_successors<'a>(&self, confirmed: impl IntoIterator<Item = &'a SavedBlock>) {
         // Activate successors of confirmed blocks (deduplicating accounts across the batch)
+        self.priority.invalidate_dep_cache();
         let any = self.ledger.any();
         let tracked = self.activate_successors_listener.is_tracked();
         let mut seen = alloc::collections::BTreeSet::new();

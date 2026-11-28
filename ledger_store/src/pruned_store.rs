@@ -18,6 +18,11 @@ impl BtreePrunedStore {
         HAS_PRUNED.store(has_pruned, Ordering::Relaxed);
     }
 
+    #[inline(always)]
+    pub fn has_pruned(&self) -> bool {
+        HAS_PRUNED.load(Ordering::Relaxed)
+    }
+
     fn make_key(&self, hash: &BlockHash) -> [u8; KEY_SIZE] {
         let mut key = [0u8; KEY_SIZE];
         key[0] = Self::TABLE_ID;

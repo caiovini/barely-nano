@@ -60,23 +60,16 @@ impl<'a> BlockValidatorFactory<'a> {
         prefetched: PrefetchedBlockData,
         batch_now: UnixMillisTimestamp,
     ) -> BlockValidator<'a> {
-        use crate::LEDGER_PROF as P;
-        use core::sync::atomic::Ordering::Relaxed;
-        let t = || kernel_common::clint::mtime();
-
         let is_genesis = self.block.hash() == self.constants.genesis_block.hash();
         let has_epoch_link = match self.block {
             Block::State(s) => self.constants.epochs.is_epoch_link(&s.link()),
             _ => false,
         };
 
-        let t3 = t();
         let block_exists = in_batch_exists
             || prefetched
                 .disk_block_exists
                 .unwrap_or_else(|| self.any.block_exists_or_pruned(&self.block.hash()));
-        let t4 = t();
-        P[6].fetch_add(t4 - t3, Relaxed); // hash + block_exists
 
         if block_exists && !has_epoch_link && !cfg!(test) {
             return BlockValidator {
@@ -96,19 +89,38 @@ impl<'a> BlockValidatorFactory<'a> {
             };
         }
 
-        let t0 = t();
-        let previous_block = match in_batch_prev {
-            Some(prev) => Some(prev),
-            None => prefetched
-                .disk_prev_block
-                .unwrap_or_else(|| self.load_previous_block()),
-        };
-        let t1 = t();
-        P[3].fetch_add(t1 - t0, Relaxed); // previous block
-
         let direct_account = self.block.account_field();
+        let fast_prev_matches_head = !cfg!(test)
+            && matches!(self.block, Block::State(_))
+            && !self.block.previous().is_zero()
+            && in_batch_prev.is_none()
+            && prefetched.disk_prev_block.is_none()
+            && (in_batch_account
+                .as_ref()
+                .is_some_and(|info| info.head == self.block.previous())
+                || prefetched
+                    .disk_account
+                    .as_ref()
+                    .and_then(|opt| opt.as_ref())
+                    .is_some_and(|info| info.head == self.block.previous()));
+
+        let previous_block = if fast_prev_matches_head {
+            None
+        } else {
+            match in_batch_prev {
+                Some(prev) => Some(prev),
+                None => prefetched
+                    .disk_prev_block
+                    .unwrap_or_else(|| self.load_previous_block()),
+            }
+        };
+
         let account = self.get_account(&previous_block).unwrap_or_default();
-        if !self.block.previous().is_zero() && previous_block.is_none() && !cfg!(test) {
+        if !self.block.previous().is_zero()
+            && previous_block.is_none()
+            && !fast_prev_matches_head
+            && !cfg!(test)
+        {
             return BlockValidator {
                 block: self.block,
                 epochs: &self.constants.epochs,
@@ -126,7 +138,6 @@ impl<'a> BlockValidatorFactory<'a> {
             };
         }
 
-        let t4b = t();
         let has_in_batch_account = in_batch_account.is_some();
         let mut old_account_info = if account.is_zero() && !cfg!(test) {
             None
@@ -224,8 +235,6 @@ impl<'a> BlockValidatorFactory<'a> {
                 }
             }
         }
-        let t5 = t();
-        P[7].fetch_add(t5 - t4b, Relaxed); // get_account
 
         let maybe_receive = cfg!(test)
             || match self.block {
@@ -241,7 +250,6 @@ impl<'a> BlockValidatorFactory<'a> {
             };
 
         let source_block = self.block.source_or_link();
-        let t2a = t();
         let has_in_batch_pending = in_batch_pending.is_some();
         let mut pending_receive_info = if !maybe_receive || source_block.is_zero() {
             None
@@ -256,8 +264,6 @@ impl<'a> BlockValidatorFactory<'a> {
             self.any
                 .get_pending(&PendingKey::new(account, source_block))
         };
-        let t2b = t();
-        P[5].fetch_add(t2b - t2a, Relaxed); // get_pending
 
         let source_block_exists = if !maybe_receive || source_block.is_zero() {
             false
@@ -282,6 +288,7 @@ impl<'a> BlockValidatorFactory<'a> {
                             let prev_bal = previous_block
                                 .as_ref()
                                 .map(|b| b.balance())
+                                .or_else(|| old_account_info.as_ref().map(|i| i.balance))
                                 .unwrap_or_default();
                             if s.balance() > prev_bal {
                                 Some(s.balance() - prev_bal)
@@ -298,7 +305,9 @@ impl<'a> BlockValidatorFactory<'a> {
                     {
                         if !sent_amount.is_zero() {
                             let mut already_received = false;
-                            let mut curr = previous_block.clone();
+                            let mut curr = previous_block
+                                .clone()
+                                .or_else(|| self.load_previous_block());
                             for _ in 0..256 {
                                 let Some(b) = curr else { break };
                                 if b.source() == Some(source_block) {
@@ -322,20 +331,14 @@ impl<'a> BlockValidatorFactory<'a> {
                 }
             }
         }
-        let t2c = t();
-        P[4].fetch_add(t2c - t2b, Relaxed); // source exists
 
         let any_pending_exists = if cfg!(test) || (self.block.is_open() && has_epoch_link) {
             self.any.receivable_exists(account)
         } else {
             false
         };
-        let t6 = t();
-        P[8].fetch_add(t6 - t2c, Relaxed); // receivable_exists
 
         let now = batch_now;
-        let t7 = t();
-        P[9].fetch_add(t7 - t6, Relaxed); // now()
 
         BlockValidator {
             block: self.block,

@@ -56,7 +56,7 @@ impl<'a> BlockValidator<'a> {
     }
 
     fn ensure_previous_block_exists(&self) -> Result<(), BlockError> {
-        if self.account_exists() && self.previous_block.is_none() {
+        if self.account_exists() && !self.has_previous_block() {
             tracing::debug!(
                 "Validation: GapPrevious - account {} exists but previous block {} NOT found in store",
                 self.account.encode_account(),
@@ -106,15 +106,17 @@ impl<'a> BlockValidator<'a> {
             return Ok(());
         }
 
-        let previous = self
-            .previous_block
-            .as_ref()
-            .ok_or(BlockError::GapPrevious)?;
-
-        if !self.block.valid_predecessor(previous.block_type()) {
-            Err(BlockError::BlockPosition)
-        } else {
-            Ok(())
+        if let Some(previous) = self.previous_block.as_ref() {
+            if !self.block.valid_predecessor(previous.block_type()) {
+                return Err(BlockError::BlockPosition);
+            }
+            return Ok(());
         }
+
+        if self.has_previous_block() {
+            return Ok(());
+        }
+
+        Err(BlockError::GapPrevious)
     }
 }

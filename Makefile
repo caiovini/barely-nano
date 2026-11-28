@@ -86,7 +86,7 @@ build-nvme-snapshot:
 	RUSTFLAGS="" $(CARGO) build --release --manifest-path tools/nvme-snapshot/Cargo.toml --target x86_64-unknown-linux-gnu
 
 run-stress: build-stress
-	tools/nano-stress/target/x86_64-unknown-linux-gnu/release/nano-stress $(if $(ARGS),$(ARGS),--target 192.168.1.200:7075 --rpc http://192.168.1.200:7076 --network dev)
+	tools/nano-stress/target/x86_64-unknown-linux-gnu/release/nano-stress $(if $(ARGS),$(ARGS),--target 10.10.10.2:7075 --rpc http://10.10.10.2:7076 --network dev)
 
 stress: run-stress
 

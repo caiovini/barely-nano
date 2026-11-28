@@ -33,6 +33,39 @@ impl BtreeSuccessorStore {
         }
     }
 
+    /// Updates 32-byte block successors for a key-sorted slice of `(BlockHash, BlockHash)`,
+    /// acquiring each shard B-Tree lock and `HOT_BLOCKS` shard lock at most once per shard.
+    pub fn put_batch(&self, items: &[(BlockHash, BlockHash)]) {
+        if items.is_empty() {
+            return;
+        }
+        let mut i = 0;
+        let n = items.len();
+        while i < n {
+            let shard_idx = (items[i].0.as_bytes()[0] >> 2) as usize;
+            let mut j = i + 1;
+            while j < n && ((items[j].0.as_bytes()[0] >> 2) as usize) == shard_idx {
+                j += 1;
+            }
+            let shard_items = &items[i..j];
+            let mut has_db = false;
+            {
+                let mut lock = SHARDS[shard_idx].lock();
+                if let Some(db) = lock.as_mut() {
+                    has_db = true;
+                    for (hash, successor) in shard_items {
+                        let key = self.make_key(hash);
+                        let _ = db.update_compact_successor_32(&key, successor.as_bytes());
+                    }
+                }
+            }
+            if has_db && !cfg!(test) {
+                crate::hot_block_set_successor_batch(shard_idx, shard_items);
+            }
+            i = j;
+        }
+    }
+
     pub fn get(&self, hash: &BlockHash) -> Option<BlockHash> {
         if !BtreeBlockStore::may_exist_global(hash) {
             return None;

@@ -235,59 +235,135 @@ fn account_bloom_may_contain(bytes: &[u8; 32]) -> bool {
         && (ACCOUNT_BLOOM[base + 3].load(Ordering::Relaxed) & m3 == m3)
 }
 
-const HOT_ACCOUNT_SLOTS: usize = 32; // 16 shards * 32 slots = 512 hot accounts
+const HOT_ACCOUNT_WAYS: usize = 4;
+const HOT_ACCOUNT_SETS: usize = 32; // 64 shards * 32 sets * 4 ways = 8,192 hot accounts (4-way in .bss)
 
-#[derive(Clone)]
-struct HotAccountEntry {
-    gen: u32,
-    account: Account,
-    info: AccountInfo,
+const _: () = assert!(!core::mem::needs_drop::<AccountInfo>());
+
+#[repr(C)]
+struct HotAccountSet {
+    gens: [u32; HOT_ACCOUNT_WAYS],
+    tags: [u32; HOT_ACCOUNT_WAYS],
+    accounts: [Account; HOT_ACCOUNT_WAYS],
+    infos: [core::mem::MaybeUninit<AccountInfo>; HOT_ACCOUNT_WAYS],
 }
 
-static HOT_ACCOUNTS: [spin::Mutex<[Option<HotAccountEntry>; HOT_ACCOUNT_SLOTS]>; SHARD_COUNT] =
-    [const { spin::Mutex::new([const { None }; HOT_ACCOUNT_SLOTS]) }; SHARD_COUNT];
+impl HotAccountSet {
+    const EMPTY: Self = Self {
+        gens: [0; HOT_ACCOUNT_WAYS],
+        tags: [0; HOT_ACCOUNT_WAYS],
+        accounts: [Account::zero(); HOT_ACCOUNT_WAYS],
+        infos: [const { core::mem::MaybeUninit::zeroed() }; HOT_ACCOUNT_WAYS],
+    };
+}
+
+static HOT_ACCOUNTS: [spin::Mutex<[HotAccountSet; HOT_ACCOUNT_SETS]>; SHARD_COUNT] =
+    [const { spin::Mutex::new([const { HotAccountSet::EMPTY }; HOT_ACCOUNT_SETS]) }; SHARD_COUNT];
 
 #[inline]
-fn hot_account_slot(account: &Account) -> (usize, usize) {
+fn hot_account_set(account: &Account) -> (usize, usize, usize, u32) {
     let b = account.as_bytes();
     let shard = (b[0] >> 2) as usize;
-    let slot = (u16::from_ne_bytes([b[1], b[2]]) as usize) & (HOT_ACCOUNT_SLOTS - 1);
-    (shard, slot)
+    let w = u32::from_ne_bytes([b[1], b[2], b[3], b[4]])
+        ^ u32::from_ne_bytes([b[5], b[6], b[7], b[8]]).rotate_left(13);
+    let h = w.wrapping_mul(0x9E37_79B9);
+    let set_idx = (h >> 27) as usize & (HOT_ACCOUNT_SETS - 1);
+    let victim_way = ((h >> 25) as usize) & (HOT_ACCOUNT_WAYS - 1);
+    (shard, set_idx, victim_way, h)
+}
+
+#[inline]
+fn hot_account_prefetch(account: &Account) {
+    let (shard, set_idx, _, _) = hot_account_set(account);
+    // SAFETY: `set_idx < HOT_ACCOUNT_SETS`; `prefetch_read` issues a non-faulting Zicbop
+    // `prefetch.r` cache hint for the 32-byte `(gens, tags)` header of `HotAccountSet[set_idx]`.
+    let ptr = unsafe {
+        (&HOT_ACCOUNTS[shard] as *const _ as *const HotAccountSet).add(set_idx) as *const u8
+    };
+    kernel_common::storage::prefetch_read(ptr);
 }
 
 #[inline]
 fn hot_account_get(account: &Account) -> Option<AccountInfo> {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-    let (shard, slot) = hot_account_slot(account);
+    let (shard, set_idx, _, tag) = hot_account_set(account);
     let guard = HOT_ACCOUNTS[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        if entry.gen == gen && entry.account == *account {
-            return Some(entry.info.clone());
+    let set = &guard[set_idx];
+    for way in 0..HOT_ACCOUNT_WAYS {
+        if set.gens[way] == gen && set.tags[way] == tag && set.accounts[way] == *account {
+            // SAFETY: `set.infos[way]` was initialized with a valid `AccountInfo` before `set.gens[way]` was set to `gen > 0`.
+            return Some(unsafe { set.infos[way].assume_init_ref().clone() });
         }
     }
     None
 }
 
 #[inline]
+fn hot_account_exists(account: &Account) -> bool {
+    let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
+    let (shard, set_idx, _, tag) = hot_account_set(account);
+    let guard = HOT_ACCOUNTS[shard].lock();
+    let set = &guard[set_idx];
+    for way in 0..HOT_ACCOUNT_WAYS {
+        if set.gens[way] == gen && set.tags[way] == tag && set.accounts[way] == *account {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline]
+fn hot_account_put_in_shard(
+    guard: &mut [HotAccountSet; HOT_ACCOUNT_SETS],
+    gen: u32,
+    account: &Account,
+    info: &AccountInfo,
+) {
+    let (_, set_idx, victim_way, tag) = hot_account_set(account);
+    let set = &mut guard[set_idx];
+    let mut target_way = victim_way;
+    for way in 0..HOT_ACCOUNT_WAYS {
+        if set.gens[way] == gen && set.tags[way] == tag && set.accounts[way] == *account {
+            target_way = way;
+            break;
+        }
+        if set.gens[way] != gen {
+            target_way = way;
+        }
+    }
+    set.gens[target_way] = gen;
+    set.tags[target_way] = tag;
+    set.accounts[target_way] = *account;
+    set.infos[target_way] = core::mem::MaybeUninit::new(info.clone());
+}
+
+#[inline]
+fn hot_account_del_in_shard(
+    guard: &mut [HotAccountSet; HOT_ACCOUNT_SETS],
+    account: &Account,
+) {
+    let (_, set_idx, _, tag) = hot_account_set(account);
+    let set = &mut guard[set_idx];
+    for way in 0..HOT_ACCOUNT_WAYS {
+        if set.tags[way] == tag && set.accounts[way] == *account {
+            set.gens[way] = 0;
+        }
+    }
+}
+
+#[inline]
 fn hot_account_put(account: &Account, info: &AccountInfo) {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-    let (shard, slot) = hot_account_slot(account);
-    HOT_ACCOUNTS[shard].lock()[slot] = Some(HotAccountEntry {
-        gen,
-        account: *account,
-        info: info.clone(),
-    });
+    let (shard, _, _, _) = hot_account_set(account);
+    let mut guard = HOT_ACCOUNTS[shard].lock();
+    hot_account_put_in_shard(&mut guard, gen, account, info);
 }
 
 #[inline]
 fn hot_account_del(account: &Account) {
-    let (shard, slot) = hot_account_slot(account);
+    let (shard, _, _, _) = hot_account_set(account);
     let mut guard = HOT_ACCOUNTS[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        if entry.account == *account {
-            guard[slot] = None;
-        }
-    }
+    hot_account_del_in_shard(&mut guard, account);
 }
 
 pub struct BtreeAccountStore {
@@ -312,7 +388,7 @@ impl BtreeAccountStore {
     pub fn put(&self, account: &Account, info: &AccountInfo) {
         account_bloom_insert(account.as_bytes());
         let key = self.make_key(account);
-        let mut buffer = [0u8; 512];
+        let mut buffer = [0u8; 160];
         let mut adapter = MutStreamAdapter::new(&mut buffer);
         info.serialize(&mut adapter);
         let len = adapter.bytes_written();
@@ -327,6 +403,134 @@ impl BtreeAccountStore {
             }
             unconfirmed_account_on_account_put(account, info.block_count);
         }
+    }
+
+    /// Applies a key-sorted slice of `(Account, (AccountInfo /* first_old */, AccountInfo /* target */))`,
+    /// acquiring each shard B-Tree lock, `HOT_ACCOUNTS` shard lock, and `UNCONFIRMED_ACCOUNTS` shard lock
+    /// at most once per shard.
+    pub fn flush_batch(&self, items: &[(Account, (AccountInfo, AccountInfo))]) {
+        if items.is_empty() {
+            return;
+        }
+        let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
+        let mut buffer = [0u8; 160];
+        let mut i = 0;
+        let n = items.len();
+        while i < n {
+            let shard_idx = (items[i].0.as_bytes()[0] >> 2) as usize;
+            let mut j = i + 1;
+            while j < n && ((items[j].0.as_bytes()[0] >> 2) as usize) == shard_idx {
+                j += 1;
+            }
+            let shard_items = &items[i..j];
+            let mut has_db = false;
+            let mut deleted_accounts = 0u64;
+            {
+                let mut lock = SHARDS[shard_idx].lock();
+                if let Some(db) = lock.as_mut() {
+                    has_db = true;
+                    for (account, (first_old_info, target_info)) in shard_items {
+                        let key = self.make_key(account);
+                        if !target_info.head.is_zero() {
+                            if !first_old_info.head.is_zero()
+                                && first_old_info.epoch != target_info.epoch
+                            {
+                                db.delete(key);
+                            }
+                            let mut adapter = MutStreamAdapter::new(&mut buffer);
+                            target_info.serialize(&mut adapter);
+                            let len = adapter.bytes_written();
+                            db.insert(key, &buffer[0..len]);
+                        } else {
+                            db.delete(key);
+                            deleted_accounts += 1;
+                        }
+                    }
+                }
+            }
+            if deleted_accounts > 0 {
+                self.cache
+                    .account_count
+                    .fetch_sub(deleted_accounts, Ordering::SeqCst);
+            }
+            if has_db {
+                for (account, (_, target_info)) in shard_items {
+                    if !target_info.head.is_zero() {
+                        account_bloom_insert(account.as_bytes());
+                    }
+                }
+                if !cfg!(test) {
+                    let mut hot_guard = HOT_ACCOUNTS[shard_idx].lock();
+                    for (account, (_, target_info)) in shard_items {
+                        if !target_info.head.is_zero() {
+                            hot_account_put_in_shard(&mut hot_guard, gen, account, target_info);
+                        } else {
+                            hot_account_del_in_shard(&mut hot_guard, account);
+                        }
+                    }
+                }
+                let mut unconf_map = UNCONFIRMED_ACCOUNTS[shard_idx].lock();
+                let mut added_unconf = 0usize;
+                let mut sub_unconf = 0usize;
+                for (account, (_, target_info)) in shard_items {
+                    if !target_info.head.is_zero() && target_info.block_count > 0 {
+                        let is_confirmed = !cfg!(test)
+                            && crate::confirmation_height_store::hot_conf_height_get(account)
+                                .is_some_and(|c| c.height >= target_info.block_count);
+                        if is_confirmed {
+                            if unconf_map.remove(account).is_some() {
+                                sub_unconf += 1;
+                            }
+                        } else if let Some(existing) = unconf_map.get_mut(account) {
+                            *existing = target_info.block_count;
+                        } else if unconf_map.len() < MAX_UNCONFIRMED_PER_SHARD {
+                            unconf_map.insert(*account, target_info.block_count);
+                            added_unconf += 1;
+                        }
+                    } else if unconf_map.remove(account).is_some() {
+                        sub_unconf += 1;
+                    }
+                }
+                drop(unconf_map);
+                if added_unconf > sub_unconf {
+                    UNCONFIRMED_COUNT.fetch_add(added_unconf - sub_unconf, Ordering::Relaxed);
+                } else if sub_unconf > added_unconf {
+                    UNCONFIRMED_COUNT.fetch_sub(sub_unconf - added_unconf, Ordering::Relaxed);
+                }
+            }
+            i = j;
+        }
+    }
+
+    #[inline]
+    pub fn prefetch_hot(&self, account: &Account) {
+        if !cfg!(test) {
+            hot_account_prefetch(account);
+        }
+    }
+
+    #[inline]
+    pub fn get_hot(&self, account: &Account) -> Option<AccountInfo> {
+        if !cfg!(test) {
+            hot_account_get(account)
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` if `account` can be resolved immediately in RAM without a B-Tree read
+    /// (either confirmed absent by `ACCOUNT_BLOOM` or cached in `HOT_ACCOUNTS`).
+    #[inline]
+    pub fn is_hot_or_absent(&self, account: &Account) -> bool {
+        if cfg!(test) {
+            return false;
+        }
+        if ACCOUNT_BLOOM_READY.load(Ordering::Acquire)
+            && !account_bloom_may_contain(account.as_bytes())
+        {
+            return true;
+        }
+        hot_account_exists(account)
     }
 
     pub fn get(&self, account: &Account) -> Option<AccountInfo> {

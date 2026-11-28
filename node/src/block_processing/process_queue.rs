@@ -32,11 +32,11 @@ impl Default for ProcessQueueConfig {
         Self {
             max_peer_queue: 2048,
             max_system_queue: 8192,
-            priority_live: 1,
+            priority_live: 16,
             priority_bootstrap: 128,
             priority_local: 16,
             priority_system: 32,
-            batch_size: 256,
+            batch_size: 2048,
         }
     }
 }
@@ -44,7 +44,7 @@ impl Default for ProcessQueueConfig {
 pub(crate) struct ProcessQueue {
     queue: FairQueue<(BlockSource, ChannelId), Arc<BlockContext>>,
     batch_size: usize,
-    queued_hashes: alloc::collections::BTreeSet<rsnano_core::BlockHash>,
+    queued_hashes: hashbrown::HashSet<rsnano_core::BlockHash>,
 }
 
 impl ProcessQueue {
@@ -70,7 +70,7 @@ impl ProcessQueue {
         Self {
             queue: FairQueue::new(max_size_query, priority_query),
             batch_size: config.batch_size,
-            queued_hashes: alloc::collections::BTreeSet::new(),
+            queued_hashes: hashbrown::HashSet::with_capacity(16384),
         }
     }
 
@@ -89,15 +89,18 @@ impl ProcessQueue {
 
     pub fn push(&mut self, context: Arc<BlockContext>) -> bool {
         let hash = context.block.hash();
-        if self.queued_hashes.contains(&hash) {
-            return false;
-        }
         let source = context.source;
         let channel_id = context.channel_id;
+        if self.queue.free_capacity(&(source, channel_id)) == 0 {
+            return false;
+        }
+        if !self.queued_hashes.insert(hash) {
+            return false;
+        }
         if self.queue.push((source, channel_id), context) {
-            self.queued_hashes.insert(hash);
             true
         } else {
+            self.queued_hashes.remove(&hash);
             false
         }
     }

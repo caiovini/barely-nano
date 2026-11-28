@@ -22,7 +22,7 @@ impl MessageProcessorConfig {
     pub fn new(parallelism: usize) -> Self {
         Self {
             threads: min(2, max(parallelism / 4, 1)),
-            max_queue: 64,
+            max_queue: 16384,
         }
     }
 }
@@ -138,7 +138,7 @@ struct State {
 }
 
 impl State {
-    const MAX_BATCH_SIZE: usize = 256;
+    const MAX_BATCH_SIZE: usize = 512;
 
     fn handle_batch(&self, batch: VecDeque<(ChannelId, (Message, Arc<Channel>))>) {
         let _start = kernel_common::clint::mtime();

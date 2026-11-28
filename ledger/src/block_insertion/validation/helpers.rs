@@ -15,10 +15,31 @@ impl<'a> BlockValidator<'a> {
         self.old_account_info.is_none()
     }
 
+    #[inline(always)]
+    pub(crate) fn has_previous_block(&self) -> bool {
+        self.previous_block.is_some()
+            || (!cfg!(test)
+                && matches!(self.block, Block::State(_))
+                && !self.block.previous().is_zero()
+                && self
+                    .old_account_info
+                    .as_ref()
+                    .is_some_and(|info| info.head == self.block.previous()))
+    }
+
     pub(crate) fn previous_balance(&self) -> Amount {
         self.previous_block
             .as_ref()
             .map(|b| b.balance())
+            .or_else(|| {
+                self.old_account_info.as_ref().and_then(|info| {
+                    if !info.head.is_zero() && info.head == self.block.previous() {
+                        Some(info.balance)
+                    } else {
+                        None
+                    }
+                })
+            })
             .unwrap_or_default()
     }
 

@@ -470,7 +470,7 @@ async fn main() -> Result<()> {
                 }
                 if current_c == last_c && current_c > 0 {
                     stable_iterations += 1;
-                    if stable_iterations >= 600
+                    if stable_iterations >= 6000
                         && wait_start.elapsed() > std::time::Duration::from_secs(30)
                     {
                         break;
@@ -480,7 +480,7 @@ async fn main() -> Result<()> {
                 }
             } else if current_c == last_c && current_c > 0 {
                 stable_iterations += 1;
-                if stable_iterations >= 60 {
+                if stable_iterations >= 600 {
                     break;
                 }
             } else {
@@ -488,7 +488,7 @@ async fn main() -> Result<()> {
             }
             last_c = current_c;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
     }
 
     let e2e_dur = overall_start.elapsed();

@@ -7,11 +7,11 @@
 
 [bare_metal]
 # Nano network variant: "live" (NanoLiveNetwork), "beta" (NanoBetaNetwork), "dev" (NanoDevNetwork), or "test" (NanoTestNetwork)
-network = "live"
+network = "dev"
 # UART log verbosity level: "off", "error", "warn", "info", "debug", or "trace"
 log_level = "info"
 # Set to true to wipe all blocks from persistent NVMe storage and start from zero (Genesis)
-wipe_blocks = false
+wipe_blocks = true
 # Ethernet MAC address used by the U-Boot / smoltcp interface
 mac_address = "c0:74:2b:f9:15:ec"
 # Static IPv4 address and subnet prefix length (10GbE SFP+ direct link to host PC)
@@ -411,7 +411,7 @@ optimistic_limit_percentage = 50
 max_peer_queue = 131072
 max_system_queue = 131072
 # Sized for 7x A100 16-way SIMD crypto harts + 3-stripe 64-shard B-Tree ledger harts
-batch_size = 512
+batch_size = 2048
 
 # Per-representative vote rebroadcast history. Each entry costs ~112 B and hashbrown grows the
 # table to 4x the entry count under insert/evict churn: 32768 reaches ~14.7 MB per rep (x100 reps

@@ -82,6 +82,11 @@ impl InboundMessageQueue {
         self.pending_count.load(Ordering::Relaxed) == 0
     }
 
+    #[inline]
+    pub fn pending_len(&self) -> usize {
+        self.pending_count.load(Ordering::Relaxed)
+    }
+
     pub fn next_batch(
         &self,
         max_batch_size: usize,
@@ -126,7 +131,7 @@ impl InboundMessageQueue {
 
 impl Default for InboundMessageQueue {
     fn default() -> Self {
-        Self::new(64)
+        Self::new(2048)
     }
 }
 

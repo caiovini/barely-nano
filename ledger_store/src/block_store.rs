@@ -385,35 +385,68 @@ fn get_block_bloom() -> &'static BlockBloomFilter {
     BLOCK_BLOOM.call_once(BlockBloomFilter::new)
 }
 
-const HOT_BLOCK_SLOTS: usize = 64; // 16 shards * 64 slots = 1,024 hot blocks
+const HOT_BLOCK_WAYS: usize = 4;
+const HOT_BLOCK_SETS: usize = 256; // 64 shards * 256 sets * 4 ways = 65,536 hot blocks (4-way in .bss)
 
-#[derive(Clone)]
-struct HotBlockEntry {
-    gen: u32,
-    hash: BlockHash,
-    block: SavedBlock,
-    successor: Option<BlockHash>,
+const _: () = assert!(!core::mem::needs_drop::<SavedBlock>());
+
+#[repr(C)]
+struct HotBlockSet {
+    gens: [u32; HOT_BLOCK_WAYS],
+    tags: [u32; HOT_BLOCK_WAYS],
+    has_successor: [u8; HOT_BLOCK_WAYS],
+    hashes: [BlockHash; HOT_BLOCK_WAYS],
+    blocks: [core::mem::MaybeUninit<SavedBlock>; HOT_BLOCK_WAYS],
+    successors: [BlockHash; HOT_BLOCK_WAYS],
 }
 
-static HOT_BLOCKS: [spin::Mutex<[Option<HotBlockEntry>; HOT_BLOCK_SLOTS]>; SHARD_COUNT] =
-    [const { spin::Mutex::new([const { None }; HOT_BLOCK_SLOTS]) }; SHARD_COUNT];
+impl HotBlockSet {
+    const EMPTY: Self = Self {
+        gens: [0; HOT_BLOCK_WAYS],
+        tags: [0; HOT_BLOCK_WAYS],
+        has_successor: [0; HOT_BLOCK_WAYS],
+        hashes: [BlockHash::zero(); HOT_BLOCK_WAYS],
+        blocks: [const { core::mem::MaybeUninit::zeroed() }; HOT_BLOCK_WAYS],
+        successors: [BlockHash::zero(); HOT_BLOCK_WAYS],
+    };
+}
+
+static HOT_BLOCKS: [spin::Mutex<[HotBlockSet; HOT_BLOCK_SETS]>; SHARD_COUNT] =
+    [const { spin::Mutex::new([const { HotBlockSet::EMPTY }; HOT_BLOCK_SETS]) }; SHARD_COUNT];
 
 #[inline]
-fn hot_block_slot(hash: &BlockHash) -> (usize, usize) {
+fn hot_block_set(hash: &BlockHash) -> (usize, usize, usize, u32) {
     let b = hash.as_bytes();
     let shard = (b[0] >> 2) as usize;
-    let slot = (u16::from_ne_bytes([b[1], b[2]]) as usize) & (HOT_BLOCK_SLOTS - 1);
-    (shard, slot)
+    let w = u32::from_ne_bytes([b[1], b[2], b[3], b[4]])
+        ^ u32::from_ne_bytes([b[5], b[6], b[7], b[8]]).rotate_left(13);
+    let h = w.wrapping_mul(0x9E37_79B9);
+    let set_idx = (h >> 24) as usize & (HOT_BLOCK_SETS - 1);
+    let victim_way = ((h >> 22) as usize) & (HOT_BLOCK_WAYS - 1);
+    (shard, set_idx, victim_way, h)
+}
+
+#[inline]
+fn hot_block_prefetch(hash: &BlockHash) {
+    let (shard, set_idx, _, _) = hot_block_set(hash);
+    // SAFETY: `set_idx < HOT_BLOCK_SETS`; `prefetch_read` issues a non-faulting Zicbop
+    // `prefetch.r` cache hint for the 36-byte `(gens, tags, has_successor)` header of `HotBlockSet[set_idx]`.
+    let ptr = unsafe {
+        (&HOT_BLOCKS[shard] as *const _ as *const HotBlockSet).add(set_idx) as *const u8
+    };
+    kernel_common::storage::prefetch_read(ptr);
 }
 
 #[inline]
 fn hot_block_get(hash: &BlockHash) -> Option<SavedBlock> {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-    let (shard, slot) = hot_block_slot(hash);
+    let (shard, set_idx, _, tag) = hot_block_set(hash);
     let guard = HOT_BLOCKS[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        if entry.gen == gen && entry.hash == *hash {
-            return Some(entry.block.clone());
+    let set = &guard[set_idx];
+    for way in 0..HOT_BLOCK_WAYS {
+        if set.gens[way] == gen && set.tags[way] == tag && set.hashes[way] == *hash {
+            // SAFETY: `set.blocks[way]` was initialized with a valid `SavedBlock` before `set.gens[way]` was set to `gen > 0`.
+            return Some(unsafe { set.blocks[way].assume_init_ref().clone() });
         }
     }
     None
@@ -422,10 +455,13 @@ fn hot_block_get(hash: &BlockHash) -> Option<SavedBlock> {
 #[inline]
 fn hot_block_exists(hash: &BlockHash) -> bool {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-    let (shard, slot) = hot_block_slot(hash);
+    let (shard, set_idx, _, tag) = hot_block_set(hash);
     let guard = HOT_BLOCKS[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        return entry.gen == gen && entry.hash == *hash;
+    let set = &guard[set_idx];
+    for way in 0..HOT_BLOCK_WAYS {
+        if set.gens[way] == gen && set.tags[way] == tag && set.hashes[way] == *hash {
+            return true;
+        }
     }
     false
 }
@@ -433,13 +469,17 @@ fn hot_block_exists(hash: &BlockHash) -> bool {
 #[inline]
 pub(crate) fn hot_block_get_successor(hash: &BlockHash) -> Option<Option<BlockHash>> {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-    let (shard, slot) = hot_block_slot(hash);
+    let (shard, set_idx, _, tag) = hot_block_set(hash);
     let guard = HOT_BLOCKS[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        if entry.gen == gen && entry.hash == *hash {
-            if let Some(succ) = entry.successor {
-                return Some(if succ.is_zero() { None } else { Some(succ) });
-            }
+    let set = &guard[set_idx];
+    for way in 0..HOT_BLOCK_WAYS {
+        if set.gens[way] == gen
+            && set.tags[way] == tag
+            && set.has_successor[way] != 0
+            && set.hashes[way] == *hash
+        {
+            let succ = set.successors[way];
+            return Some(if succ.is_zero() { None } else { Some(succ) });
         }
     }
     None
@@ -448,13 +488,72 @@ pub(crate) fn hot_block_get_successor(hash: &BlockHash) -> Option<Option<BlockHa
 #[inline]
 pub(crate) fn hot_block_set_successor(hash: &BlockHash, successor: BlockHash) {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-    let (shard, slot) = hot_block_slot(hash);
+    let (shard, set_idx, _, tag) = hot_block_set(hash);
     let mut guard = HOT_BLOCKS[shard].lock();
-    if let Some(entry) = &mut guard[slot] {
-        if entry.gen == gen && entry.hash == *hash {
-            entry.successor = Some(successor);
+    let set = &mut guard[set_idx];
+    for way in 0..HOT_BLOCK_WAYS {
+        if set.gens[way] == gen && set.tags[way] == tag && set.hashes[way] == *hash {
+            set.has_successor[way] = 1;
+            set.successors[way] = successor;
+            return;
         }
     }
+}
+
+#[inline]
+pub(crate) fn hot_block_set_successor_batch(shard_idx: usize, items: &[(BlockHash, BlockHash)]) {
+    let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
+    let mut guard = HOT_BLOCKS[shard_idx].lock();
+    for (hash, successor) in items {
+        let (_, set_idx, _, tag) = hot_block_set(hash);
+        let set = &mut guard[set_idx];
+        for way in 0..HOT_BLOCK_WAYS {
+            if set.gens[way] == gen && set.tags[way] == tag && set.hashes[way] == *hash {
+                set.has_successor[way] = 1;
+                set.successors[way] = *successor;
+                break;
+            }
+        }
+    }
+}
+
+#[inline]
+fn hot_block_put_in_shard(
+    guard: &mut [HotBlockSet; HOT_BLOCK_SETS],
+    gen: u32,
+    hash: &BlockHash,
+    block: &SavedBlock,
+    successor: Option<BlockHash>,
+) {
+    let (_, set_idx, victim_way, tag) = hot_block_set(hash);
+    let set = &mut guard[set_idx];
+    let mut target_way = victim_way;
+    for way in 0..HOT_BLOCK_WAYS {
+        if set.gens[way] == gen && set.tags[way] == tag && set.hashes[way] == *hash {
+            target_way = way;
+            break;
+        }
+        if set.gens[way] != gen {
+            target_way = way;
+        }
+    }
+    let (has_succ, succ_val) = match successor {
+        Some(s) => (1u8, s),
+        None if set.gens[target_way] == gen
+            && set.tags[target_way] == tag
+            && set.has_successor[target_way] != 0
+            && set.hashes[target_way] == *hash =>
+        {
+            (1u8, set.successors[target_way])
+        }
+        None => (0u8, BlockHash::zero()),
+    };
+    set.gens[target_way] = gen;
+    set.tags[target_way] = tag;
+    set.has_successor[target_way] = has_succ;
+    set.hashes[target_way] = *hash;
+    set.blocks[target_way] = core::mem::MaybeUninit::new(block.clone());
+    set.successors[target_way] = succ_val;
 }
 
 #[inline]
@@ -464,30 +563,19 @@ fn hot_block_put(
     successor: Option<BlockHash>,
 ) {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
-    let (shard, slot) = hot_block_slot(hash);
+    let (shard, _, _, _) = hot_block_set(hash);
     let mut guard = HOT_BLOCKS[shard].lock();
-    let final_succ = match successor {
-        Some(s) => Some(s),
-        None => guard[slot]
-            .as_ref()
-            .filter(|e| e.gen == gen && e.hash == *hash)
-            .and_then(|e| e.successor),
-    };
-    guard[slot] = Some(HotBlockEntry {
-        gen,
-        hash: *hash,
-        block: block.clone(),
-        successor: final_succ,
-    });
+    hot_block_put_in_shard(&mut guard, gen, hash, block, successor);
 }
 
 #[inline]
 fn hot_block_del(hash: &BlockHash) {
-    let (shard, slot) = hot_block_slot(hash);
+    let (shard, set_idx, _, tag) = hot_block_set(hash);
     let mut guard = HOT_BLOCKS[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        if entry.hash == *hash {
-            guard[slot] = None;
+    let set = &mut guard[set_idx];
+    for way in 0..HOT_BLOCK_WAYS {
+        if set.tags[way] == tag && set.hashes[way] == *hash {
+            set.gens[way] = 0;
         }
     }
 }
@@ -586,12 +674,7 @@ impl BtreeBlockStore {
                 let mut lock = SHARDS[shard_idx].lock();
                 if let Some(db) = lock.as_mut() {
                     has_db = true;
-                    for (k, (hash, block, successor)) in shard_items.iter().enumerate() {
-                        if k + 2 < shard_items.len() {
-                            let ahead_key = self.make_key(&shard_items[k + 2].0);
-                            db.prefetch_key_write(&ahead_key);
-                        }
-                        bloom.insert(hash.as_bytes());
+                    for (hash, block, successor) in shard_items.iter() {
                         let key = self.make_key(hash);
                         let total_len = block.serialize_compact(successor, &mut buffer);
                         if db.insert_compact_block(
@@ -604,6 +687,9 @@ impl BtreeBlockStore {
                     }
                 }
             }
+            for (hash, _, _) in shard_items {
+                bloom.insert(hash.as_bytes());
+            }
             if new_in_shard > 0 {
                 BLOCK_COUNT.fetch_add(new_in_shard, Ordering::Relaxed);
                 self.cache.block_count.fetch_add(new_in_shard, Ordering::Relaxed);
@@ -611,18 +697,23 @@ impl BtreeBlockStore {
             if has_db && !cfg!(test) {
                 let mut hot_guard = HOT_BLOCKS[shard_idx].lock();
                 for (hash, block, successor) in shard_items {
-                    let b = hash.as_bytes();
-                    let slot = (u16::from_ne_bytes([b[1], b[2]]) as usize) & (HOT_BLOCK_SLOTS - 1);
-                    hot_guard[slot] = Some(HotBlockEntry {
-                        gen,
-                        hash: *hash,
-                        block: block.clone(),
-                        successor: Some(*successor),
-                    });
+                    hot_block_put_in_shard(&mut hot_guard, gen, hash, block, Some(*successor));
                 }
             }
             i = j;
         }
+    }
+
+    #[inline]
+    pub fn prefetch_hot(&self, hash: &BlockHash) {
+        if !cfg!(test) && !hash.is_zero() {
+            hot_block_prefetch(hash);
+        }
+    }
+
+    #[inline]
+    pub fn is_hot(&self, hash: &BlockHash) -> bool {
+        !cfg!(test) && hot_block_exists(hash)
     }
 
     #[inline]

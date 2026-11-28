@@ -105,7 +105,7 @@ impl<'a> BlockValidator<'a> {
         if let Block::State(state_block) = self.block {
             if self.has_epoch_link(state_block)
                 && !self.block.previous().is_zero()
-                && self.previous_block.is_none()
+                && !self.has_previous_block()
             {
                 return Err(BlockError::GapPrevious);
             }

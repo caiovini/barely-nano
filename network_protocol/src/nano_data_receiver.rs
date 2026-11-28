@@ -269,6 +269,35 @@ impl DataReceiver for NanoDataReceiver {
     fn receive(&mut self, data: &[u8]) -> ReceiveResult {
         kernel_common::uart::putchar(b'i');
         let mut remaining = data;
+        if self.channel.mode() == ChannelMode::Realtime && !self.first_message {
+            while let Some(batch16) = self
+                .message_deserializer
+                .next_publish_state_batch_16(&mut remaining)
+            {
+                for result in batch16 {
+                    let step = match result {
+                        Ok(msg) => self.process_message(msg.message),
+                        Err(e) => {
+                            if matches!(
+                                e,
+                                ParseMessageError::DuplicateConfirmAckMessage
+                                    | ParseMessageError::DuplicatePublishMessage
+                            ) {
+                                ReceiveResult::Continue
+                            } else {
+                                ReceiveResult::Abort
+                            }
+                        }
+                    };
+                    if !matches!(step, ReceiveResult::Continue) {
+                        if !remaining.is_empty() {
+                            self.message_deserializer.push(remaining);
+                        }
+                        return step;
+                    }
+                }
+            }
+        }
         while let Some(result) = self.message_deserializer.next_from_slice(&mut remaining) {
             let result = match result {
                 Ok(msg) => {

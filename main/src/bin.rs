@@ -700,6 +700,7 @@ fn boot_hart_main(hart_id: usize) {
         config.priority_bucket.max_elections = config.priority_bucket.max_elections.max(1500);
         config.optimistic_scheduler.optimistic_limit_percentage =
             config.optimistic_scheduler.optimistic_limit_percentage.max(50);
+        config.block_processor.batch_size = config.block_processor.batch_size.max(2048);
         let preconfigured_peers = config.preconfigured_peers.clone();
 
         let mut flags = rsnano_node::config::NodeFlags::new();
@@ -1143,12 +1144,18 @@ fn run_vote_processor_loop(
         if node_arc.config.enable_vote_rebroadcast && node_arc.vote_rebroadcaster.run_once() {
             worked = true;
         }
+        for _ in 0..8 {
+            if exec.run_once(hart_id) {
+                worked = true;
+            } else {
+                break;
+            }
+        }
         if !worked && !node_arc.signature_checker.is_empty_relaxed() {
             if node_arc.signature_checker.help_verify() > 0 {
                 worked = true;
             }
         }
-        let _ = (&exec, hart_id);
         adaptive_pause_backoff(worked, &mut idle_spins);
         iterations += 1;
     }
@@ -1187,7 +1194,7 @@ fn run_message_processor_loop(
         // 1. Drain inbound 10GbE network messages into BlockProcessorQueue & bg_tasks
         if !node_arc.inbound_message_queue.is_empty_relaxed() {
             let hp1 = kernel_common::clint::mtime();
-            for _ in 0..4 {
+            for _ in 0..8 {
                 if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
                     worked = true;
                 } else {
@@ -1197,7 +1204,7 @@ fn run_message_processor_loop(
             HART1_PROF[1].fetch_add(kernel_common::clint::mtime() - hp1, Ordering::Relaxed);
         }
 
-        // 2. Assist with synchronous batch signature tasks if Hart 6 is waiting
+        // 2. Assist with synchronous & background batch signature tasks
         while node_arc.signature_checker.has_sync_tasks() {
             let n = node_arc.signature_checker.help_verify_sync();
             if n > 0 {
@@ -1205,6 +1212,13 @@ fn run_message_processor_loop(
                 verified_count = verified_count.wrapping_add(n);
             } else {
                 break;
+            }
+        }
+        if !worked && !node_arc.signature_checker.is_empty_relaxed() {
+            let n = node_arc.signature_checker.help_verify();
+            if n > 0 {
+                worked = true;
+                verified_count = verified_count.wrapping_add(n);
             }
         }
 
@@ -1388,7 +1402,7 @@ fn run_a100_crypto_worker_loop(
         }
 
         // 5. Assist Hart 2 with 10GbE inbound MessageProcessor batches (16-way PoW entry check)
-        if !worked && node_arc.inbound_message_queue.size() >= 2 {
+        if !node_arc.inbound_message_queue.is_empty_relaxed() {
             if rsnano_node::transport::MessageProcessor::run_batch(&node_arc.message_processor) {
                 worked = true;
             }
@@ -1442,15 +1456,7 @@ fn run_ledger_b_loop(
             worked = true;
         }
 
-        // 2. While Hart 6 is waiting for synchronous batch signature checks, help verify `sync_tasks`.
-        while node_arc.signature_checker.has_sync_tasks() {
-            if node_arc.signature_checker.help_verify_sync() > 0 {
-                worked = true;
-            } else {
-                break;
-            }
-        }
-
+        let _ = &node_arc;
         kernel_common::uboot::eth_check_tx_stall();
         if worked {
             idle_spins = 1;
@@ -1458,7 +1464,6 @@ fn run_ledger_b_loop(
             for _ in 0..idle_spins {
                 if rsnano_ledger::try_run_ledger_b_job()
                     || kernel_common::storage::wal::try_run_wal_b_job()
-                    || node_arc.signature_checker.has_sync_tasks()
                 {
                     idle_spins = 1;
                     break;
@@ -1529,26 +1534,7 @@ fn run_ledger_c_and_wal_loop(
             last_cleanup = mtime;
         }
 
-        // 4. Assist with async executor tasks when idle
-        for _ in 0..8 {
-            if rsnano_ledger::try_run_ledger_c_job() {
-                worked = true;
-                break;
-            }
-            if exec.run_once(hart_id) {
-                worked = true;
-            } else {
-                break;
-            }
-        }
-
-        // 5. Assist with synchronous batch signature tasks if Hart 6 is waiting
-        if !worked && node_arc.signature_checker.has_sync_tasks() {
-            if node_arc.signature_checker.help_verify_sync() > 0 {
-                worked = true;
-            }
-        }
-
+        let _ = (&node_arc, &exec, hart_id);
         kernel_common::uboot::eth_check_tx_stall();
         if worked {
             idle_spins = 1;
@@ -1556,7 +1542,6 @@ fn run_ledger_c_and_wal_loop(
             for _ in 0..idle_spins {
                 if rsnano_ledger::try_run_ledger_c_job()
                     || kernel_common::storage::wal::is_wal_bg_pending()
-                    || node_arc.signature_checker.has_sync_tasks()
                 {
                     idle_spins = 1;
                     break;
@@ -3386,11 +3371,12 @@ fn run_maintenance_and_network_loop(
 
         iterations += 1;
 
-        // Release NET.lock() for a brief window so Cluster 1 worker harts can acquire NET.lock()
-        // for socket reads/writes without starving. If signature verification work is queued,
-        // verifying one batch (~20-25 us outside NET.lock()) provides that lock-free window
-        // while doing useful Ed25519 work instead of spinning idle.
-        if !node_arc.signature_checker.is_empty_relaxed() {
+        // Release NET.lock() for a brief window so worker harts can acquire NET.lock()
+        // for 256 KB TCP socket reads/writes without starving. While 10GbE packets are actively
+        // arriving (`net_active`), keep Hart 1 dedicated to NIC RX/TX polling with a short
+        // ~15 us window; once the wire burst has drained into the node queues (`!net_active`),
+        // help verify queued Ed25519 signatures on Hart 1's 2.4 GHz X100 core.
+        if !net_active && !node_arc.signature_checker.is_empty_relaxed() {
             let hs = kernel_common::clint::mtime();
             let _ = node_arc.signature_checker.help_verify();
             HART1_PROF[2].fetch_add(kernel_common::clint::mtime() - hs, Ordering::Relaxed);

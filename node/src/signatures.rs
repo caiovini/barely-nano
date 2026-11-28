@@ -25,6 +25,7 @@ pub struct SignatureChecker {
     bg_tasks: Mutex<VecDeque<Arc<crate::block_processing::BlockContext>>>,
     sync_count: AtomicUsize,
     bg_count: AtomicUsize,
+    in_flight_count: AtomicUsize,
 }
 
 impl SignatureChecker {
@@ -34,6 +35,7 @@ impl SignatureChecker {
             bg_tasks: Mutex::new(VecDeque::with_capacity(4096)),
             sync_count: AtomicUsize::new(0),
             bg_count: AtomicUsize::new(0),
+            in_flight_count: AtomicUsize::new(0),
         }
     }
 
@@ -100,25 +102,47 @@ impl SignatureChecker {
         }
         let mut lock = self.bg_tasks.lock();
         for ctx in ctxs {
-            if lock.len() >= MAX_BG_TASKS {
-                break;
-            }
-            if ctx.source == crate::block_processing::BlockSource::Local
-                || ctx.block.is_signature_verified()
-                || ctx.sig_state.load(Ordering::Relaxed) != SIG_STATE_UNCLAIMED
-            {
-                continue;
-            }
-            let has_account = ctx
-                .block
-                .account_field()
-                .or(ctx.account)
-                .is_some_and(|a| !a.is_zero());
-            if has_account {
-                lock.push_back(ctx.clone());
-            }
+            Self::enqueue_bg_locked(&mut lock, &self.bg_count, ctx);
         }
         self.bg_count.store(lock.len(), Ordering::Release);
+    }
+
+    #[inline]
+    pub(crate) fn bg_tasks_lock(
+        &self,
+    ) -> spin::MutexGuard<'_, VecDeque<Arc<crate::block_processing::BlockContext>>> {
+        self.bg_tasks.lock()
+    }
+
+    #[inline]
+    pub(crate) fn bg_count_atomic(&self) -> &AtomicUsize {
+        &self.bg_count
+    }
+
+    #[inline]
+    pub(crate) fn enqueue_bg_locked(
+        lock: &mut VecDeque<Arc<crate::block_processing::BlockContext>>,
+        bg_count: &AtomicUsize,
+        ctx: &Arc<crate::block_processing::BlockContext>,
+    ) {
+        if lock.len() >= MAX_BG_TASKS {
+            return;
+        }
+        if ctx.source == crate::block_processing::BlockSource::Local
+            || ctx.block.is_signature_verified()
+            || ctx.sig_state.load(Ordering::Relaxed) != SIG_STATE_UNCLAIMED
+        {
+            return;
+        }
+        let has_account = ctx
+            .block
+            .account_field()
+            .or(ctx.account)
+            .is_some_and(|a| !a.is_zero());
+        if has_account {
+            lock.push_back(ctx.clone());
+            bg_count.store(lock.len(), Ordering::Release);
+        }
     }
 
     #[inline]
@@ -127,8 +151,25 @@ impl SignatureChecker {
     }
 
     #[inline]
+    pub fn sync_len(&self) -> usize {
+        self.sync_count.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn bg_len(&self) -> usize {
+        self.bg_count.load(Ordering::Relaxed)
+    }
+
+    #[inline]
     pub fn is_empty_relaxed(&self) -> bool {
         self.sync_count.load(Ordering::Relaxed) == 0 && self.bg_count.load(Ordering::Relaxed) == 0
+    }
+
+    #[inline]
+    pub fn has_pending_work(&self) -> bool {
+        self.bg_count.load(Ordering::Relaxed) > 0
+            || self.in_flight_count.load(Ordering::Relaxed) > 0
+            || self.sync_count.load(Ordering::Relaxed) > 0
     }
 
     /// Used by Hart 6 (`BlockBatchProcessor`) to verify only synchronous batch tasks.
@@ -217,7 +258,9 @@ impl SignatureChecker {
                 self.sync_count.store(lock.len(), Ordering::Relaxed);
             }
             if count > 0 {
+                self.in_flight_count.fetch_add(count, Ordering::Relaxed);
                 self.verify_tasks_slice(&mut tasks[..count]);
+                self.in_flight_count.fetch_sub(count, Ordering::Relaxed);
                 return count;
             }
         }
@@ -273,7 +316,9 @@ impl SignatureChecker {
             return 0;
         }
 
+        self.in_flight_count.fetch_add(count, Ordering::Relaxed);
         self.verify_tasks_slice(&mut tasks[..count]);
+        self.in_flight_count.fetch_sub(count, Ordering::Relaxed);
         count
     }
 
@@ -283,7 +328,7 @@ impl SignatureChecker {
 
     fn verify_tasks_slice(&self, tasks: &mut [Option<SignatureTask>]) {
         let n_tasks = tasks.len();
-        if n_tasks == 16 || (n_tasks > 4 && rsnano_sha::blake2b::has_vlen_1024()) {
+        if n_tasks == 16 || (n_tasks >= 8 && rsnano_sha::blake2b::has_vlen_1024()) {
             let mut all_have_account = true;
             let mut accounts = [rsnano_core::Account::zero(); 16];
             for i in 0..n_tasks {

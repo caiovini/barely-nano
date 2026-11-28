@@ -97,14 +97,14 @@ impl TcpNetworkAdapter {
         let clock_l = self.clock.clone();
         async_rt::spawn_named(async move {
             let channel_l = adapter_l.channel.clone();
-            let mut buffer = [0u8; 16384];
+            let mut buffer = alloc::vec![0u8; 262144];
             let mut consecutive_reads = 0usize;
 
             loop {
                 if channel_l.is_closed() {
                     break;
                 }
-                if consecutive_reads >= 16 {
+                if consecutive_reads >= 8 {
                     consecutive_reads = 0;
                     async_rt::yield_now().await;
                 }
@@ -151,7 +151,7 @@ impl TcpNetworkAdapter {
                                 break;
                             }
                             ReceiveResult::Pause => loop {
-                                async_rt::sleep(core::time::Duration::from_millis(2)).await;
+                                async_rt::sleep(core::time::Duration::from_micros(100)).await;
                                 if channel_l.is_cancelled() {
                                     break;
                                 }

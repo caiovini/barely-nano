@@ -45,7 +45,7 @@ It establishes a self-contained operating environment on top of OpenSBI and U-Bo
   - [1. How Sparse-Shard Snapshot Streaming & WAL Replay Works](#1-how-sparse-shard-snapshot-streaming--wal-replay-works)
   - [2. `BNSNAPV1` Raw Snapshot File Layout](#2-bnsnapv1-raw-snapshot-file-layout)
   - [3. Step-by-Step Usage (`tools/nvme_snapshot.sh`)](#3-step-by-step-usage-toolsnvme_snapshotsh)
-- [Network Stress Testing (`tools/nano-stress`)](#network-stress-testing-toolsnano-stress)
+- [Network Stress Testing (`tools/nano-stress`) & 10GbE Benchmark Report (`STRESS_TEST_REPORT.md`)](#network-stress-testing-toolsnano-stress)
 - [Workspace Structure](#workspace-structure)
 - [Authors & Credits](#authors--credits)
 
@@ -96,19 +96,19 @@ To achieve maximum transaction throughput across the hybrid 16-core silicon, the
 ### 7. 16-Hart Hybrid SMP Architecture (`8× X100` + `8× A100`)
 All 16 harts on the SpacemiT K3 are awakened via OpenSBI HSM (`sbi::hart_start`) and pinned by physical CPU cluster in [`main/src/bin.rs`](main/src/bin.rs):
 
-- **Cluster 0 — X100 Harts `0..=3` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb` — Ingress, Network, Deserialization & Unchecked/Bootstrap):**
-  - **Hart 0 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, and cooperative async executor tasks (`WORKER_HARTS`).
-  - **Hart 1 (`Maint+Net`):** Boot initialization, GbE/10GbE `smoltcp` network polling, HTTP JSON-RPC (`7076`), WebSocket (`7078`), Live Web Dashboard (`7080`), gateway ICMP keepalive, and offline link recovery.
-  - **Hart 2 (`MsgProc`):** Dedicated inbound network message deserialization (`MessageProcessor::run_batch()`) and 4-way `VLEN=256` (`Zvkb`) Ed25519 signature verification assist (`signature_checker.help_verify()`).
-  - **Hart 3 (`Unchecked+Boot`):** Dedicated `unchecked` dependency queue drainer and `bootstrap_server` response worker.
-- **Cluster 1 — X100 Harts `4..=7` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb` — Consensus & 3-Stripe Parallel 64-Shard Ledger Storage):**
-  - **Hart 4 (`Consensus`):** Drives `aec_voter` and `aec_ticker` (300 ms ticks), `election_schedulers`, `backlog_scan`, `bootstrap_server`, and cooperative async executor tasks (`WORKER_HARTS`).
-  - **Hart 5 (`Ledger-B`):** Parallel **Shards `21..=41`** (`[21, 42)`, 21 shards) B-Tree mutations ([`Ledger::try_run_ledger_b_job`](ledger/src/ledger.rs)), WAL segments, and `unchecked` dependency queue drain.
-  - **Hart 6 (`Ledger-A`):** Primary `block_processor` batch coordinator (`FAST_BATCH_SLOTS = 2048`), parallel **Shards `0..=20`** (`[0, 21)`, 21 shards) B-Tree mutations, WAL checkpoint coordinator, and `confirming_set` cementation.
-  - **Hart 7 (`Ledger-C + Storage`):** Parallel **Shards `42..=63`** (`[42, 64)`, 22 shards) B-Tree mutations ([`Ledger::try_run_ledger_c_job`](ledger/src/ledger.rs)), online weight calculation, NVMe Free-List GC/reclamation (`ledger_pruning`), and cooperative async executor tasks (`WORKER_HARTS`).
-- **Clusters 2 & 3 — A100 Harts `8..=15` (`2.0 GHz`, `VLEN=1024`, `Zvkb` — 16-Way Wide-Vector Crypto & HDMI Telemetry):**
-  - **Harts `8..=14` (`Crypto-A100`):** 7 dedicated **16-way `VLEN=1024` SIMD** Ed25519 signature verification (`verify_batch_16`) + Blake2b (`compress_16_blocks`) workers and inbound `MessageProcessor::run_batch()` drainers.
-  - **Hart `15` (`HDMI+Mon`):** Drives the 2-second Waveshare 5-inch HDMI SimpleFB graphical dashboard ([`common/src/hdmi_fb.rs`](common/src/hdmi_fb.rs)) and 15-second hardware telemetry/lock-contention reports.
+- **Cluster 0 — X100 Harts `0..=3` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb` — Ingress, Network, TCP Drain & Unchecked/Bootstrap):**
+  - **Hart 0 (`VoteProc`):** Runs `vote_cache_processor`, `vote_processor`, cooperative Ed25519 signature verification (`signature_checker.help_verify()`), and async executor tasks (`WORKER_HARTS`).
+  - **Hart 1 (`Maint+Net`):** Boot initialization, GbE/10GbE `smoltcp` network polling (`16 MB` peering socket RX window), HTTP JSON-RPC (`7076`), WebSocket (`7078`), Live Web Dashboard (`7080`), cooperative Ed25519 verification during post-burst `!net_active` windows, gateway ICMP keepalive, and offline link recovery.
+  - **Hart 2 (`Crypto+Helper`):** Dedicated 4-way `VLEN=256` (`Zvkb`) Ed25519 signature verification worker (`signature_checker.help_verify()`).
+  - **Hart 3 (`TcpDrain+Unchecked+Boot`):** Drains `256 KB` TCP chunks from `smoltcp` into `NanoDataReceiver` (`TcpNetworkAdapter::readable()`), drains the `unchecked` dependency queue, and serves `bootstrap_server` responses.
+- **Cluster 1 — X100 Harts `4..=7` (`2.4 GHz`, 4-issue OoO, `VLEN=256`, `Zvkb` — Deserialization, Consensus & 3-Stripe Parallel 64-Shard Ledger Storage):**
+  - **Hart 4 (`MsgProc+Consensus`):** Executes 16-way vectorized `Publish(StateBlock)` wire deserialization (`MessageDeserializer::next_publish_state_batch_16` + `StateBlock::finish_batch_16`) and `MessageProcessor::run_batch()` (`512` messages/call), drives `aec_voter` and `aec_ticker` (300 ms ticks), `election_schedulers`, `backlog_scan`, and cooperative async executor tasks (`WORKER_HARTS`).
+  - **Hart 5 (`Ledger-B`):** Parallel **Shards `21..=41`** (`[21, 42)`, 21 shards) B-Tree mutations ([`Ledger::try_run_ledger_b_job`](ledger/src/ledger.rs)), cooperative Ed25519 signature verification when idle, and `unchecked` dependency queue drain.
+  - **Hart 6 (`Ledger-A`):** Primary `block_processor` batch coordinator (`batch_size = 2048`, `FAST_BATCH_SLOTS = 4096`) with lazy per-block `sig_state` synchronization ([`Ledger::process_batch_with_lazy_verifications`](ledger/src/ledger.rs)), parallel **Shards `0..=20`** (`[0, 21)`, 21 shards) B-Tree mutations, WAL checkpoint initiation, and `confirming_set` cementation.
+  - **Hart 7 (`Ledger-C + Storage`):** Parallel **Shards `42..=63`** (`[42, 64)`, 22 shards) B-Tree mutations ([`Ledger::try_run_ledger_c_job`](ledger/src/ledger.rs)), asynchronous dual-area NVMe WAL writer (`wal::try_run_background_flush()`), online weight calculation, NVMe Free-List GC/reclamation (`ledger_pruning`), and cooperative signature verification.
+- **Clusters 2 & 3 — A100 Harts `8..=15` (`2.0 GHz`, `VLEN=1024`, `Zvkb` — HDMI Telemetry & 16-Way Wide-Vector Crypto):**
+  - **Hart `8` (`HDMI+Mon`):** Drives the 2-second Waveshare 5-inch HDMI SimpleFB graphical dashboard ([`common/src/hdmi_fb.rs`](common/src/hdmi_fb.rs)) and 15-second hardware telemetry/lock-contention reports.
+  - **Harts `9..=15` (`Crypto-A100`):** 7 dedicated **16-way `VLEN=1024` SIMD** Ed25519 signature verification (`verify_batch_16`) + Blake2b (`compress_16_blocks`) workers.
 
 ### 8. Waveshare 5-Inch HDMI SimpleFB Display (`common/src/hdmi_fb.rs`)
 - **Zero-Allocation `no_std` Framebuffer Driver:** Automatically discovers the `simple-framebuffer` (`simplefb`) region initialized by U-Boot's HDMI driver from the Flattened Device Tree (`0x1_1F00_0000`) or U-Boot Jump Table (`video_get_fb`, `video_get_xsize`, `video_get_ysize`, `video_sync_all` at indices `49..55`), supporting both `r5g6b5` (`RGB565`, 16 bpp) and `x8r8g8b8` / `a8r8g8b8` (`XRGB8888`, 32 bpp) panels (`800×480` Waveshare 5-inch HDMI LCD).
@@ -126,7 +126,7 @@ Without an OS filesystem or traditional database (LMDB/RocksDB), `barely-nano` i
    - Priority **`0` (`fetch_page_scan` / `prefetch_contiguous_scan`)**: Sequentially scanned leaf pages during full-table range scans (`FrontierChecker`, `BacklogScan`, `LEDGER_RECOUNT`), ensuring background scans are reclaimed immediately on the Clock hand's first pass without evicting hot point-lookup pages used by Hart 6 (`Ledger-A`).
    - Dirty frames are **never written during eviction**, preventing partial cross-shard updates from reaching disk.
 3. **Asynchronous Dual-Area Write-Ahead Log ([`common/src/storage/wal.rs`](common/src/storage/wal.rs)):** Reserves `256 MB` (`2 × 128 MB` alternating areas) on NVMe. When a checkpoint is triggered (`wal::checkpoint_nonblocking()`), dirty pages across all 64 shards are snapshotted in parallel into staging buffers in RAM while **Hart 7 (`Ledger-C + WAL`)** asynchronously writes `[descriptor pages][data pages][commit page]` with a 64-bit checksum and boot epoch, followed by zero-copy contiguous LBA home-page runs (`apply_sorted_home_runs`). On boot, `wal::recover()` idempotently replays the latest committed batch.
-4. **64-Shard Slotted-Page B-Tree Engine ([`common/src/storage/btree.rs`](common/src/storage/btree.rs)):** Prefix-partitioned across 64 shards by the top 6 bits of `key[1]` (`(key[1] >> 2) as usize`, striped across Hart 6 Shards `0..=20`, Hart 5 Shards `21..=41`, and Hart 7 Shards `42..=63`), featuring RVV 1.0 (`+v,+zvl256b`) 8-wide Structure-of-Arrays (SoA) 32-bit key-head vector searches, direct-mapped `HOT_ACCOUNTS` / `HOT_CONF_HEIGHT` / `HOT_BLOCKS` caches and an exact in-RAM `UNCONFIRMED_ACCOUNTS` index ([`ledger_store/src/account_store.rs`](ledger_store/src/account_store.rs), [`ledger_store/src/confirmation_height_store.rs`](ledger_store/src/confirmation_height_store.rs), [`ledger_store/src/block_store.rs`](ledger_store/src/block_store.rs)), branchless 64-bit prefix binary searches, 16-page contiguous sibling read-ahead (`BTree::prefetch_child_run`), proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and zero-allocation range iterators (`next_kv_with`).
+4. **64-Shard Slotted-Page B-Tree Engine ([`common/src/storage/btree.rs`](common/src/storage/btree.rs)):** Prefix-partitioned across 64 shards by the top 6 bits of `key[1]` (`(key[1] >> 2) as usize`, striped across Hart 6 Shards `0..=20`, Hart 5 Shards `21..=41`, and Hart 7 Shards `42..=63`), featuring RVV 1.0 (`+v,+zvl256b`) 8-wide Structure-of-Arrays (SoA) 32-bit key-head vector searches, 4-way set-associative `.bss` L2 hot caches (`HOT_BLOCKS` 65,536 slots, `HOT_PENDING` 32,768 slots, `HOT_ACCOUNTS` 8,192 slots) plus `HOT_CONF_HEIGHT` (`8,192` slots), `HOT_REP_WEIGHTS` (`1,024` slots), and an exact in-RAM `UNCONFIRMED_ACCOUNTS` index ([`ledger_store/src/account_store.rs`](ledger_store/src/account_store.rs), [`ledger_store/src/confirmation_height_store.rs`](ledger_store/src/confirmation_height_store.rs), [`ledger_store/src/block_store.rs`](ledger_store/src/block_store.rs), [`ledger_store/src/pending_store.rs`](ledger_store/src/pending_store.rs)), branchless 64-bit prefix binary searches, 16-page contiguous sibling read-ahead (`BTree::prefetch_child_run`), proactive-split inserts, sibling borrow/merge deletes with embedded free-list page reclamation, and zero-allocation range iterators (`next_kv_with`).
 5. **Isolated Wallet B-Tree & Atomic Redo Journal (`WALLET_SHARD` at `WALLET_STORAGE_LBA = 786,432`):** Wallet and representative keys live in a dedicated B-Tree partition at the `384 MB` NVMe mark (`LBA 786,432 .. 819,712`, `16 MB` B-Tree + `256 KB` checksummed redo journal), strictly below `STORAGE_BASE_LBA` (`512 MB`) and enforced by compile-time assertions and runtime LBA bounds guards so wallet mutations can never overwrite or contend with a synced ledger.
 
 ### Why the Bare-Metal NVMe Ledger is ~68–86 GB vs. ~123 GB in LMDB (& Architectural Advantages)
@@ -580,7 +580,7 @@ block_processor_threshold = 16384
 [node.block_processor]
 max_peer_queue = 65536
 max_system_queue = 131072
-batch_size = 256
+batch_size = 2048
 
 [node.vote_processor]
 max_pr_queue = 16384
@@ -778,19 +778,32 @@ Every `.snap` file generated by `nvme-snapshot dump` uses a deterministic, page-
    ```
 6. Re-insert the NVMe SSD into the SpacemiT K3 Pico-ITX (with `wipe_blocks = false` in [`config.toml`](config.toml)) and boot. The node will immediately mount all 64 shards and the 64 MB `BlockBloom` filter with zero WAL recovery needed.
 
-## Network Stress Testing (`tools/nano-stress`)
+## Network Stress Testing (`tools/nano-stress`) & 10GbE Benchmark Report ([`STRESS_TEST_REPORT.md`](STRESS_TEST_REPORT.md))
 
-The repository provides a high-throughput stress testing tool (`tools/nano-stress`) to test node stability, B-Tree storage performance, and queue behavior under heavy load by generating cryptographically valid blocks and streaming them directly over TCP to port **7075**.
+The repository provides a high-throughput stress testing tool ([`tools/nano-stress`](tools/nano-stress)) to test node stability, 64-shard B-Tree storage performance, and queue behavior under heavy load by generating cryptographically valid, PoW-valid (`0xffc0000000000000`) blocks and streaming them directly over the 10GbE SFP+ link to port **7075**.
+
+Full hardware benchmark and endurance results on the SpacemiT K3 Pico-ITX (`16 GB LPDDR5`, Realtek RTL8127ATF 10GbE SFP+) are published in [`STRESS_TEST_REPORT.md`](STRESS_TEST_REPORT.md):
+
+| Benchmark Metric (`50,000`-Block Runs & 1-Hour Endurance over 10GbE SFP+) | Measured Result |
+| :--- | :---: |
+| **10GbE SFP+ Peak Wire Stream Throughput (`50k` blocks)** | **`1,722,361.2 BPS`** (`29.03 ms`) |
+| **Peak End-to-End Node Commit Rate (`10` accounts, `50k` blocks)** | **`88,613.5 BPS`** (`564.25 ms`) |
+| **Peak End-to-End Node Commit Rate (`256` accounts, `50k` blocks)** | **`77,933.7 BPS`** (`641.57 ms`) |
+| **Pure 64-Shard B-Tree Ledger Commit Rate (`prof_ledger_ms`)** | **`120,192.3 BPS`** (`8.32 µs / block`) |
+| **Pure Validator Setup & Hot-Cache Pre-Scan (`lprof_create_validator_ms`)** | **`324,675.3 BPS`** (`3.08 µs / block`) |
+| **Pure 14-Rule Consensus Validation Rate (`lprof_validate_ms`)** | **`632,911.4 BPS`** (`1.58 µs / block`) |
+| **Pure 3-Stripe Parallel B-Tree + WAL Insertion Rate (`lprof_insert_ms`)** | **`331,125.8 BPS`** (`3.02 µs / block`) |
+| **1-Hour Continuous Endurance (`3,600.3 s`, `256` accounts)** | **`+11,100,000` blocks (`11.36M` total, `0` orphans, `0` drops, `6.27 GB` B-Tree in 12 GB BPM)** |
 
 ### 1. Node Dev Network Setup
 
-To prepare the node for stress testing, set the following in [`config.toml`](config.toml) in the `NANO_NODE` boot partition:
+To prepare the node for 10GbE SFP+ stress testing, set the following in [`config.toml`](config.toml) in the `NANO_NODE` boot partition:
 
 ```toml
 [bare_metal]
 network = "dev"
 wipe_blocks = true         # Wipes NVMe B-Tree shards to start fresh from dev genesis
-ipv4_address = "192.168.1.200"
+ipv4_address = "10.10.10.2"
 
 [node]
 peering_port = 7075        # Port where blocks will be published
@@ -806,12 +819,12 @@ port = 7076
 enable_control = true
 ```
 
-Reboot the board. The node will initialize the dev ledger with `DEV_GENESIS_BLOCK` and start listening on ports `7075` (peering), `7076` (RPC), and `7078` (WebSocket).
+Reboot the board. The node will initialize the dev ledger with `DEV_GENESIS_BLOCK` and start listening on ports `7075` (peering), `7076` (RPC), `7078` (WebSocket), and `7080` (Live Web Dashboard & `/api/metrics`).
 
 ### 2. Running the Stress Test
 
 ```bash
-# Build the tool and stream default batch (1,000 blocks at 500 BPS to 192.168.1.200:7075)
+# Build the tool and stream default batch (1,000 blocks at 500 BPS to 10.10.10.2:7075)
 make run-stress
 # (or using alias)
 make stress
@@ -819,17 +832,22 @@ make stress
 # Benchmark block generation locally without network transmission (dry run)
 make run-stress ARGS="--dry-run --blocks 10000"
 
-# Stream 5,000 blocks across 10 independent accounts at a controlled rate of 500 BPS
-make run-stress ARGS="--blocks 5000 --rate 500 --accounts 10"
+# Stream 50,000 blocks across 256 independent accounts at 15,000 BPS
+make run-stress ARGS="--blocks 50000 --rate 15000 --accounts 256"
 
-# Unlimited throughput burst test across 20 independent accounts
-make run-stress ARGS="--blocks 5000 --rate 0 --accounts 20"
+# Unlimited 10GbE throughput burst test (50,000 blocks across 256 or 10 independent accounts)
+make run-stress ARGS="--blocks 50000 --rate 0 --accounts 256"
+make run-stress ARGS="--blocks 50000 --rate 500000 --accounts 10"
+
+# Continuous 1-hour (3,600s) endurance stress test
+make run-stress ARGS="--duration 3600 --rate 5000 --accounts 256 --batch-size 1000"
 ```
 
 > [!NOTE]
-> Do **not** pass `--zero-pow` when streaming to the node. The node validates block entry thresholds against dev network rules (`0xf000000000000000`). Dev PoW calculation takes only ~100 µs on x86_64, ensuring all blocks pass ledger entry criteria.
+> Do **not** pass `--zero-pow` when streaming to the node. The node validates block entry thresholds against dev network rules (`0xffc0000000000000`). Dev PoW calculation takes only ~100 µs on x86_64, ensuring all blocks pass ledger entry criteria.
 
 ## Workspace Structure
+- [`STRESS_TEST_REPORT.md`](STRESS_TEST_REPORT.md) — Hardware 10GbE SFP+ stress test & 1-hour endurance benchmark report on the SpacemiT K3 Pico-ITX (`16 GB LPDDR5`).
 - [`spacemit_k3_migration.md`](spacemit_k3_migration.md) — SpacemiT K3 Pico-ITX (`16 GB LPDDR5`) 16-hart, 64-shard bare-metal architecture reference.
 - [`config.toml`](config.toml) — Declarative TOML configuration for bare-metal network, node, bootstrap, queues, RPC, and WebSocket server.
 - [`main/`](main) — Main bare-metal binary entry point (`entry.S`, `bin.rs`) and 16-hart SMP loops.

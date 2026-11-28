@@ -1,65 +1,97 @@
 use rsnano_core::{
     utils::{BufferReader, Deserialize, MutStreamAdapter, Serialize},
-    Account, ConfirmationHeightInfo,
+    Account, BlockHash, ConfirmationHeightInfo,
 };
 use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
 use kernel_common::storage::{SHARDS, get_shard_index, SHARD_COUNT};
 use kernel_common::storage::btree::KEY_SIZE;
 
-const HOT_CONF_SLOTS: usize = 32; // 64 shards * 32 slots = 2,048 hot confirmation heights (~128 KB)
+const HOT_CONF_SLOTS: usize = 128; // 64 shards * 128 slots = 8,192 hot confirmation heights (in .bss)
 
 #[derive(Clone)]
 struct HotConfEntry {
     gen: u32,
+    present: u32,
     account: Account,
     info: ConfirmationHeightInfo,
 }
 
-static HOT_CONF_HEIGHT: [spin::Mutex<[Option<HotConfEntry>; HOT_CONF_SLOTS]>; SHARD_COUNT] =
-    [const { spin::Mutex::new([const { None }; HOT_CONF_SLOTS]) }; SHARD_COUNT];
+impl HotConfEntry {
+    const EMPTY: Self = Self {
+        gen: 0,
+        present: 0,
+        account: Account::zero(),
+        info: ConfirmationHeightInfo {
+            height: 0,
+            frontier: BlockHash::zero(),
+        },
+    };
+}
+
+static HOT_CONF_HEIGHT: [spin::Mutex<[HotConfEntry; HOT_CONF_SLOTS]>; SHARD_COUNT] =
+    [const { spin::Mutex::new([const { HotConfEntry::EMPTY }; HOT_CONF_SLOTS]) }; SHARD_COUNT];
 
 #[inline]
 fn hot_conf_slot(account: &Account) -> (usize, usize) {
     let b = account.as_bytes();
     let shard = (b[0] >> 2) as usize;
-    let slot = (u16::from_ne_bytes([b[1], b[2]]) as usize) & (HOT_CONF_SLOTS - 1);
+    let w = u32::from_ne_bytes([b[1], b[2], b[3], b[4]]);
+    let slot = (w.wrapping_mul(0x9E37_79B9) >> 25) as usize & (HOT_CONF_SLOTS - 1);
     (shard, slot)
 }
 
 #[inline]
 pub(crate) fn hot_conf_height_get(account: &Account) -> Option<ConfirmationHeightInfo> {
+    hot_conf_height_lookup(account).flatten()
+}
+
+#[inline]
+fn hot_conf_height_lookup(account: &Account) -> Option<Option<ConfirmationHeightInfo>> {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
     let (shard, slot) = hot_conf_slot(account);
     let guard = HOT_CONF_HEIGHT[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        if entry.gen == gen && entry.account == *account {
-            return Some(entry.info.clone());
-        }
+    let entry = &guard[slot];
+    if entry.gen == gen && entry.account == *account {
+        return Some(if entry.present != 0 {
+            Some(entry.info.clone())
+        } else {
+            None
+        });
     }
     None
 }
 
 #[inline]
 pub(crate) fn hot_conf_height_put(account: &Account, info: &ConfirmationHeightInfo) {
+    hot_conf_height_put_opt(account, Some(info.clone()));
+}
+
+#[inline]
+fn hot_conf_height_put_opt(account: &Account, info: Option<ConfirmationHeightInfo>) {
     let gen = kernel_common::storage::STORAGE_GEN.load(Ordering::Acquire);
     let (shard, slot) = hot_conf_slot(account);
-    HOT_CONF_HEIGHT[shard].lock()[slot] = Some(HotConfEntry {
+    let (present, val) = match info {
+        Some(i) => (1u32, i),
+        None => (
+            0u32,
+            ConfirmationHeightInfo {
+                height: 0,
+                frontier: BlockHash::zero(),
+            },
+        ),
+    };
+    HOT_CONF_HEIGHT[shard].lock()[slot] = HotConfEntry {
         gen,
+        present,
         account: *account,
-        info: info.clone(),
-    });
+        info: val,
+    };
 }
 
 #[inline]
 pub(crate) fn hot_conf_height_del(account: &Account) {
-    let (shard, slot) = hot_conf_slot(account);
-    let mut guard = HOT_CONF_HEIGHT[shard].lock();
-    if let Some(entry) = &guard[slot] {
-        if entry.account == *account {
-            guard[slot] = None;
-        }
-    }
+    hot_conf_height_put_opt(account, None);
 }
 
 pub struct BtreeConfirmationHeightStore {}
@@ -80,7 +112,7 @@ impl BtreeConfirmationHeightStore {
 
     pub fn put(&self, account: &Account, info: &ConfirmationHeightInfo) {
         let key = self.make_key(account);
-        let mut buffer = [0u8; 512];
+        let mut buffer = [0u8; 64];
         let mut adapter = MutStreamAdapter::new(&mut buffer);
         info.serialize(&mut adapter);
         let len = adapter.bytes_written();
@@ -111,26 +143,27 @@ impl BtreeConfirmationHeightStore {
 
     pub fn get(&self, account: &Account) -> Option<ConfirmationHeightInfo> {
         if !cfg!(test) {
-            if let Some(cached) = hot_conf_height_get(account) {
-                return Some(cached);
+            if let Some(cached) = hot_conf_height_lookup(account) {
+                return cached;
             }
         }
         let key = self.make_key(account);
         let shard_idx = get_shard_index(&key);
         let mut lock = SHARDS[shard_idx].lock();
+        let mut found = None;
         if let Some(db) = lock.as_mut() {
-            if let Some(Some(info)) = db.get_with(&key, |value| {
-                let mut stream = BufferReader::new(value);
-                ConfirmationHeightInfo::deserialize(&mut stream).ok()
-            }) {
-                drop(lock);
-                if !cfg!(test) {
-                    hot_conf_height_put(account, &info);
-                }
-                return Some(info);
-            }
+            found = db
+                .get_with(&key, |value| {
+                    let mut stream = BufferReader::new(value);
+                    ConfirmationHeightInfo::deserialize(&mut stream).ok()
+                })
+                .flatten();
         }
-        None
+        drop(lock);
+        if !cfg!(test) {
+            hot_conf_height_put_opt(account, found.clone());
+        }
+        found
     }
 
     pub fn exists(&self, account: &Account) -> bool {

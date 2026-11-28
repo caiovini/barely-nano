@@ -177,8 +177,8 @@ impl<'a> NetworkContext<'a> {
             let established_socket = self.sockets.remove(self.peering_handle);
             let peering_port = NET_CONFIG.lock().peering_port;
             
-            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 131072]);
-            let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 65535]);
+            let tcp_rx_buffer = TcpSocketBuffer::new(alloc::vec![0; 16777216]);
+            let tcp_tx_buffer = TcpSocketBuffer::new(alloc::vec![0; 131072]);
             let mut new_listener = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
             let _ = new_listener.listen(peering_port);
             self.peering_handle = self.sockets.add(new_listener);
@@ -198,7 +198,7 @@ impl<'a> NetworkContext<'a> {
         let timestamp = Instant::from_micros((mtime as u128 * 1_000_000 / crate::clint::FREQ as u128) as i64);
 
         match &mut self.device {
-            NetDevice::Uboot(d) => d.begin_poll(256),
+            NetDevice::Uboot(d) => d.begin_poll(512),
         }
         let progress = !matches!(
             self.iface.poll(timestamp, &mut self.device, &mut self.sockets),
@@ -462,8 +462,8 @@ pub fn init_uboot_net<'a>() -> Option<NetworkContext<'a>> {
         let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
         let tcp_handle = sockets.add(tcp_socket);
 
-        let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 131072]);
-        let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 65535]);
+        let tcp_rx_buffer_2 = TcpSocketBuffer::new(vec![0; 16777216]);
+        let tcp_tx_buffer_2 = TcpSocketBuffer::new(vec![0; 131072]);
         let mut tcp_peering = TcpSocket::new(tcp_rx_buffer_2, tcp_tx_buffer_2);
         let _ = tcp_peering.listen(net_cfg.peering_port);
         let peering_handle = sockets.add(tcp_peering);

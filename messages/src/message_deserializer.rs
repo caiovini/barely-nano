@@ -60,6 +60,109 @@ impl MessageDeserializer {
         self.next_from_slice(&mut empty)
     }
 
+    /// Vectorized 16-message `Publish(StateBlock)` fast-path deserializer.
+    /// When at least 16 contiguous 224-byte `Publish(State)` frames are present in `*input`
+    /// and no partial frame is buffered, validates headers, applies the duplicate filter,
+    /// and computes all 16 176-byte `StateBlock` Blake2b hashes simultaneously using
+    /// `StateBlock::finish_batch_16` (`blake2b::hash_batch_16`).
+    pub fn next_publish_state_batch_16(
+        &mut self,
+        input: &mut &[u8],
+    ) -> Option<[Result<DeserializedMessage, ParseMessageError>; 16]> {
+        const FRAME_LEN: usize = MessageHeader::SERIALIZED_SIZE + 216; // 8 + 216 = 224 bytes
+        if self.current_header.is_some()
+            || self.buffer.len() != self.cursor
+            || input.len() < 16 * FRAME_LEN
+        {
+            return None;
+        }
+        self.cursor = 0;
+        self.buffer.clear();
+
+        let mut headers: [MessageHeader; 16] = core::array::from_fn(|_| MessageHeader::default());
+        for i in 0..16 {
+            let base = i * FRAME_LEN;
+            let hb = &input[base..base + MessageHeader::SERIALIZED_SIZE];
+            if hb[5] != MessageType::Publish as u8 {
+                return None;
+            }
+            let Ok(hdr) = MessageHeader::deserialize_slice(hb) else {
+                return None;
+            };
+            if validate_header(&hdr, &self.protocol).is_err() {
+                return None;
+            }
+            if crate::Publish::block_type(hdr.extensions) != rsnano_core::BlockType::State {
+                return None;
+            }
+            headers[i] = hdr;
+        }
+
+        let mut digests = [0u128; 16];
+        let mut dup_err: [Option<ParseMessageError>; 16] = [const { None }; 16];
+        let mut parts: [(
+            rsnano_core::Account,
+            rsnano_core::BlockHash,
+            rsnano_core::PublicKey,
+            rsnano_core::Amount,
+            rsnano_core::Link,
+            rsnano_core::Signature,
+            rsnano_core::WorkNonce,
+        ); 16] = core::array::from_fn(|_| {
+            (
+                rsnano_core::Account::zero(),
+                rsnano_core::BlockHash::zero(),
+                rsnano_core::PublicKey::default(),
+                rsnano_core::Amount::zero(),
+                rsnano_core::Link::zero(),
+                rsnano_core::Signature::default(),
+                rsnano_core::WorkNonce::default(),
+            )
+        });
+
+        for i in 0..16 {
+            let p_start = i * FRAME_LEN + MessageHeader::SERIALIZED_SIZE;
+            let payload = &input[p_start..p_start + 216];
+            match self.filter_duplicate_messages(MessageType::Publish, payload) {
+                Ok(d) => digests[i] = d,
+                Err(e) => {
+                    dup_err[i] = Some(e);
+                    continue;
+                }
+            }
+            let acc = rsnano_core::Account::from_bytes(payload[0..32].try_into().unwrap());
+            let prev = rsnano_core::BlockHash::from_bytes(payload[32..64].try_into().unwrap());
+            let rep = rsnano_core::PublicKey::from_bytes(payload[64..96].try_into().unwrap());
+            let bal = rsnano_core::Amount::raw(u128::from_be_bytes(
+                payload[96..112].try_into().unwrap(),
+            ));
+            let link = rsnano_core::Link::from_bytes(payload[112..144].try_into().unwrap());
+            let sig = rsnano_core::Signature::from_bytes(payload[144..208].try_into().unwrap());
+            let work = u64::from_be_bytes(payload[208..216].try_into().unwrap()).into();
+            parts[i] = (acc, prev, rep, bal, link, sig, work);
+        }
+
+        *input = &input[16 * FRAME_LEN..];
+        let state_blocks = rsnano_core::StateBlock::finish_batch_16(parts);
+        let mut block_iter = state_blocks.into_iter().enumerate();
+
+        Some(core::array::from_fn(|_| {
+            let (i, sb) = block_iter.next().unwrap();
+            if let Some(err) = dup_err[i].clone() {
+                Err(err)
+            } else {
+                let is_originator =
+                    (headers[i].extensions.data & crate::Publish::ORIGINATOR_FLAG) > 0;
+                let msg = Message::Publish(crate::Publish {
+                    block: rsnano_core::Block::State(sb),
+                    digest: digests[i],
+                    is_originator,
+                });
+                Ok(DeserializedMessage::new(msg, headers[i].protocol))
+            }
+        }))
+    }
+
     /// Zero-copy, zero-allocation in-place message deserializer.
     ///
     /// When no partial message is buffered in `self.buffer`, complete messages are parsed

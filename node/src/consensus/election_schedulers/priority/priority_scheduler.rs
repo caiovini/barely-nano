@@ -40,6 +40,7 @@ pub struct PriorityScheduler {
     is_bootstrap_active: Box<dyn Fn() -> bool + Send + Sync>,
     queued_count: AtomicUsize,
     notified: AtomicBool,
+    unconfirmed_dep_cache: Mutex<[(BlockHash, Account); 512]>,
 }
 
 impl PriorityScheduler {
@@ -70,7 +71,14 @@ impl PriorityScheduler {
             is_bootstrap_active,
             queued_count: AtomicUsize::new(0),
             notified: AtomicBool::new(false),
+            unconfirmed_dep_cache: Mutex::new([(BlockHash::zero(), Account::zero()); 512]),
         }
+    }
+
+    pub fn invalidate_dep_cache(&self) {
+        self.unconfirmed_dep_cache
+            .lock()
+            .fill((BlockHash::zero(), Account::zero()));
     }
 
     pub fn stop(&self) {
@@ -156,6 +164,18 @@ impl PriorityScheduler {
             return;
         }
 
+        let dep_slot = (u16::from_ne_bytes([
+            next_unconfirmed_hash.as_bytes()[0],
+            next_unconfirmed_hash.as_bytes()[1],
+        ]) as usize)
+            & 511;
+        if !cfg!(test) {
+            let entry = self.unconfirmed_dep_cache.lock()[dep_slot];
+            if entry.0 == next_unconfirmed_hash && entry.1 == *account {
+                return;
+            }
+        }
+
         let Some(block) = any.get_block(&next_unconfirmed_hash) else {
             tracing::debug!(
                 "PriorityScheduler: next unconfirmed block {} NOT FOUND for account {} (head was {})!",
@@ -167,6 +187,9 @@ impl PriorityScheduler {
         };
 
         if !(self.is_bootstrap_active)() && !any.dependents_confirmed(&block) {
+            if !cfg!(test) {
+                self.unconfirmed_dep_cache.lock()[dep_slot] = (next_unconfirmed_hash, *account);
+            }
             self.stats
                 .inc(StatType::ElectionScheduler, DetailType::ActivateFailed);
             tracing::debug!(

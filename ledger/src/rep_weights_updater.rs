@@ -42,6 +42,9 @@ impl RepWeightsUpdater {
         representative: PublicKey,
         amount: Amount,
     ) {
+        if amount.is_zero() {
+            return;
+        }
         let previous_weight = self.store.get(&(), &representative).unwrap_or_default();
         let new_weight = previous_weight.wrapping_add(amount);
         self.put_store(&(), representative, previous_weight, new_weight);

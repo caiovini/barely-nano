@@ -67,6 +67,12 @@ pub struct PrecomputedPoint {
 }
 
 impl PrecomputedPoint {
+    pub const ZERO: Self = PrecomputedPoint {
+        yplusx: FieldElement::ZERO,
+        yminusx: FieldElement::ZERO,
+        xy2d: FieldElement::ZERO,
+    };
+
     pub const IDENTITY: Self = PrecomputedPoint {
         yplusx: FieldElement::ONE,
         yminusx: FieldElement::ONE,
@@ -210,14 +216,15 @@ pub struct PubkeyPointCache {
 
 const EMPTY_PUBKEY_CACHE: PubkeyPointCache = PubkeyPointCache {
     key: [0; 32],
-    point: Point { x: FieldElement::ZERO, y: FieldElement::ONE, z: FieldElement::ONE, t: FieldElement::ZERO },
-    neg_table_a: [PrecomputedPoint::IDENTITY; 8],
+    point: Point { x: FieldElement::ZERO, y: FieldElement::ZERO, z: FieldElement::ZERO, t: FieldElement::ZERO },
+    neg_table_a: [PrecomputedPoint::ZERO; 8],
     valid: false,
 };
 
-const PUBKEY_CACHE_SETS: usize = 16;
+const PUBKEY_CACHE_SETS: usize = 64;
 const PUBKEY_CACHE_WAYS: usize = 4;
-const COMB_CACHE_SETS: usize = 64;
+const COMB_CACHE_SETS: usize = 256;
+const COMB_CACHE_WAYS: usize = 8;
 
 const COMB_STATE_EMPTY: u8 = 0;
 const COMB_STATE_BUILDING: u8 = 1;
@@ -239,12 +246,12 @@ impl CombCacheSlot {
     const EMPTY: Self = Self {
         state: core::sync::atomic::AtomicU8::new(COMB_STATE_EMPTY),
         key: core::cell::UnsafeCell::new([0u8; 32]),
-        comb: core::cell::UnsafeCell::new([[PrecomputedPoint::IDENTITY; 8]; 16]),
+        comb: core::cell::UnsafeCell::new([[PrecomputedPoint::ZERO; 8]; 16]),
     };
 }
 
-static COMB_CACHE: [[CombCacheSlot; PUBKEY_CACHE_WAYS]; COMB_CACHE_SETS] =
-    [const { [CombCacheSlot::EMPTY; PUBKEY_CACHE_WAYS] }; COMB_CACHE_SETS];
+static COMB_CACHE: [[CombCacheSlot; COMB_CACHE_WAYS]; COMB_CACHE_SETS] =
+    [const { [CombCacheSlot::EMPTY; COMB_CACHE_WAYS] }; COMB_CACHE_SETS];
 
 #[derive(Clone, Copy)]
 struct HartPubkeyCache {
@@ -302,12 +309,11 @@ fn pubkey_cache_set(bytes: &[u8; 32]) -> usize {
 
 #[inline(always)]
 fn comb_cache_set(bytes: &[u8; 32]) -> usize {
-    ((bytes[0] as usize)
-        ^ (bytes[7] as usize).rotate_left(2)
-        ^ (bytes[15] as usize)
-        ^ (bytes[23] as usize).rotate_left(1)
-        ^ (bytes[30] as usize))
-        & (COMB_CACHE_SETS - 1)
+    let w0 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let w1 = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    let w2 = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+    let h = (w0 ^ w1.rotate_left(7) ^ w2.rotate_left(15)).wrapping_mul(0x9E37_79B9);
+    ((h >> 24) as usize) & (COMB_CACHE_SETS - 1)
 }
 
 impl PartialEq for Point {
