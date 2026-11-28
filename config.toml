@@ -7,18 +7,22 @@
 
 [bare_metal]
 # Nano network variant: "live" (NanoLiveNetwork), "beta" (NanoBetaNetwork), "dev" (NanoDevNetwork), or "test" (NanoTestNetwork)
-network = "dev"
+network = "live"
 # UART log verbosity level: "off", "error", "warn", "info", "debug", or "trace"
 log_level = "info"
 # Set to true to wipe all blocks from persistent NVMe storage and start from zero (Genesis)
-wipe_blocks = true
+wipe_blocks = false
 # Ethernet MAC address used by the U-Boot / smoltcp interface
 mac_address = "c0:74:2b:f9:15:ec"
-# Static IPv4 address and subnet prefix length (10GbE SFP+ direct link to host PC)
-ipv4_address = "10.10.10.2"
+# Static IPv4 address and subnet prefix length
+ipv4_address = "192.168.1.201"
+# Static IPv4 address for 10GbE SFP+ direct link to host PC Mellanox NIC:
+# ipv4_address = "10.10.10.2"
 ipv4_prefix_len = 24
-# Default IPv4 gateway (host PC Mellanox enp5s0f1np1)
-gateway = "10.10.10.1"
+# Default IPv4 gateway
+gateway = "192.168.1.1"
+# Default IPv4 gateway for 10GbE SFP+ direct link (host PC Mellanox enp5s0f1np1):
+# gateway = "10.10.10.1"
 # DNS resolver address
 dns_server = "192.168.1.1"
 
